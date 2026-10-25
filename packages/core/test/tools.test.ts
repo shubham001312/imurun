@@ -244,6 +244,19 @@ describe("grep tool", () => {
     expect(result.output).not.toContain("b.md")
   })
 
+  test("a bare include glob also matches files in subdirectories", async () => {
+    mkdirSync(join(dir, "src", "nested"), { recursive: true })
+    writeFileSync(join(dir, "root.ts"), "TODO root\n")
+    writeFileSync(join(dir, "src", "nested", "deep.ts"), "TODO deep\n")
+    writeFileSync(join(dir, "src", "nested", "deep.md"), "TODO prose\n")
+
+    const result = await grepTool.execute({ pattern: "TODO", include: "*.ts" }, ctx)
+    expect(result.ok).toBe(true)
+    expect(result.output).toContain("root.ts")
+    expect(result.output).toContain("src/nested/deep.ts")
+    expect(result.output).not.toContain("deep.md")
+  })
+
   test("caseInsensitive search", async () => {
     writeFileSync(join(dir, "x.txt"), "Hello World\n")
     const sensitive = await grepTool.execute({ pattern: "hello" }, ctx)

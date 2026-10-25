@@ -3,7 +3,7 @@
  * Skips binary files, ignored directories, and oversized files.
  */
 import { readdir, readFile, stat } from "node:fs/promises"
-import { join, relative } from "node:path"
+import { basename, join, relative } from "node:path"
 import type { ImurunTool } from "./types"
 import { fail, ok, optionalBoolean, optionalNumber, optionalString, requireString } from "./types"
 import { resolveToolPath } from "./read"
@@ -75,6 +75,10 @@ export const grepTool: ImurunTool = {
     }
 
     const includeGlob = include ? new Bun.Glob(include) : undefined
+    // A bare `*.ts` is a file-name pattern, not a whole-path one. Bun's glob
+    // only matches it against a basename, so a file in `src/` would otherwise
+    // be filtered out even though the docs promise `*.ts` finds it.
+    const includeWholePath = include ? /[\\/]/.test(include) : false
 
     try {
       const target = await stat(searchPath).catch(() => undefined)
@@ -94,7 +98,12 @@ export const grepTool: ImurunTool = {
         if (matches.length >= limit) break
         const rel = relative(ctx.workingDir, file).replace(/\\/g, "/")
         if (isIgnoredPath(rel)) continue
-        if (includeGlob && !includeGlob.match(rel) && !includeGlob.match(file.replace(/\\/g, "/"))) continue
+        if (includeGlob) {
+          const matchesInclude = includeWholePath
+            ? includeGlob.match(rel) || includeGlob.match(file.replace(/\\/g, "/"))
+            : includeGlob.match(basename(rel))
+          if (!matchesInclude) continue
+        }
 
         let info
         try {
