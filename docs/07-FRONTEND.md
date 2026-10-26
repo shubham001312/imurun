@@ -95,18 +95,21 @@ file), CSP `default-src 'self'`, no remote assets, model text rendered with
 ## 7. Design system
 
 Dark-first tokens (background, surface, text, muted, accent, danger,
-success), 4 px spacing scale, one radius, system font stack. Tailwind output
-vendored; GSAP only for 120-200 ms transitions and disabled under
-`prefers-reduced-motion`. Contrast AA, visible focus, `aria-live="polite"`
-for streaming text.
+success), 4 px spacing scale, one radius, vendored OFL fonts (Inter,
+Manrope, Space Grotesk; JetBrains Mono for code) with a lab switcher.
+Tailwind output vendored; GSAP only for 120-200 ms transitions and disabled
+under `prefers-reduced-motion`. Contrast AA, visible focus,
+`aria-live="polite"` for streaming text.
 
 ## 7a. Design lab (current step)
 
-`frontend/design-lab/` holds six static style variants of the chat screen
+`frontend/design-lab/` holds nine static style variants of the chat screen
 and the email Send/Cancel popup, switchable in the browser. Every style is
 only a variable block in `styles/`; layout lives in `base.css`, so the chosen
-style becomes the token source for `frontend/web/` before F3. Direct links:
-`?style=<name>` and `?style=<name>&popup=1`. See its README.
+style becomes the token source for `frontend/web/` before F3. A second
+switcher picks the text font (vendored Inter, Manrope, Space Grotesk, plus
+the style default); JetBrains Mono is used for code. Direct links:
+`?style=<name>`, `?style=<name>&popup=1`, `?font=inter`. See its README.
 
 ## 8. Input map (proposed; F-keys stay parked)
 

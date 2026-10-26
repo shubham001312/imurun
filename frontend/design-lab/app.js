@@ -1,4 +1,4 @@
-/* Theme switcher and popup demo for the design lab. */
+/* Theme + font switcher and popup demo for the design lab. */
 (function () {
   var THEMES = [
     { id: 'obsidian', file: 'styles/obsidian.css', label: 'Obsidian', note: 'dark · amber · dense' },
@@ -6,7 +6,10 @@
     { id: 'neon',     file: 'styles/neon.css',     label: 'Neon',     note: 'dark · cyan/violet · glass' },
     { id: 'slate',    file: 'styles/slate.css',    label: 'Slate',    note: 'light · cool · clean' },
     { id: 'phosphor', file: 'styles/phosphor.css', label: 'Phosphor', note: 'CRT · green · mono' },
-    { id: 'aurora',   file: 'styles/aurora.css',   label: 'Aurora',   note: 'dark · soft · rounded' }
+    { id: 'aurora',   file: 'styles/aurora.css',   label: 'Aurora',   note: 'dark · soft · rounded' },
+    { id: 'liquid',   file: 'styles/liquid.css',   label: 'Liquid',   note: 'glass · blur · pointer light' },
+    { id: 'liquid-paper', file: 'styles/liquid-paper.css', label: 'Liquid Paper', note: 'light glass · warm · serif' },
+    { id: 'liquid-slate', file: 'styles/liquid-slate.css', label: 'Liquid Slate', note: 'light glass · cool · clean' }
   ];
 
   var link = document.getElementById('theme-link');
@@ -41,6 +44,63 @@
   var wanted = fromUrl || saved;
   var start = THEMES.filter(function (t) { return t.id === wanted; })[0] || THEMES[0];
   select(start);
+
+  /* Text font - overrides the style font when chosen. */
+  var FONTS = [
+    { id: 'default', label: 'Style' },
+    { id: 'inter',   label: 'Inter' },
+    { id: 'manrope', label: 'Manrope' },
+    { id: 'grotesk', label: 'Grotesk' }
+  ];
+  var fontSwitcher = document.getElementById('font-switcher');
+  var fontButtons = {};
+
+  function applyFont(font) {
+    if (font.id === 'default') document.body.removeAttribute('data-font');
+    else document.body.dataset.font = font.id;
+    Object.keys(fontButtons).forEach(function (id) {
+      fontButtons[id].classList.toggle('active', id === font.id);
+    });
+    try { localStorage.setItem('imurun.design.font', font.id); } catch (e) { /* ignore */ }
+  }
+
+  FONTS.forEach(function (font) {
+    var b = document.createElement('button');
+    b.className = 'theme-btn';
+    b.type = 'button';
+    b.textContent = font.label;
+    b.addEventListener('click', function () { applyFont(font); });
+    fontSwitcher.appendChild(b);
+    fontButtons[font.id] = b;
+  });
+
+  var savedFont = null;
+  try { savedFont = localStorage.getItem('imurun.design.font'); } catch (e) { /* ignore */ }
+  var urlFont = null;
+  try { urlFont = new URLSearchParams(location.search).get('font'); } catch (e) { /* ignore */ }
+  var wantedFont = urlFont || savedFont;
+  var startFont = FONTS.filter(function (f) { return f.id === wantedFont; })[0] || FONTS[0];
+  applyFont(startFont);
+
+  /* Pointer light, used by the Liquid style. */
+  var glow = document.getElementById('pointer-glow');
+  var reduceMotion = false;
+  try { reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { /* ignore */ }
+  if (glow && !reduceMotion) {
+    var frame = null;
+    var px = 0;
+    var py = 0;
+    document.addEventListener('pointermove', function (event) {
+      px = event.clientX;
+      py = event.clientY;
+      if (frame) return;
+      frame = requestAnimationFrame(function () {
+        frame = null;
+        document.documentElement.style.setProperty('--px', px + 'px');
+        document.documentElement.style.setProperty('--py', py + 'px');
+      });
+    });
+  }
 
   /* Popup demo */
   var modal = document.getElementById('approval');

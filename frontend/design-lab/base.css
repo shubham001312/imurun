@@ -32,6 +32,9 @@ button { cursor: pointer; }
 .theme-btn:hover { border-color: #3b4358; color: #e2e8f0; }
 .theme-btn.active { background: #e2e8f0; border-color: #e2e8f0; color: #0b0d12; }
 .lab-note { margin-left: auto; color: #7c8698; }
+.lab-sep { width: 1px; height: 18px; background: #2a3040; flex: none; }
+.lab-label { color: #7c8698; letter-spacing: .12em; font-size: 10.5px; }
+.pointer-glow { display: none; }
 
 /* Shell */
 .shell { display: grid; grid-template-columns: 264px minmax(0, 1fr); height: calc(100vh - 44px); }

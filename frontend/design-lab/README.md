@@ -10,9 +10,9 @@ python -m http.server 8731
 Then open <http://127.0.0.1:8731/>.
 
 Direct links: `?style=neon` opens a style, `?style=paper&popup=1` opens the
-approval popup on load.
+approval popup on load, `?style=liquid&font=inter` picks the text font.
 
-## The six styles
+## The nine styles
 
 | Style | File | Direction |
 |---|---|---|
@@ -22,11 +22,21 @@ approval popup on load.
 | Slate | `styles/slate.css` | cool light, blue accent, clean SaaS |
 | Phosphor | `styles/phosphor.css` | CRT black/green, monospace, square |
 | Aurora | `styles/aurora.css` | soft gradients, glass, rounded, friendly |
+| Liquid | `styles/liquid.css` | frosted glass, specular edges, pointer light |
+| Liquid Paper | `styles/liquid-paper.css` | warm light glass, serif identity, amber accent |
+| Liquid Slate | `styles/liquid-slate.css` | cool light glass, blue accent, clean spacing |
 
 Every style sets the same variables (`--bg`, `--surface`, `--text`,
 `--muted`, `--accent`, `--line`, `--radius`, `--font`, ...). The layout and
 all components live in `base.css`; a style file is only a variable block plus
 a few flourishes.
+
+## Fonts
+
+The lab bar has a **TEXT** switcher: Style default, Inter, Manrope, Grotesk.
+All four are vendored in `fonts/` (SIL OFL) and work offline; JetBrains Mono
+is used for code. The chosen font is remembered and can be linked with
+`?font=inter`, `?font=manrope`, or `?font=grotesk`.
 
 ## Creating a new style
 
