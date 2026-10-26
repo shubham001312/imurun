@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from services.skills.store import SkillsStore
 
@@ -116,6 +117,15 @@ class SkillSafetyTests(unittest.TestCase):
         (self.root / "good.md").write_text("# Good", encoding="utf-8")
         with self.assertRaises(FileExistsError):
             self.store.create("Good", "works", "body", skill_id="good")
+
+
+    def test_a_failed_chmod_is_not_ignored_on_posix(self):
+        with mock.patch("services.skills.store.os.chmod", side_effect=OSError("no chmod")):
+            if os.name == "nt":
+                self.assertIsNotNone(self.store.create("Good", "works", "body"))
+            else:
+                with self.assertRaises(OSError):
+                    self.store.create("Good", "works", "body")
 
 
 if __name__ == "__main__":

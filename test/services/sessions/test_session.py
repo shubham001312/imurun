@@ -187,5 +187,15 @@ class SessionAllocationTests(unittest.TestCase):
         self.assertIn("allowed", marks[0][2])
 
 
+    def test_a_failed_chmod_is_not_ignored_on_posix(self):
+        root = tempfile.mkdtemp(prefix="imu-sessions-")
+        with mock.patch("services.sessions.session.os.chmod", side_effect=OSError("no chmod")):
+            if os.name == "nt":
+                self.assertIsNotNone(Session.start("hello", root=root))
+            else:
+                with self.assertRaises(OSError):
+                    Session.start("hello", root=root)
+
+
 if __name__ == "__main__":
     unittest.main()

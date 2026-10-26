@@ -37,5 +37,6 @@ Every flaw below was found by reading the code, then fixed with a test.
 | AF-10 | Low | 5 | A negative machine profile produced negative budgets | `LimitsSafetyTests` | fixed |
 | AF-11 | Low | 5 | Unregistering an unknown kill-switch id was silent | `KillSwitchUnregisterTests` | fixed |
 | AF-12 | Low | 4 | `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.htpasswd` were not protected secrets files | `test_secret_files_are_protected` | fixed |
+| AF-13 | Low | 6 | A failed `chmod` was swallowed, so a private file could silently be non-private | `test_a_failed_chmod_is_not_ignored_on_posix` (persona, sessions, skills) | fixed |
 
-**Score: 138 points → 0 open. 12 of 12 fixed, each with a passing test.**
+**Score: 144 points → 0 open. 13 of 13 fixed, each with a passing test.**

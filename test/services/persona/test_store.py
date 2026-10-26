@@ -3,6 +3,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from services.persona.store import Persona, PersonaComposer, PersonaStore
 
@@ -53,6 +54,15 @@ class PersonaStoreTests(unittest.TestCase):
         loaded = self.store.load()
         self.assertEqual(loaded.name, "Imü")
         self.assertEqual(loaded.description, "Kurz und klar.")
+
+
+    def test_a_failed_chmod_is_not_ignored_on_posix(self):
+        with mock.patch("services.persona.store.os.chmod", side_effect=OSError("no chmod")):
+            if os.name == "nt":
+                self.store.save(Persona("Imu", "Founder"))
+            else:
+                with self.assertRaises(OSError):
+                    self.store.save(Persona("Imu", "Founder"))
 
 
 class PersonaComposerTests(unittest.TestCase):

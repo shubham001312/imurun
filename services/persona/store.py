@@ -119,11 +119,13 @@ def _private_dir(path: Path) -> None:
     try:
         os.chmod(path, 0o700)
     except OSError:
-        pass
+        if os.name != "nt":
+            raise
 
 
 def _private_file(path: Path) -> None:
     try:
         os.chmod(path, 0o600)
     except OSError:
-        pass
+        if os.name != "nt":
+            raise
