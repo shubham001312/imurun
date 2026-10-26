@@ -71,6 +71,7 @@ import {
   saveResponseProfile,
   resetResponseProfile,
   messageText,
+  stripThinking,
 } from "@imurun/core"
 import type {
   AgentEvent,
@@ -100,7 +101,7 @@ import {
   loadHardware,
   removeInstalled,
 } from "@imurun/modelmgr"
-import { RuntimeManager, activeHeartbeats, describeContext, ensureLocalRuntime, findInstalled, probeAirllm, resolveLocalTarget } from "@imurun/runtime"
+import { RuntimeManager, activeHeartbeats, describeContext, ensureLocalRuntime, findInstalled, looksLikeRepo, probeAirllm, resolveLocalTarget } from "@imurun/runtime"
 import type { LocalSession } from "@imurun/runtime"
 import type {
   AgentDefinition,
@@ -121,7 +122,7 @@ import { Palette, type PaletteItem } from "./palette"
 import { buildPromptBox, caretPosition } from "./prompt"
 import { estimateToolMs, progressBar, progressFraction, progressPhrase, progressWords } from "./progress"
 import { MessageQueue, formatQueue } from "./queue"
-import { composeFrame, categoryForTool, reasoningRanges, renderTranscript, type Block, type Tone } from "./render"
+import { composeFrame, categoryForTool, reasoningRanges, renderTranscript, transcriptLineAt, type Block, type Tone } from "./render"
 import { PromptLedger, promptLedgerPath } from "@imurun/core"
 import { Screen } from "./screen"
 import { sidebarLines, tailPath, type SidebarState, type SidebarTodo } from "./sidebar"
@@ -334,6 +335,8 @@ export class TuiApp {
     viewportTop: number
     /** How many transcript lines the viewport shows. */
     viewportRows: number
+    /** The screen row the first transcript line is drawn on (slack shifts it). */
+    viewportTopRow: number
   }
   /** Which transcript line ranges belong to collapsible reasoning blocks. */
   private reasoningRanges: Array<{ index: number; start: number; end: number }> = []
@@ -1717,7 +1720,18 @@ export class TuiApp {
   private appendReasoning(delta: string): void {
     if (!this.liveReasoning || !this.blocks[this.liveReasoning.index]) {
       this.pushBlock({ kind: "reasoning", text: "", live: true, startedAt: Date.now() })
-      this.liveReasoning = { index: this.blocks.length - 1, startedAt: Date.now() }
+      let index = this.blocks.length - 1
+      // Sync: thinking belongs above the answer it produced. When a model
+      // emits a preface first, the answer block is already streaming — move
+      // the new thinking block in front of it instead of below it.
+      const answer = this.liveIndex
+      if (answer !== undefined && this.blocks[answer]?.kind === "assistant" && index === answer + 1) {
+        const [block] = this.blocks.splice(index, 1)
+        this.blocks.splice(answer, 0, block!)
+        this.liveIndex = answer + 1
+        index = answer
+      }
+      this.liveReasoning = { index, startedAt: Date.now() }
     }
     const block = this.blocks[this.liveReasoning.index]
     if (block?.kind === "reasoning") block.text += delta
@@ -1760,10 +1774,11 @@ export class TuiApp {
   private toggleReasoningClick(_x: number, y: number): boolean {
     const layout = this.frameLayout
     if (!layout || layout.viewportRows <= 0) return false
-    // Body rows run to the prompt box; the viewport is their last band.
-    const viewportFirstRow = layout.promptTop - layout.viewportRows
-    if (y < viewportFirstRow) return false
-    const line = layout.viewportTop + (y - viewportFirstRow)
+    // Map the screen row to the transcript line from the row the transcript
+    // actually starts on — slack (a short transcript) shifts it, and the old
+    // mapping ignored that, which is why early clicks missed the block.
+    const line = transcriptLineAt(layout.viewportTop, layout.viewportTopRow, y)
+    if (line === undefined) return false
     const hit = this.reasoningRanges.find((range) => line >= range.start && line <= range.end)
     if (!hit) return false
     const block = this.blocks[hit.index]
@@ -1847,14 +1862,18 @@ export class TuiApp {
     }
 
     let installed = await listInstalled()
+    let resolution = resolveLocalTarget(requested, installed)
 
-    if (installed.length === 0) {
+    // A deep model is a Hugging Face repo — it needs no GGUF on disk, so
+    // installing a quick-start model for it would be a detour the user never
+    // asked for. The engine downloads on the first answer instead.
+    const deep = resolution.target?.engine === "airllm"
+    if (installed.length === 0 && !deep) {
       const ok = await this.autoInstall()
       if (!ok) return false
       installed = await listInstalled()
+      resolution = resolveLocalTarget(requested, installed)
     }
-
-    const resolution = resolveLocalTarget(requested, installed)
     if (resolution.error) {
       this.printError(resolution.error)
       return false
@@ -2173,6 +2192,9 @@ export class TuiApp {
     if (!ref) return true
     const cloud = this.providers.list().find((p) => p.kind === "api" && ref.startsWith(`${p.id}/`))
     if (cloud) return cloud.type !== "custom" && !cloud.apiKey
+    // A Hugging Face repo (or its legacy airllm/ form) is set up by choosing
+    // it: the deep engine and the weights arrive on the first answer.
+    if (looksLikeRepo(ref)) return false
     const installed = await listInstalled()
     const name = ref.replace(/^local\//, "")
     return !installed.some((model) => model.modelId === name || model.id === name)
@@ -2340,7 +2362,45 @@ export class TuiApp {
       `downloading now \u00b7 the progress line below shows the engine, the weights and the speed \u00b7 esc stops it`,
       "info",
     )
-    return this.install(model.id, recommendedQuant)
+    const ok = await this.install(model.id, recommendedQuant)
+    if (!ok) return false
+    await this.ensureDeepEngine()
+    return true
+  }
+
+  /**
+   * The deep engine is part of the machine's setup, not a separate ritual:
+   * a model too big for memory has to work on the first try. It is idempotent
+   * — an interpreter that already imports airllm is left alone — and a failed
+   * download is a message, never a broken install. `IMURUN_SKIP_DEEP=1`
+   * opts out, and `/deep` installs it later just the same.
+   */
+  private async ensureDeepEngine(): Promise<void> {
+    if (process.env.IMURUN_SKIP_DEEP === "1") return
+    if (airllmVenvPython()) {
+      // The venv exists; the engine installer re-checks the import itself.
+      // It is skipped here so a slow import check never delays the startup.
+      return
+    }
+    this.pushNotice(
+      "setting up the deep engine \u2014 PyTorch in its own virtualenv, once, about 2.5 GB \u00b7 /deep to skip for now",
+      "info",
+    )
+    const result = await ensureAirllmEngine({
+      python: this.config.runtime.airllm.python,
+      onStatus: (line) => {
+        this.installLine = line.slice(0, 160)
+        this.scheduleRender()
+      },
+    }).catch((error) => ({ installed: false, reason: (error as Error).message }))
+    this.installLine = undefined
+    if (result.installed) {
+      this.pushNotice("the deep engine is ready \u2014 models larger than memory run now", "ok")
+    } else {
+      this.printError(
+        `the deep engine did not install: ${result.reason ?? "unknown reason"} \u2014 /deep installs it later`,
+      )
+    }
   }
 
   async install(modelId: string, quant?: QuantType): Promise<boolean> {
@@ -2575,7 +2635,7 @@ export class TuiApp {
       this.pushNotice("the deep engine is ready", "ok")
     }
 
-    await this.setModel(`airllm/${resolved}`)
+    await this.setModel(resolved)
     this.pushNotice(
       "the first answer downloads the weights and loads them layer by layer \u2014 the status line shows the progress",
       "info",
@@ -2783,7 +2843,11 @@ export class TuiApp {
       const text = typeof message.content === "string" ? message.content : ""
       if (!text.trim()) continue
       if (message.role === "user") this.pushBlock({ kind: "user", text })
-      else if (message.role === "assistant") this.pushBlock({ kind: "assistant", text: firstLine(text, 200) })
+      // Older sessions were written before thinking was split out of answers;
+      // the finalize pass keeps any surviving block out of the transcript.
+      else if (message.role === "assistant") {
+        this.pushBlock({ kind: "assistant", text: firstLine(stripThinking(text), 200) })
+      }
     }
     void this.refreshSidebar()
   }
@@ -4054,6 +4118,7 @@ export class TuiApp {
       statusRow: rows,
       viewportTop: frame.viewTop,
       viewportRows: frame.viewportRows,
+      viewportTopRow: frame.viewportTopRow,
     }
 
     screen.draw(frame.lines, frame.cursor)

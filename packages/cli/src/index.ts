@@ -7,6 +7,7 @@
  */
 import chalk from "chalk"
 import { CommandRunner } from "./framework/command"
+import { enableUtf8Console } from "@imurun/tui/console-utf8"
 import { runCommand } from "./commands/run"
 import { chatCommand } from "./commands/chat"
 import { sessionsCommand } from "./commands/sessions"
@@ -23,6 +24,10 @@ import { VERSION } from "./version"
 import { cleanupStaleExecutables, detectInstallMethod } from "@imurun/core"
 
 async function main(): Promise<number> {
+  // The console speaks UTF-8 before the first glyph is written, so neither
+  // this app's own symbols nor the model's words turn into mojibake.
+  enableUtf8Console()
+
   const argv = process.argv.slice(2)
 
   // A previous self-update renamed the old program aside; this is the first

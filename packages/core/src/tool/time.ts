@@ -64,8 +64,9 @@ export const timeTool: ImurunTool = {
   name: "time",
   description:
     "The current date and time on this machine. Use it whenever the answer depends on 'now', a deadline, " +
-    "how long ago something happened, or a date in a time zone other than the local one. Never guess the " +
-    "date or the year.",
+    "how long ago something happened, or a date in a time zone other than the local one. Pass every zone you " +
+    "need in `zones` — each zone's time comes straight from the tz database, so never convert between zones " +
+    "by arithmetic. Never guess the date or the year.",
   parameters: {
     type: "object",
     properties: {
@@ -73,18 +74,46 @@ export const timeTool: ImurunTool = {
         type: "string",
         description: "Optional IANA time zone, for example Asia/Kolkata or America/New_York.",
       },
+      zones: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          "Several IANA time zones, answered in one call — for a world clock or a meeting across cities. " +
+          "Each zone's time is read independently; no offsets are computed.",
+      },
     },
     additionalProperties: false,
   },
   title(args) {
-    const timeZone = typeof args.timeZone === "string" ? args.timeZone : ""
-    return timeZone ? `time ${timeZone}` : "time"
+    const zones = Array.isArray(args.zones)
+      ? args.zones.filter((zone): zone is string => typeof zone === "string")
+      : []
+    const one = typeof args.timeZone === "string" ? args.timeZone : ""
+    const named = zones.length > 0 ? zones.join(", ") : one
+    return named ? `time ${named}` : "time"
   },
   async execute(args) {
     const requested = optionalString(args, "timeZone")?.trim()
-    const now = new Date()
-    if (!requested) return ok(describe(now))
+    const zones = Array.isArray(args.zones)
+      ? args.zones.filter((zone): zone is string => typeof zone === "string" && zone.trim().length > 0)
+      : []
 
+    const now = new Date()
+    if (zones.length > 0) {
+      const parts: string[] = []
+      for (const zone of zones) {
+        try {
+          parts.push(describe(now, zone))
+        } catch {
+          parts.push(
+            `${zone}: unknown time zone. Use an IANA name such as Asia/Kolkata; the other zones below are still valid.`,
+          )
+        }
+      }
+      return ok(parts.join("\n\n"))
+    }
+
+    if (!requested) return ok(describe(now))
     try {
       return ok(describe(now, requested))
     } catch {

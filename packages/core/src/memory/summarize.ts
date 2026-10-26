@@ -294,6 +294,13 @@ export function digestToPrompt(digest: SessionDigest): string {
   if (digest.commands.length > 0) lines.push(`Recent commands: ${digest.commands.slice(-5).join(" | ")}.`)
   if ((digest.facts?.length ?? 0) > 0) {
     lines.push(`Facts established: ${(digest.facts ?? []).slice(-10).join("; ")}`)
+    // Facts age. Anything here that came from a web search was true when it
+    // was found, not necessarily now — the thinking step judges each one
+    // before reusing it, and the date below is how it knows how old it is.
+    lines.push(
+      `These facts were recorded on ${new Date(digest.updatedAt).toISOString().slice(0, 10)}; ` +
+        "before relying on one for a time-sensitive answer, re-check it (search again rather than reuse).",
+    )
   }
   if ((digest.keys?.length ?? 0) > 0) {
     lines.push(`Key names mentioned (never values): ${(digest.keys ?? []).slice(-8).join(", ")}.`)

@@ -369,6 +369,19 @@ export function tail(lines: string[], count: number): string[] {
 }
 
 /**
+ * The transcript line a screen row maps to, for click hit-testing.
+ *
+ * `viewportTop` is the transcript line drawn at `viewportTopRow` (the 1-based
+ * screen row where the transcript starts — slack pushes it down). A row above
+ * the viewport is outside it and returns undefined, so a click can never
+ * toggle a block it did not land on.
+ */
+export function transcriptLineAt(viewportTop: number, viewportTopRow: number, y: number): number | undefined {
+  if (y < viewportTopRow) return undefined
+  return viewportTop + (y - viewportTopRow)
+}
+
+/**
  * The visible window of the transcript. `scroll` counts lines up from the
  * bottom, so 0 is "live" (newest at the bottom) and 20 shows the region that
  * ended twenty lines ago.
@@ -428,6 +441,12 @@ export interface Frame {
   viewTop: number
   /** How many transcript lines are visible at once. */
   viewportRows: number
+  /**
+   * 1-based screen row where the first transcript line is drawn. Slack (a
+   * transcript shorter than the viewport) pushes it down from the first body
+   * row — click hit-testing needs the real row, not the body's first row.
+   */
+  viewportTopRow: number
 }
 
 /**
@@ -505,6 +524,10 @@ export function composeFrame(options: FrameOptions): Frame {
 
   const cursorRow = header.length + bodyRows + options.promptCursor.row
   const promptTop = header.length + bodyRows + 1
+  // Slack above the transcript pushes the first transcript line down the body
+  // area; that exact row is what click hit-testing maps from.
+  const slack = Math.max(viewportRows - viewport.length, 0)
+  const viewportTopRow = header.length + 1 + slack
   return {
     lines: lines.slice(0, height),
     cursor: {
@@ -514,5 +537,6 @@ export function composeFrame(options: FrameOptions): Frame {
     promptTop,
     viewTop,
     viewportRows,
+    viewportTopRow,
   }
 }

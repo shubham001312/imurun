@@ -49,6 +49,11 @@ export function airllmVenvPython(home = airllmHome()): string | undefined {
  *
  * The engine's own virtualenv wins, then an explicit setting, then whatever
  * the machine has. `py` on Windows takes `-3`; the others do not.
+ *
+ * A candidate that cannot actually run is skipped rather than returned: the
+ * Microsoft Store's `python` alias is a zero-byte stub that spawns into
+ * EFTYPE, and a low-end machine is exactly where that stub is the only
+ * "python" on PATH. One cheap `--version` probe per candidate, cached.
  */
 export function findPython(explicit?: string): PythonCommand | undefined {
   if (explicit && existsSync(explicit)) return { command: explicit, prefix: [] }
@@ -56,13 +61,40 @@ export function findPython(explicit?: string): PythonCommand | undefined {
   const venv = airllmVenvPython()
   if (venv) return { command: venv, prefix: [] }
 
+  const candidates: PythonCommand[] = []
   const python = Bun.which("python")
-  if (python) return { command: python, prefix: [] }
+  if (python) candidates.push({ command: python, prefix: [] })
   const python3 = Bun.which("python3")
-  if (python3) return { command: python3, prefix: [] }
+  if (python3) candidates.push({ command: python3, prefix: [] })
   const py = Bun.which("py")
-  if (py) return { command: py, prefix: ["-3"] }
-  return undefined
+  if (py) candidates.push({ command: py, prefix: ["-3"] })
+
+  for (const candidate of candidates) {
+    if (runsPython(candidate)) return candidate
+  }
+  return candidates[0]
+}
+
+/** Whether `python --version` runs, cached for the life of the process. */
+const pythonProbes = new Map<string, boolean>()
+
+function runsPython(candidate: PythonCommand): boolean {
+  const cached = pythonProbes.get(candidate.command)
+  if (cached !== undefined) return cached
+  let usable = false
+  try {
+    const result = Bun.spawnSync([candidate.command, ...candidate.prefix, "--version"], {
+      stdout: "ignore",
+      stderr: "ignore",
+      stdin: "ignore",
+      timeout: 5000,
+    })
+    usable = (result.exitCode ?? 1) === 0
+  } catch {
+    usable = false
+  }
+  pythonProbes.set(candidate.command, usable)
+  return usable
 }
 
 /** Writes the bundled server next to the engine, and returns its path. */
@@ -104,6 +136,37 @@ export async function probeAirllm(
   }
 }
 
+/**
+ * The command line that runs the server: the interpreter first, its launcher
+ * prefix (`-3` for the Windows `py` launcher), then the script.
+ *
+ * The interpreter used to be left out of this array, and the spawn tried to
+ * execute the Python *script* as the program — uv_spawn answered EFTYPE
+ * ("inappropriate file type or format") on every deep-model turn. The args
+ * are built here, as a pure function, so a test can hold the line.
+ */
+export function buildAirllmArgs(
+  python: PythonCommand,
+  server: string,
+  options: { modelRepo: string; modelName?: string; port: number; compression?: string; maxNewTokens?: number },
+): string[] {
+  return [
+    python.command,
+    ...python.prefix,
+    server,
+    "--model",
+    options.modelRepo,
+    "--name",
+    options.modelName ?? options.modelRepo.split("/").pop() ?? options.modelRepo,
+    "--port",
+    String(options.port),
+    "--compression",
+    options.compression ?? "4bit",
+    "--max-new-tokens",
+    String(options.maxNewTokens ?? 1024),
+  ]
+}
+
 export class AirLlmEngine implements Engine {
   readonly id = "airllm"
   readonly displayName = "AirLLM (deep, streamed from disk)"
@@ -140,20 +203,13 @@ export class AirLlmEngine implements Engine {
     }
 
     const server = await ensureAirllmServer()
-    const args = [
-      ...python.prefix,
-      server,
-      "--model",
-      options.modelRepo,
-      "--name",
-      options.modelName ?? options.modelRepo.split("/").pop() ?? options.modelRepo,
-      "--port",
-      String(options.port),
-      "--compression",
-      options.compression ?? "4bit",
-      "--max-new-tokens",
-      String(options.maxNewTokens ?? 1024),
-    ]
+    const args = buildAirllmArgs(python, server, {
+      modelRepo: options.modelRepo,
+      modelName: options.modelName,
+      port: options.port,
+      compression: options.compression,
+      maxNewTokens: options.maxNewTokens,
+    })
 
     log.info(`starting airllm on port ${options.port} for ${options.modelRepo}`)
     let logHandle: number | undefined

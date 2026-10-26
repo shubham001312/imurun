@@ -86,7 +86,7 @@ export function resolveLocalTarget(ref: string | undefined, installed: Installed
     const name = repo.replace(/\\/g, "/").replace(/\/$/, "").split("/").pop() ?? repo
     return {
       target: { modelName: name, path: "", engine: "airllm", repo },
-      modelRef: `airllm/${repo}`,
+      modelRef: repo,
     }
   }
 
@@ -111,7 +111,48 @@ export function resolveLocalTarget(ref: string | undefined, installed: Installed
   const entry = findInstalled(installed, ref)
   if (entry) return { target: targetOf(entry), modelRef: `local/${entry.modelId}` }
 
+  // A Hugging Face repo (`owner/repo`) is the deep engine — original weights,
+  // streamed from disk. There is no prefix to remember: anything shaped like
+  // a repo is one, and the engine is chosen for you. Legacy `airllm/` refs
+  // are normalised to this shape above.
+  if (looksLikeRepo(ref)) {
+    const repo = ref.replace(/\\/g, "/")
+    const name = repo.replace(/\/$/, "").split("/").pop() ?? repo
+    return {
+      target: { modelName: name, path: "", engine: "airllm", repo },
+      modelRef: repo,
+    }
+  }
+
   return { modelRef: ref }
+}
+
+/**
+ * True when a reference is shaped like a Hugging Face repo id — exactly one
+ * slash, identifier-like on both sides, and not a file path or an installed
+ * model (those resolve earlier).
+ *
+ * This is what makes the deep engine invisible: `imurun run --model
+ * Qwen/Qwen3-32B` simply works, with IMURUN choosing the engine — no
+ * `airllm/` prefix for anyone to learn.
+ */
+export function looksLikeRepo(ref: string): boolean {
+  const trimmed = ref.trim().replace(/\\/g, "/")
+  if (!trimmed || /\s/.test(trimmed)) return false
+  // Namespaced app refs are decided elsewhere (cloud providers, local models).
+  if (trimmed.startsWith("local/") || trimmed.toLowerCase().startsWith("airllm/")) return false
+  // A Windows drive path (`C:/models/x`) is a file, not a repo.
+  if (/^[a-zA-Z]:\//.test(trimmed)) return false
+  // Weights files, whatever the separator.
+  if (/\.(gguf|safetensors|bin)$/i.test(trimmed)) return false
+  const slash = trimmed.indexOf("/")
+  if (slash <= 0 || slash !== trimmed.lastIndexOf("/")) return false
+  const owner = trimmed.slice(0, slash)
+  const name = trimmed.slice(slash + 1)
+  if (!owner || !name) return false
+  // Hugging Face owners are letters, digits, dots and dashes; repo names add
+  // underscores. Anything else is a path or a typo, not a repo.
+  return /^[\w][\w.-]*$/.test(owner) && /^[\w][\w.~-]*$/.test(name)
 }
 
 function targetOf(entry: InstalledModel): LocalTarget {

@@ -22,7 +22,7 @@ import type { ToolContext } from "../tool/types"
 import { PermissionManager, type PermissionRequest } from "../permission/permission"
 import { assembleModelMessages, planCompaction, planHistoryChars } from "./context"
 import { CHARS_PER_TOKEN, DEFAULT_CONTEXT_WINDOW, MAX_MESSAGE_CHARS } from "./context"
-import { ThinkSplitter } from "./think-splitter"
+import { ReasoningSplitter, stripThinking } from "./reasoning"
 import { supportsReasoningEffort } from "../provider/registry"
 import {
   isPendingToolCall,
@@ -727,7 +727,7 @@ export class Agent {
       let scanFrom = 0
       /** The model's thinking for this step, kept apart from the answer. */
       let reasoning = ""
-      const think = new ThinkSplitter()
+      const think = new ReasoningSplitter()
       const toolCalls: ToolCall[] = []
       let stepUsage: AgentUsage = zeroUsage()
       let streamError: Error | undefined

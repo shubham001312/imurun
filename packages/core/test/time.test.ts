@@ -49,6 +49,27 @@ describe("the time tool", () => {
     expect(result.output).toContain("+05:30")
   })
 
+  test("answers several zones in one call, each from the tz database", async () => {
+    const result = await timeTool.execute(
+      { zones: ["Asia/Kolkata", "America/New_York", "Asia/Tokyo"] },
+      ctx,
+    )
+    expect(result.ok).toBe(true)
+    expect(result.output).toContain("Zone: Asia/Kolkata")
+    expect(result.output).toContain("Zone: America/New_York")
+    expect(result.output).toContain("Zone: Asia/Tokyo")
+    // One moment in time, three honest local renderings.
+    const stamps = [...result.output.matchAll(/Unix: (\d+)/g)].map((match) => match[1])
+    expect(new Set(stamps).size).toBe(1)
+  })
+
+  test("an unknown zone in a list fails alone and names the others", async () => {
+    const result = await timeTool.execute({ zones: ["Asia/Kolkata", "Mars/Olympus"] }, ctx)
+    expect(result.ok).toBe(true)
+    expect(result.output).toContain("Zone: Asia/Kolkata")
+    expect(result.output).toContain("Mars/Olympus: unknown time zone")
+  })
+
   test("an unknown zone is a clear failure, not a crash", async () => {
     const result = await timeTool.execute({ timeZone: "Mars/Olympus_Mons" }, ctx)
     expect(result.ok).toBe(false)

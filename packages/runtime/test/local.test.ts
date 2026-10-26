@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import type { InstalledModel } from "@imurun/schema"
-import { findInstalled, pickDefaultInstalled, resolveLocalTarget } from "../src"
+import { findInstalled, looksLikeRepo, pickDefaultInstalled, resolveLocalTarget } from "../src"
 
 function entry(partial: Partial<InstalledModel> & { modelId: string; quant: InstalledModel["quant"] }): InstalledModel {
   return {
@@ -75,13 +75,47 @@ describe("local model resolution", () => {
     expect(findInstalled(entries, "llama")).toBeUndefined()
   })
 
-  test("airllm/<repo> selects the deep engine with the repo intact", () => {
-    const resolution = resolveLocalTarget("airllm/Qwen/Qwen2.5-Coder-32B-Instruct", entries)
-    expect(resolution.modelRef).toBe("airllm/Qwen/Qwen2.5-Coder-32B-Instruct")
+  test("a bare repo id is the deep engine — no prefix to learn", () => {
+    const resolution = resolveLocalTarget("Qwen/Qwen2.5-Coder-32B-Instruct", entries)
+    expect(resolution.modelRef).toBe("Qwen/Qwen2.5-Coder-32B-Instruct")
     expect(resolution.target?.engine).toBe("airllm")
     expect(resolution.target?.repo).toBe("Qwen/Qwen2.5-Coder-32B-Instruct")
     expect(resolution.target?.modelName).toBe("Qwen2.5-Coder-32B-Instruct")
     expect(resolution.error).toBeUndefined()
+  })
+
+  test("the legacy airllm/<repo> prefix resolves to the same thing, stored bare", () => {
+    const resolution = resolveLocalTarget("airllm/Qwen/Qwen2.5-Coder-32B-Instruct", entries)
+    expect(resolution.modelRef).toBe("Qwen/Qwen2.5-Coder-32B-Instruct")
+    expect(resolution.target?.engine).toBe("airllm")
+    expect(resolution.target?.repo).toBe("Qwen/Qwen2.5-Coder-32B-Instruct")
+    expect(resolution.target?.modelName).toBe("Qwen2.5-Coder-32B-Instruct")
+    expect(resolution.error).toBeUndefined()
+  })
+
+  test("repo shape is strict: paths, files and app refs are not repos", () => {
+    for (const not of [
+      "C:/models/weights",
+      "models/weights.gguf",
+      "local/qwen2.5-coder-7b",
+      "airllm/Qwen/Qwen3-32B",
+      "openrouter/minimax/minimax-m3.1-flash:free",
+      "one/two/three",
+      "/leading",
+      "trailing/",
+      "has space/x",
+      "just-a-name",
+    ]) {
+      expect(looksLikeRepo(not)).toBe(false)
+    }
+    for (const repo of [
+      "Qwen/Qwen3-32B",
+      "deepseek-ai/DeepSeek-Coder-V2-Lite-Instruct",
+      "meta-llama/Llama-3.2-1B",
+      "org.name/model_name-v2",
+    ]) {
+      expect(looksLikeRepo(repo)).toBe(true)
+    }
   })
 
   test("an installed GGUF always goes to llama.cpp, never the deep engine", () => {

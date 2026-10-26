@@ -6,7 +6,8 @@
   "description": "IMURUN interactive terminal UI: chat, slash commands, agents",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./console-utf8": "./src/console-utf8.ts"
   },
   "main": "./src/index.ts",
   "module": "./src/index.ts",
