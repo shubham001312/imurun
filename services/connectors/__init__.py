@@ -3,13 +3,24 @@ from .base import ADMIN, READ, WRITE, Capability, Connector, ConnectorError, Htt
 from .gate import ConnectorGate
 from .registry import ConnectorRegistry
 from .tokens import KeyringTokenStore, MemoryTokenStore, TokenStoreUnavailable, redact
-from .providers import GitHubConnector, GmailConnector
+from .providers import (
+    CanvaConnector,
+    CloudflareConnector,
+    GitHubConnector,
+    GmailConnector,
+    RenderConnector,
+    SlackConnector,
+    SupabaseConnector,
+    VercelConnector,
+)
 
 __all__ = [
     "ADMIN",
     "READ",
     "WRITE",
+    "CanvaConnector",
     "Capability",
+    "CloudflareConnector",
     "Connector",
     "ConnectorError",
     "ConnectorGate",
@@ -19,6 +30,10 @@ __all__ = [
     "HttpTransport",
     "KeyringTokenStore",
     "MemoryTokenStore",
+    "RenderConnector",
+    "SlackConnector",
+    "SupabaseConnector",
     "TokenStoreUnavailable",
+    "VercelConnector",
     "redact",
 ]

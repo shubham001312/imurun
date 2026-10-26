@@ -97,14 +97,18 @@ Format: ID | date | decision | decided by | evidence / status
   be listed and used. | user |
 - V28 | 2026-10-26 | Persona: /persona popup sets Imurun Name, Imurun Role
   in email and an optional Description; stored privately at
-  ~/.imurun/persona.json. The model never reads the file: PersonaComposer
-  derives a sanitised directive and applies the signature by code. If asked
-  directly whether it is an assistant, it says so honestly. | user |
+  ~/.imurun/persona.json. The model never opens the file: it reads only
+  through PersonaTool, which returns a sanitised structured view and turns
+  a missing or corrupted file into configured=False with a reason instead of
+  an exception (no wasted compute or latency). PersonaComposer derives a
+  directive and applies the signature by code. If asked directly whether it
+  is an assistant, it says so honestly. | user |
 - V29 | 2026-10-26 | /connect: one adapter per provider; capabilities are
   read / write / admin. Reads run freely; writes and admin actions ask and
-  run only with per-action approval. Email is draft-first. Tokens live in
-  the OS keychain, never files or logs; every action is audited. GitHub and
-  Gmail first, then Slack, Vercel, Render, Cloudflare, Supabase, Canva.
+  run only with per-action approval. Email is draft-first: a popup asks
+  Send / Cancel and a Cancel is audited as refused. Tokens live in the OS
+  keychain, never files or logs; every action is audited. Provider order:
+  GitHub, Gmail, Slack, Vercel, Render, Cloudflare, Supabase, Canva.
   docs/06-CONNECT.md. | user |
 
 ## Process decisions (standing law)

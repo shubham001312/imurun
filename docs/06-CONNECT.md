@@ -12,12 +12,16 @@ Opened by the user only. Fields:
 
 Stored at `~/.imurun/persona.json` (`0600`, folder `0700`).
 
-**The model never reads this file.** `PersonaComposer` is the only bridge:
+**The model never reads this file.** Two controlled bridges exist:
 
-- `directive()` builds a short style instruction (name, role, behaviour,
-  honesty line) - never the raw file, never its path;
-- `apply_signature()` appends the name and role by code, not by asking the
-  model to reproduce them.
+- `PersonaTool.read()` - the only way the model may read persona data. It
+  returns a small structured view (`configured`, name, role, description)
+  and never raises: a missing or corrupted file becomes `configured=False`
+  with a reason, so a failure costs no extra turn, compute or latency. The
+  view never carries the path;
+- `PersonaComposer` - `directive()` builds a short style instruction (name,
+  role, behaviour, honesty line) and `apply_signature()` appends the name and
+  role by code, not by asking the model to reproduce them.
 
 ## `/connect`
 
@@ -30,14 +34,15 @@ One adapter per provider with a common shape (`connect`, `status`, `read`,
 | write | ask; runs only with per-action approval |
 | admin | ask; runs only with per-action approval |
 
-First providers: GitHub and Gmail. Next: Slack, Vercel, Render, Cloudflare,
-Supabase, Canva.
+Adapters: GitHub, Gmail, Slack, Vercel, Render, Cloudflare, Supabase, Canva.
+OAuth start flows and the `/connect` popup come with the server/UI.
 
 ### Safety defaults (approved)
 
 - Every outbound action is ask by default (V4).
-- Email is draft-first: read -> draft in the user's voice -> user approves ->
-  send. Nothing sends without approval.
+- Email is draft-first: read -> draft in the user's voice -> a popup asks
+  **Send / Cancel** -> only Send sends. Nothing sends without that decision,
+  and a Cancel is audited as `refused`, not silently dropped.
 - If someone asks directly whether they are talking to an assistant, the
   assistant says so honestly. It never claims to be a human.
 - OAuth tokens live in the OS keychain (`KeyringTokenStore`); no plain-file
@@ -54,6 +59,8 @@ POST /api/connectors/{id}/connect    -> OAuth start (user gesture only)
 POST /api/connectors/{id}/disconnect
 POST /api/connectors/{id}/actions/{action}
      body: {params, approved:false}  -> ask / deny / result
+     write/admin without approved -> ask (the popup), never a run
+     gmail send -> popup Send / Cancel -> approved true/false
 GET  /api/persona                    -> {name,email_role,description}
 PUT  /api/persona                    -> save (user gesture only)
 ```
