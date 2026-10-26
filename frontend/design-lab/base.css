@@ -206,12 +206,6 @@ textarea {
 }
 .mode.active { background: var(--accent-soft); color: var(--accent); }
 .meta-divider { width: 1px; height: 14px; background: var(--line); }
-.scope-list { display: inline-flex; align-items: center; gap: 4px; }
-.scope {
-  font: 9.5px/1 var(--mono); color: var(--muted);
-  border: 1px solid var(--line); border-radius: 999px; padding: 3px 7px;
-  background: rgba(255, 255, 255, .30);
-}
 .effort {
   border: 0; background: transparent; color: var(--muted);
   font: 9.5px/1 var(--mono); letter-spacing: .04em; padding: 4px 2px;

@@ -172,27 +172,14 @@
     updatePromptCaret();
   }
 
-  /* Mode, scopes and model effort in the composer strip. */
+  /* Mode and model effort in the composer strip. */
   var modeButtons = document.querySelectorAll('.mode');
-  var scopeList = document.getElementById('scope-list');
   var effort = document.getElementById('effort');
-  var scopesByMode = {
-    plan: ['read', 'search', 'web'],
-    build: ['read', 'write', 'shell']
-  };
   function setMode(mode) {
     modeButtons.forEach(function (button) {
       var active = button.dataset.mode === mode;
       button.classList.toggle('active', active);
       button.setAttribute('aria-pressed', active ? 'true' : 'false');
-    });
-    if (!scopeList) return;
-    scopeList.textContent = '';
-    (scopesByMode[mode] || []).forEach(function (scope) {
-      var chip = document.createElement('span');
-      chip.className = 'scope';
-      chip.textContent = scope;
-      scopeList.appendChild(chip);
     });
   }
   modeButtons.forEach(function (button) {

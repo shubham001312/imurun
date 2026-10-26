@@ -52,8 +52,7 @@ The prompt starts at two lines, grows to five as you type, then scrolls with
 the wheel or trackpad. Its scrollbar is hidden, and focus is shown by the
 caret rather than a yellow ring. The caret is a 3px accent bar, not the
 native 1px line. Ctrl+A (Cmd+A on macOS) selects only the prompt text. The
-left side of the action row shows Plan/Build, the mode's selected scopes, and
-the model effort.
+left side of the action row shows Plan/Build and the model effort.
 
 ## Creating a new style
 

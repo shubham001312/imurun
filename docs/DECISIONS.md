@@ -155,6 +155,8 @@ Format: ID | date | decision | decided by | evidence / status
   until the mode API is designed. The backend must enforce scopes (V4). | user |
 - V43 | 2026-10-27 | Composer caret: a 3px accent bar drawn over the textarea;
   the native 1px caret is hidden. | user |
+- V44 | 2026-10-27 | Composer strip: mode and model effort only; the scope
+  chips are not shown. Scopes stay a backend concern (V4). | user |
 
 ## Process decisions (standing law)
 

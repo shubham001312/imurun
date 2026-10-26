@@ -65,8 +65,6 @@
     '              <button class="mode active" type="button" data-mode="build" aria-pressed="true">Build</button>',
     '            </div>',
     '            <span class="meta-divider" aria-hidden="true"></span>',
-    '            <span class="scope-list" id="scope-list" aria-label="Selected scopes"></span>',
-    '            <span class="meta-divider" aria-hidden="true"></span>',
     '            <button class="effort" id="effort" type="button" title="Model effort">Effort <strong>Balanced</strong></button>',
     '          </div>',
     '          <div class="composer-buttons">',

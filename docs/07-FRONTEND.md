@@ -40,9 +40,9 @@ headless.
 Chat rules: Enter sends, Shift+Enter adds a line; a queued prompt shows as
 "queued - delivered at the next step"; the stop button is always reachable;
 no model name is ever shown. The composer strip shows the mode (Plan/Build)
-with that mode's selected scopes and the model effort. These are display
-fields in the lab only: when the turn API carries them, the backend must
-enforce the scopes (V4), never the UI.
+and the model effort. These are display fields in the lab only: when the turn
+API carries mode, scopes and effort, the backend must enforce the scopes
+(V4), never the UI.
 
 ## 4. Popups
 
