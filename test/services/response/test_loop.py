@@ -98,6 +98,16 @@ class LoopTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AgentLoop(FakeModel(), max_steps=0)
 
+    def test_close_detaches_the_loop_from_the_kill_switch(self):
+        kill = KillSwitch()
+        loop = AgentLoop(
+            FakeModel(), queue=self.queue, audit=self.audit, kill=kill, session_id="s1"
+        )
+        loop.run("hi")
+        loop.close()
+        self.assertEqual(kill.fire(), [])
+        loop.close()  # closing twice is safe
+
 
 if __name__ == "__main__":
     unittest.main()

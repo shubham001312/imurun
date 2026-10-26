@@ -129,6 +129,11 @@ Format: ID | date | decision | decided by | evidence / status
   in the background; zero npm packages at runtime. | user |
 - V34 | 2026-10-26 | Turn events stream over SSE on the loopback API
   (tokens, thinking, tool, queue, turn-end, status). | user |
+- V35 | 2026-10-26 | Backend API: the static shell injects the per-run token;
+  `Host` must be loopback; SSE is an authenticated fetch stream because
+  `EventSource` cannot send a bearer token; transcripts are per-session
+  JSONL; turns run in worker threads and cancel at a loop boundary; the
+  model is injected, so without FISH a turn is an honest 503. | assistant |
 
 ## Process decisions (standing law)
 

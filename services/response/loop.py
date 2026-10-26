@@ -59,11 +59,24 @@ class AgentLoop:
         self._max_steps = max_steps
         self._session_id = session_id
         self._stopped = False
-        if kill is not None:
+        self._kill = kill
+        self._kill_id = (
             kill.register(f"agent-loop:{id(self)}", self.stop)
+            if kill is not None
+            else None
+        )
 
     def stop(self) -> None:
         self._stopped = True
+
+    def close(self) -> None:
+        """Detach from the kill switch so long-lived servers do not leak stops."""
+        if self._kill is None or self._kill_id is None:
+            return
+        kill = self._kill
+        stop_id = self._kill_id
+        self._kill_id = None
+        kill.unregister(stop_id)
 
     def run(self, prompt: str) -> LoopResult:
         if not prompt or not prompt.strip():

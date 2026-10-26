@@ -28,7 +28,7 @@ The other documents in docs/ (tools.md, models.md, ...) describe the released
 | powers/     | Python     | APPROVED (shape) - function list not yet drafted |
 | monitor/    | Python     | APPROVED (shape) - function list not yet drafted |
 | providers/  | Python     | APPROVED (shape) - function list not yet drafted |
-| server/     | Python     | IN BUILD - loopback API: token gate, body cap, persona/connectors/prompts/sessions |
+| server/     | Python     | IN BUILD - loopback API complete (token, Host, static shell, SSE, turns, sessions, skills, connect, OAuth callback, bootstrap); FISH model client absent |
 | frontend/sections/ | JS  | IN BUILD - plan approved (docs/07); F1 core next |
 | frontend/input/    | JS  | IN BUILD - input map proposed; F-keys parked |
 | rules/      | documents  | APPROVED - drafts pending user review |

@@ -63,6 +63,10 @@ class PromptQueue:
         with self._lock:
             return any(item.session_id == session_id for item in self._pending)
 
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
     def drain(self, session_id: str) -> list[QueuedPrompt]:
         """Deliver every waiting message for this session, in arrival order."""
         with self._condition:

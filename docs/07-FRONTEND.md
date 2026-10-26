@@ -56,30 +56,51 @@ One modal at a time, focus trapped, Esc = cancel. Cancel never approves.
 The approval result is `{approved: true|false}` sent with the action call.
 Keyboard: Esc always cancels; Enter activates only the focused button.
 
-## 5. API work still needed
+## 5. API surface (implemented, F2)
 
-Existing: `/health`, `/api/persona`, `/api/connectors`, connector actions,
-`/api/prompts`, `/api/sessions`.
-
-Add (server layer, with Python tests):
+The loopback server now implements:
 
 ```text
 GET  /                      static shell; per-run token in a meta tag
-GET  /api/status            server + model + runtime state
-GET  /api/events            SSE: token, thinking, tool, queue, turn-end, status
-POST /api/turns             {session_id, prompt} -> {turn_id}
-POST /api/turns/{id}/cancel
-GET  /api/sessions/{id}/messages
-POST /api/sessions/{id}/rename
+GET  /health                liveness
+GET  /api/status            server, queue, sessions, connectors, model/runtime
+GET  /api/events            SSE over an authenticated fetch stream
+GET  /api/persona           persona view
+PUT  /api/persona           save name, email role, description
+GET  /api/connectors        provider cards
+POST /api/connectors/{id}/actions/{action}
 POST /api/connectors/{id}/connect   -> {url, state}
-GET  /oauth/callback        state + code -> connected
+GET  /oauth/callback        one-time state + code -> connected
+POST /api/prompts           queue a prompt for a running session
+GET  /api/sessions          session identities
+POST /api/sessions          {first_command} -> identity
+GET  /api/sessions/{id}/messages?limit=
+POST /api/sessions/{id}/rename
 GET/POST /api/skills
+POST /api/turns             {session_id, text|prompt} -> {turn_id}
+GET  /api/turns/{id}
+POST /api/turns/{id}/cancel
 ```
 
-Security: loopback bind, `Host` must be `127.0.0.1:<port>`, per-run bearer
-token (web: meta tag kept in memory, never localStorage; TUI: 0600 runtime
-file), CSP `default-src 'self'`, no remote assets, model text rendered with
-`textContent` only.
+SSE frames are `event: <type>\ndata: <json>\n\n`, with `retry: 3000`
+first and a `: ping` comment every 15s. Implemented events:
+`turn.start`, `step.start`, `step`, `queue`, `turn.end`, `turn.error`.
+`token`, `thinking` and `tool` events are reserved: the model client is
+non-streaming today, so a step arrives whole. They will be emitted when the
+FISH engine streams tokens; the frame shape will not change.
+
+The client must use `fetch` + `ReadableStream` for SSE because `EventSource`
+cannot send the bearer token. No token is ever placed in a URL, a log, or
+`localStorage`.
+
+Security: loopback bind, `Host` must be a loopback name, per-run bearer
+token (web: meta tag kept in memory; TUI: 0600 runtime file written by
+`services/server/app.py`), CSP `default-src 'self'`, no remote assets,
+model text rendered with `textContent` only. Static paths resolve under the
+shell root; traversal is a 404. Transcripts are per-session JSONL; a corrupt
+line is marked and skipped. A turn runs in a worker thread, is marked on
+failure, and can be cancelled at a loop boundary. Without a model (FISH not
+yet present) `POST /api/turns` answers an honest 503.
 
 ## 6. State and rendering
 
