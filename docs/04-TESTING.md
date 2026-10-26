@@ -27,6 +27,17 @@ Rules for the folder:
   print as skipped with a reason.
 - No push without a green gate (standing user requirement).
 
+## Runner output
+
+`python test/run.py` is the only gate entry point. On a terminal it shows a
+rotating wheel with the current test, `done/total`, and elapsed time; logs
+clear the wheel, print, and resume it. On a non-TTY (CI log, pipe) it prints
+periodic `[done/total]` lines instead, so build logs stay readable. `-v`
+logs every test; failures always log their test id, duration, and the full
+traceback after the summary. The final block lists pass/fail/error/skip
+counts and the five slowest tests. `--no-spinner` disables the wheel even on
+a TTY. Zero tests and any skip are still failures.
+
 ## Staging (V13)
 
 There is NO staging push. Work is developed locally, demonstrated to the
