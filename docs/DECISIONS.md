@@ -149,6 +149,10 @@ Format: ID | date | decision | decided by | evidence / status
   with the wheel/trackpad; the scrollbar stays hidden. | user |
 - V41 | 2026-10-27 | Composer: Ctrl+A (Cmd+A on macOS) selects only the prompt
   text, never the page. | user |
+- V42 | 2026-10-27 | Composer strip: show the mode (Plan/Build) with its
+  selected scopes and the model effort. The lab uses Plan = read/search/web,
+  Build = read/write/shell, effort Low/Balanced/High; names are placeholders
+  until the mode API is designed. The backend must enforce scopes (V4). | user |
 
 ## Process decisions (standing law)
 

@@ -111,6 +111,45 @@
     resizePrompt();
   }
 
+  /* Mode, scopes and model effort in the composer strip. */
+  var modeButtons = document.querySelectorAll('.mode');
+  var scopeList = document.getElementById('scope-list');
+  var effort = document.getElementById('effort');
+  var scopesByMode = {
+    plan: ['read', 'search', 'web'],
+    build: ['read', 'write', 'shell']
+  };
+  function setMode(mode) {
+    modeButtons.forEach(function (button) {
+      var active = button.dataset.mode === mode;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    if (!scopeList) return;
+    scopeList.textContent = '';
+    (scopesByMode[mode] || []).forEach(function (scope) {
+      var chip = document.createElement('span');
+      chip.className = 'scope';
+      chip.textContent = scope;
+      scopeList.appendChild(chip);
+    });
+  }
+  modeButtons.forEach(function (button) {
+    button.addEventListener('click', function () { setMode(button.dataset.mode); });
+  });
+  if (modeButtons.length) {
+    var activeMode = document.querySelector('.mode.active');
+    setMode(activeMode ? activeMode.dataset.mode : 'build');
+  }
+  var efforts = ['Low', 'Balanced', 'High'];
+  var effortIndex = 1;
+  if (effort) {
+    effort.addEventListener('click', function () {
+      effortIndex = (effortIndex + 1) % efforts.length;
+      effort.querySelector('strong').textContent = efforts[effortIndex];
+    });
+  }
+
   /* Pointer light, used by the Liquid style. */
   var glow = document.getElementById('pointer-glow');
   var reduceMotion = false;
