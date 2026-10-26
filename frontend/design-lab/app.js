@@ -111,6 +111,67 @@
     resizePrompt();
   }
 
+  /* The native caret is one pixel; draw a 3px accent bar in its place. */
+  var inputWrap = document.querySelector('.input-wrap');
+  var promptCaret = document.getElementById('prompt-caret');
+  if (prompt && inputWrap && promptCaret) {
+    var mirror = document.createElement('div');
+    mirror.className = 'prompt-mirror';
+    mirror.setAttribute('aria-hidden', 'true');
+    inputWrap.appendChild(mirror);
+    var marker = document.createElement('span');
+    marker.className = 'caret-marker';
+    var updatePromptCaret = function () {
+      if (document.activeElement !== prompt || prompt.selectionStart !== prompt.selectionEnd) {
+        promptCaret.style.display = 'none';
+        return;
+      }
+      var style = window.getComputedStyle(prompt);
+      var line = parseFloat(style.lineHeight);
+      if (!line || isNaN(line)) line = (parseFloat(style.fontSize) || 15) * 1.5;
+      mirror.style.font = style.font;
+      mirror.style.lineHeight = style.lineHeight;
+      mirror.style.padding = style.padding;
+      mirror.style.border = style.border;
+      mirror.style.letterSpacing = style.letterSpacing;
+      mirror.style.wordSpacing = style.wordSpacing;
+      mirror.style.width = prompt.clientWidth + 'px';
+      mirror.style.left = prompt.offsetLeft + 'px';
+      mirror.style.top = prompt.offsetTop + 'px';
+      mirror.textContent = '';
+      mirror.appendChild(document.createTextNode(prompt.value.slice(0, prompt.selectionStart)));
+      mirror.appendChild(marker);
+      var markerRect = marker.getBoundingClientRect();
+      var wrapRect = inputWrap.getBoundingClientRect();
+      var wrapStyle = window.getComputedStyle(inputWrap);
+      var originX = wrapRect.left + parseFloat(wrapStyle.borderLeftWidth);
+      var originY = wrapRect.top + parseFloat(wrapStyle.borderTopWidth);
+      var markerHeight = markerRect.height || parseFloat(style.fontSize) || 15;
+      var left = markerRect.left - originX;
+      var top = markerRect.top - originY - prompt.scrollTop - (line - markerHeight) / 2;
+      if (top < prompt.offsetTop - 1 || top + line > prompt.offsetTop + prompt.clientHeight + 1) {
+        promptCaret.style.display = 'none';
+        return;
+      }
+      top = Math.max(top, prompt.offsetTop);
+      promptCaret.style.display = 'block';
+      promptCaret.style.left = left + 'px';
+      promptCaret.style.top = top + 'px';
+      promptCaret.style.height = line + 'px';
+    };
+    prompt.addEventListener('input', updatePromptCaret);
+    prompt.addEventListener('keyup', updatePromptCaret);
+    prompt.addEventListener('click', updatePromptCaret);
+    prompt.addEventListener('select', updatePromptCaret);
+    prompt.addEventListener('scroll', updatePromptCaret);
+    prompt.addEventListener('focus', updatePromptCaret);
+    prompt.addEventListener('compositionupdate', updatePromptCaret);
+    prompt.addEventListener('blur', function () { promptCaret.style.display = 'none'; });
+    window.addEventListener('resize', updatePromptCaret);
+    inputWrap.classList.add('custom-caret');
+    updatePromptCaret();
+  }
+
   /* Mode, scopes and model effort in the composer strip. */
   var modeButtons = document.querySelectorAll('.mode');
   var scopeList = document.getElementById('scope-list');

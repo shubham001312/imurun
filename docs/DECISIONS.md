@@ -153,6 +153,8 @@ Format: ID | date | decision | decided by | evidence / status
   selected scopes and the model effort. The lab uses Plan = read/search/web,
   Build = read/write/shell, effort Low/Balanced/High; names are placeholders
   until the mode API is designed. The backend must enforce scopes (V4). | user |
+- V43 | 2026-10-27 | Composer caret: a 3px accent bar drawn over the textarea;
+  the native 1px caret is hidden. | user |
 
 ## Process decisions (standing law)
 

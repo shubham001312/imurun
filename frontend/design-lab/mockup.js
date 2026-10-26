@@ -57,6 +57,7 @@
     '    <footer class="composer">',
     '      <div class="input-wrap">',
     '        <textarea rows="2" placeholder="Message Imurun&hellip;  (Enter to send, Shift+Enter for a new line)"></textarea>',
+    '        <span class="prompt-caret" id="prompt-caret" aria-hidden="true"></span>',
     '        <div class="composer-actions">',
     '          <div class="composer-meta">',
     '            <div class="mode-switch" role="group" aria-label="Mode">',

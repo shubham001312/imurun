@@ -158,9 +158,23 @@ button { cursor: pointer; }
 /* Composer - quiet border; focus is shown by the caret, not a yellow ring. */
 .composer { padding: 14px 20px 18px; background: var(--surface); border-top: 1px solid var(--line); }
 .input-wrap {
+  position: relative;
   padding: 10px 12px 8px; background: var(--surface-2);
   border: 1px solid var(--line-strong); border-radius: var(--radius);
 }
+.prompt-caret {
+  position: absolute; z-index: 2; width: 3px; border-radius: 1px;
+  background: var(--accent); pointer-events: none; display: none;
+  animation: prompt-caret-blink 1.1s steps(2, start) infinite;
+}
+.input-wrap.custom-caret textarea { caret-color: transparent; }
+.prompt-mirror {
+  position: absolute; visibility: hidden; pointer-events: none;
+  white-space: pre-wrap; overflow-wrap: break-word; word-wrap: break-word;
+  overflow: hidden; z-index: -1;
+}
+.caret-marker { display: inline-block; width: 0; height: 1em; }
+@keyframes prompt-caret-blink { 50% { opacity: 0; } }
 textarea {
   display: block;
   width: 100%; min-height: 44px; resize: none; border: 0; outline: 0;
