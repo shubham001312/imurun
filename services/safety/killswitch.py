@@ -1,4 +1,10 @@
-"""G-6 KillSwitch: one command stops everything, and every stop is marked."""
+"""G6 KillSwitch: one command stops everything, and every stop is marked.
+
+Stops are identified by id, so two parts sharing a name (two streams, two
+engines) both stop; a duplicate can never silently replace another (C-05).
+Every stop - success or failure - is written through mark() (H-26), and a
+non-callable is rejected at register time, not during the emergency (M-30).
+"""
 from __future__ import annotations
 
 import threading
@@ -8,6 +14,7 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class StopResult:
+    id: int
     name: str
     ok: bool
     error: str | None = None
@@ -15,34 +22,50 @@ class StopResult:
 
 class KillSwitch:
     def __init__(self, mark: Callable[[str, str, str], object] | None = None) -> None:
-        self._stops: dict[str, Callable[[], object]] = {}
+        self._stops: list[tuple[int, str, Callable[[], object]]] = []
+        self._next_id = 1
         self._mark = mark
         self._lock = threading.Lock()
 
-    def register(self, name: str, stop: Callable[[], object]) -> None:
+    def register(self, name: str, stop: Callable[[], object]) -> int:
+        """Register a stop and return its id. Raises on a non-callable."""
+        if not callable(stop):
+            raise TypeError(f"stop for {name!r} is not callable")
         with self._lock:
-            self._stops[name] = stop
+            stop_id = self._next_id
+            self._next_id += 1
+            self._stops.append((stop_id, name, stop))
+            return stop_id
 
-    def unregister(self, name: str) -> None:
+    def unregister(self, stop_id: int) -> None:
         with self._lock:
-            self._stops.pop(name, None)
+            self._stops = [entry for entry in self._stops if entry[0] != stop_id]
 
     def fire(self) -> list[StopResult]:
         """Stop everything registered. A failing stop is recorded, never
         silently skipped (V9), and the remaining stops still run."""
         with self._lock:
-            stops = list(self._stops.items())
+            stops = list(self._stops)
         results: list[StopResult] = []
-        for name, stop in stops:
+        for stop_id, name, stop in stops:
             try:
                 stop()
-                results.append(StopResult(name=name, ok=True))
+                result = StopResult(id=stop_id, name=name, ok=True)
             except Exception as exc:  # noqa: BLE001 - one failure must not stop the rest
-                message = f"{type(exc).__name__}: {exc}"
-                results.append(StopResult(name=name, ok=False, error=message))
-                if self._mark is not None:
-                    try:
-                        self._mark("G6-killswitch", name, message)
-                    except Exception:  # noqa: BLE001 - marking must never break the kill
-                        pass
+                result = StopResult(
+                    id=stop_id,
+                    name=name,
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            results.append(result)
+            if self._mark is not None:
+                try:
+                    self._mark(
+                        "G6-killswitch",
+                        name,
+                        "stopped" if result.ok else (result.error or "failed"),
+                    )
+                except Exception:  # noqa: BLE001 - marking must never break the kill
+                    pass
         return results
