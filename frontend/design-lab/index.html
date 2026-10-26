@@ -9,17 +9,9 @@
   <link id="theme-link" rel="stylesheet" href="styles/liquid-paper.css" />
 </head>
 <body data-theme="liquid-paper" data-font="manrope">
-  <div class="labbar">
-    <strong>DESIGN LAB</strong>
-    <div id="theme-switcher" class="theme-switcher"></div>
-    <span class="lab-sep"></span>
-    <span class="lab-label">TEXT</span>
-    <div id="font-switcher" class="theme-switcher"></div>
-    <span id="lab-note" class="lab-note"></span>
-  </div>
   <div class="pointer-glow" id="pointer-glow"></div>
   <div id="app"></div>
-  <div class="toast" id="toast" hidden></div>
+  <div class="notifications" id="notifications" role="region" aria-label="Notifications" aria-live="polite"></div>
   <script src="mockup.js"></script>
   <script src="app.js"></script>
 </body>

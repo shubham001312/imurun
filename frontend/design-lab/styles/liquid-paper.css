@@ -33,6 +33,13 @@ body {
     radial-gradient(800px 600px at 90% 16%, rgba(244, 114, 182, .16), transparent 62%),
     radial-gradient(900px 700px at 50% 106%, rgba(56, 189, 248, .12), transparent 62%),
     var(--bg);
+  animation: paper-wash 34s ease-in-out infinite alternate;
+}
+@keyframes paper-wash {
+  0% { background-position: 0% 0%, 100% 0%, 50% 100%; }
+  35% { background-position: 9% 7%, 91% 9%, 57% 93%; }
+  70% { background-position: 2% 12%, 97% 3%, 43% 96%; }
+  100% { background-position: 11% 2%, 87% 14%, 53% 89%; }
 }
 body::before {
   content: "";
@@ -45,7 +52,7 @@ body::before {
     radial-gradient(closest-side, rgba(251, 191, 36, .40), transparent 70%) 18% 24% / 40% 40% no-repeat,
     radial-gradient(closest-side, rgba(244, 114, 182, .26), transparent 70%) 80% 20% / 44% 44% no-repeat,
     radial-gradient(closest-side, rgba(56, 189, 248, .20), transparent 70%) 62% 88% / 38% 38% no-repeat;
-  animation: drift 28s ease-in-out infinite alternate;
+  animation: drift 22s ease-in-out infinite alternate;
 }
 body::after {
   content: "";
@@ -60,9 +67,12 @@ body::after {
   -webkit-mask-image: radial-gradient(85% 75% at 50% 40%, #000 25%, transparent 78%);
 }
 @keyframes drift {
-  to { transform: translate3d(3%, -2%, 0) scale(1.08); }
+  0% { transform: translate3d(-4%, 2%, 0) scale(1.02); }
+  50% { transform: translate3d(5%, -3%, 0) scale(1.10); }
+  100% { transform: translate3d(-2%, 6%, 0) scale(1.04); }
 }
 @media (prefers-reduced-motion: reduce) {
+  body { animation: none; }
   body::before { animation: none; }
 }
 
@@ -90,6 +100,18 @@ body::after {
   background: linear-gradient(180deg, rgba(255, 252, 246, .62), rgba(255, 252, 246, .38));
   backdrop-filter: blur(26px) saturate(150%);
   -webkit-backdrop-filter: blur(26px) saturate(150%);
+}
+.composer {
+  background: transparent;
+  border-top: 0;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.composer .input-wrap {
+  box-shadow:
+    0 24px 60px rgba(80, 60, 30, .18),
+    inset 0 1px 0 rgba(255, 255, 255, .95),
+    inset 0 -1px 0 rgba(120, 90, 50, .06);
 }
 
 .bubble,
@@ -130,6 +152,23 @@ body::after {
   background: linear-gradient(150deg, rgba(255, 252, 246, .94), rgba(255, 249, 240, .90));
   backdrop-filter: blur(34px) saturate(140%);
   -webkit-backdrop-filter: blur(34px) saturate(140%);
+}
+.notification {
+  backdrop-filter: blur(28px) saturate(150%);
+  -webkit-backdrop-filter: blur(28px) saturate(150%);
+}
+.notif-title {
+  font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+  font-size: 16px; letter-spacing: 0;
+}
+.page-title, .settings-section-title {
+  font-family: Georgia, "Iowan Old Style", "Times New Roman", serif;
+}
+.page-title { font-size: 30px; letter-spacing: -.01em; }
+.panel {
+  background: linear-gradient(145deg, rgba(255, 255, 255, .52), transparent 66%), var(--surface-2);
+  backdrop-filter: blur(20px) saturate(130%);
+  -webkit-backdrop-filter: blur(20px) saturate(130%);
 }
 .thinking p { background: rgba(255, 255, 255, .50); }
 

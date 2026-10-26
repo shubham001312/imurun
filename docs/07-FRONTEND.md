@@ -32,32 +32,52 @@ headless.
 |---|---|---|
 | Chat (main) | transcript (user / assistant / collapsed thinking / tool events), composer, queue badge, stop button, status line | `POST /api/turns`, `GET /api/events` (SSE), `POST /api/turns/{id}/cancel` |
 | Sessions | readable id + name, rename, new, per-session memory note | `GET /api/sessions`, `GET /api/sessions/{id}/messages`, `POST /api/sessions/{id}/rename` |
-| Connect | 8 provider cards, connected state, connect / disconnect, action approval | `GET /api/connectors`, `POST /api/connectors/{id}/connect`, `GET /oauth/callback`, `POST /api/connectors/{id}/actions/{action}` |
+| Connect | 8 provider cards (Gmail, GitHub, Slack, Vercel, Render, Cloudflare, Supabase, Canva) with brand icons, connected state, connect / disconnect, action approval | `GET /api/connectors`, `POST /api/connectors/{id}/connect`, `GET /oauth/callback`, `POST /api/connectors/{id}/actions/{action}` |
 | Persona | name, email role, description (optional), save | `GET/PUT /api/persona` |
 | Skills | list, create (name, description, instructions), origin badge | `GET/POST /api/skills` |
+| Settings | full page: Profile, API, Permissions, Server settings, Resource manager, Use by API, Usage, Customisation | `GET/PUT /api/persona`; local design-lab state for the rest until wired |
 | Status | server/model state as designed messages, queue, runtime provisioning | `GET /api/status`, `GET /api/events` |
 
 Chat rules: Enter sends, Shift+Enter adds a line; a queued prompt shows as
 "queued - delivered at the next step"; the stop button is always reachable;
-no model name is ever shown. The composer strip shows the mode (Plan/Build)
+no model name is ever shown. The composer action row shows the mode (Plan/Build)
 and the model effort. These are display fields in the lab only: when the turn
 API carries mode, scopes and effort, the backend must enforce the scopes
-(V4), never the UI.
+(V4), never the UI. In the design lab, Enter appends a local user message and
+clears the prompt; it does not call the turn API or raise a notification until
+the shell is wired.
 
-## 4. Popups
+Settings is a full page, not a sidebar panel. Its section rail holds Profile,
+API, Permissions, Server settings, Resource manager, Use by API, Usage and
+Customisation; Customisation is one section of that page. The Connect page
+mirrors the eight implemented connectors with brand icons and drops the old
+Google Calendar mock because there is no backend connector for it.
 
-One modal at a time, focus trapped, Esc = cancel. Cancel never approves.
+## 4. Popups and notifications
 
-| Popup | Primary | Cancel | Rule |
+Persona, Connect and Rename are single modals: focus trapped, Esc = cancel.
+Rename changes the name only; the id stays stable. It has no topbar button:
+right-click a session in the sidebar, or type `/rename` in the composer, to
+open it for that session (`/rename-session` remains an alias).
+
+Notifications and approvals are not modals. They arrive in a top-right stack,
+slide in with a liquid-drop morph, and can be dismissed independently.
+Success is green, failure is red and everything else is cream; the icons
+differ by tone (check, alert, clock/info), and approval uses a mail icon.
+The email approval card shows editable To / Subject / Body fields with
+Send / Cancel; Cancel is audited as refused.
+
+| Surface | Primary | Cancel | Rule |
 |---|---|---|---|
-| Persona | Save | Esc | fields validated, path never shown |
-| Connect | Connect (opens OAuth URL) | Esc | waits for callback, then status |
-| Action approval | Allow once | Deny | shows provider, action and the exact params |
-| Email send | Send | Cancel | shows To / Subject / Body; Cancel is audited as refused |
-| Session rename | Rename | Esc | name only; id stays stable |
+| Persona modal | Save | Esc | fields validated, path never shown |
+| Connect modal | Connect (opens OAuth URL) | Esc | waits for callback, then status |
+| Action approval (notification) | Allow once | Deny | shows provider, action and the exact params |
+| Email send (notification) | Send | Cancel | editable To / Subject / Body; Cancel is audited as refused |
+| Session rename (popup) | Save | Esc | name only; id stays stable |
 
 The approval result is `{approved: true|false}` sent with the action call.
-Keyboard: Esc always cancels; Enter activates only the focused button.
+Keyboard: Esc closes the topmost popup or notification; Enter activates only
+the focused control.
 
 ## 5. API surface (implemented, F2)
 
@@ -130,26 +150,43 @@ a yellow focus ring. The caret is a 3px accent bar drawn over the textarea
 (the native 1px caret is hidden). It grows from two lines to five, then
 scrolls with the wheel or trackpad while its scrollbar stays hidden. Ctrl+A
 (Cmd+A on macOS) inside the composer selects the prompt text only, never the
-page. `aria-live="polite"` for streaming text. Thinking blocks are rounded
-glass panels with softer muted text; opening one plays a short droplet
-animation. A completed row is labelled "Thought" and has no step count. While
-a thinking step is live, a fast blue/pink liquid orb sits beside "Thinking";
-it is not an avatar next to "Imurun" and it disappears when the step ends. The
-transcript and sidebar scroll without a visible scrollbar.
+page. `aria-live="polite"` for streaming text. The composer has no strip or
+background behind it: the prompt box floats through glass and shadow only, and
+it does not bob or animate. Thinking blocks are rounded glass panels with
+softer muted text; opening one plays a short droplet animation. A completed
+row is labelled "Thought" and has no step count. While a thinking step is
+live, a fast blue/pink Möbius-like orb sits to the right of "Thinking", with
+faded edges; it is not an avatar next to "Imurun" and it disappears when the
+step ends. The live comment is derived from the current thought (for example
+"Juggling" or "Hustling"); production takes it from the thinking stream, not a
+fixed UI list. The sidebar folds to a 56 px rail with the `←` control in the
+brand row; the same control flips to `→` to reopen and the fold state is
+remembered locally. The transcript and sidebar scroll without a visible
+scrollbar.
 
 ## 7a. Design lab (finalised)
 
-`frontend/design-lab/` holds nine static style variants of the chat screen
-and the email Send/Cancel popup, switchable in the browser. Every style is
-only a variable block in `styles/`; layout lives in `base.css`, so the chosen
-style becomes the token source for `frontend/web/` before F3. **Liquid Paper
-is the finalised variant and Manrope the selected UI text font**; the lab
-opens on that pair. Liquid Paper keeps its warm serif display face for the
-brand and dialog headings. JetBrains Mono is used for code and ids. A second
-switcher keeps Inter, Space Grotesk and the style default available for
-comparison. Direct links: `?style=liquid-paper` (default),
-`?style=<name>&popup=1`, `?font=manrope` (default), `?font=inter`. See its
-README.
+`frontend/design-lab/` holds nine static style variants of the chat screen,
+the Sessions, Connect, Skills, Persona and Settings pages, and the
+notification, approval and rename surfaces, switchable in the browser.
+Every style is only a variable block in `styles/`; layout lives in `base.css`,
+so the chosen style becomes the token source for `frontend/web/` before F3.
+**Liquid Paper is the finalised variant and Manrope the selected UI text
+font**; the lab opens on that pair. Liquid Paper keeps its warm serif display
+face for the brand and dialog headings, and its amber/pink/cyan background
+washes drift slowly (reduced motion stops them). JetBrains Mono is used for code and
+ids. A second switcher keeps Inter, Space Grotesk and the style default
+available for comparison. Notifications and the email approval are top-right
+cards that slide in with a liquid-drop morph; success is green, failure red,
+everything else cream, and the icons differ by tone (check, alert, clock/info;
+mail for approval). The approval's To / Subject / Body are editable. Rename is
+available from a session's right-click menu or `/rename`; there is no topbar
+Rename button. Direct links: `?style=liquid-paper` (default),
+`?page=settings` (Profile), `?settings=1` (Customisation), `?settings=<section>`,
+`?page=sessions|connect|skills|persona`,
+`?style=<name>&popup=1` (approval), `?style=<name>&notify=success|error|neutral`,
+`?style=<name>&rename=1`, `?style=<name>&menu=1`, `?font=manrope` (default),
+`?font=inter`. See its README.
 
 ## 8. Input map (proposed; F-keys stay parked)
 
@@ -160,7 +197,7 @@ README.
 | Ctrl+C | stop the turn |
 | Up / Down | prompt history |
 | Tab | focus next control |
-| `/persona`, `/connect`, `/rename-session`, `/skills` | open the matching screen |
+| `/persona`, `/connect`, `/rename`, `/skills` | open the matching screen; `/rename` opens the current session's rename popup (`/rename-session` is an alias) |
 
 ## 9. Testing
 
@@ -180,7 +217,7 @@ README.
 | F1 | `core/`: api client, store, SSE parser, formatting, keymap | node tests |
 | F2 | server: shell route + token bootstrap, status, SSE, turns, skills, connect | Python tests |
 | F3 | web shell: chat screen, composer, queue badge, stop, status | node + Python tests |
-| F4 | popups: persona, connect, approval, email Send/Cancel, rename | node DOM tests |
+| F4 | popups and notifications: persona, connect, approval, email Send/Cancel, rename | node DOM tests |
 | F5 | TUI: ANSI renderer, input loop, same screens | node tests |
 | F6 | sessions and skills screens | node tests |
 | F7 | polish: GSAP transitions, a11y, reduced motion, e2e turn flow | e2e |

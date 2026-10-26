@@ -166,6 +166,39 @@ Format: ID | date | decision | decided by | evidence / status
 - V48 | 2026-10-27 | A fast liquid-orb animation sits beside a live thinking
   row only. It is not an avatar beside the model name, and it disappears when
   the thinking step ends. | user |
+- V49 | 2026-10-27 | Sidebar: a `←` control in the brand row folds it to a
+  56 px rail; the same control flips to `→` to reopen. The rail keeps the logo
+  and the control, and the fold state is remembered locally. | user |
+- V50 | 2026-10-27 | Thinking orb: right of the label, faded at the edges,
+  with two fast rotating Möbius-like rings. It remains live-only and is never
+  an avatar beside "Imurun". | user |
+- V51 | 2026-10-27 | The live thinking comment is derived from the current
+  thought (for example "Juggling" or "Hustling"), not a fixed UI string.
+  Production takes the label from the thinking stream; the design lab uses a
+  verb heuristic because it has no model stream. | user |
+- V52 | 2026-10-27 | Composer: no strip or background behind the prompt box;
+  it floats on the page through glass and shadow only. Floating never means
+  motion: the prompt box does not bob or animate. | user |
+- V53 | 2026-10-27 | Notifications and the email approval arrive from the top
+  right. Cards slide in with a liquid-drop morph; success is green, failure is
+  red, everything else is cream. Each tone has a distinct icon (check, alert,
+  clock/info), and the approval uses a mail icon. The approval's To, Subject
+  and Body are editable before Send. | user |
+- V54 | 2026-10-27 | Rename has no topbar button. Right-click a session in the
+  sidebar, or type `/rename` in the composer, to open a rename popup for that
+  session. `/rename-session` stays as an alias; the session id never changes.
+  | user |
+- V55 | 2026-10-27 | Settings is a full page, not a left sidebar panel. It has
+  a section rail for Profile, API, Permissions, Server settings, Resource
+  manager, Use by API, Usage and Customisation; Customisation is one section
+  of the page. Enter sends the prompt and Shift+Enter adds a line. | user |
+- V56 | 2026-10-27 | Connect shows the eight connectors the backend actually
+  implements: Gmail, GitHub, Slack, Vercel, Render, Cloudflare, Supabase and
+  Canva. Each card has a proper brand icon; the Google Calendar mock is gone
+  because there is no backend connector for it. | user |
+- V57 | 2026-10-27 | The Liquid Paper colour washes in the page background
+  drift slowly instead of sitting still. The motion is ambient and stops when
+  the OS asks for reduced motion. | user |
 
 ## Process decisions (standing law)
 
@@ -184,3 +217,4 @@ Format: ID | date | decision | decided by | evidence / status
 - Layout v2 (model/server/response/service four folders) -> superseded by
   layout v4, approved 2026-06-11: model, server, response, services, powers,
   monitor, providers + frontend/{sections,input}.
+- Settings as a left sidebar panel -> superseded by V55 (full Settings page).
