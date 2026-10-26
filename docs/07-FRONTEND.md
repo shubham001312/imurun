@@ -115,24 +115,29 @@ yet present) `POST /api/turns` answers an honest 503.
 
 ## 7. Design system
 
-Dark-first tokens (background, surface, text, muted, accent, danger,
-success), 4 px spacing scale, one radius, vendored OFL fonts with **Manrope
-as the selected UI font** (Inter and Space Grotesk stay for comparison;
-JetBrains Mono for code). Tailwind output vendored; GSAP only for 120-200 ms
-transitions and disabled under `prefers-reduced-motion`. Contrast AA,
-visible focus,
+Liquid Paper tokens (warm light glass, amber accent, serif display), 4 px
+spacing scale, one radius, vendored OFL fonts. **Liquid Paper is the
+finalised design and Manrope the selected UI text font** (V36, V38);
+Liquid Paper keeps its warm serif display face for the brand and dialog
+headings, while Inter and Space Grotesk stay vendored for comparison.
+JetBrains Mono is used for code and ids. Tailwind output vendored; GSAP only
+for 120-200 ms transitions and disabled under `prefers-reduced-motion`.
+Contrast AA, visible focus,
 `aria-live="polite"` for streaming text.
 
-## 7a. Design lab (current step)
+## 7a. Design lab (finalised)
 
 `frontend/design-lab/` holds nine static style variants of the chat screen
 and the email Send/Cancel popup, switchable in the browser. Every style is
 only a variable block in `styles/`; layout lives in `base.css`, so the chosen
-style becomes the token source for `frontend/web/` before F3. **Manrope is
-the selected UI text font**; JetBrains Mono is used for code and ids. A
-second switcher keeps Inter, Space Grotesk and the style default available
-for comparison. Direct links: `?style=<name>`, `?style=<name>&popup=1`,
-`?font=manrope` (default), `?font=inter`. See its README.
+style becomes the token source for `frontend/web/` before F3. **Liquid Paper
+is the finalised variant and Manrope the selected UI text font**; the lab
+opens on that pair. Liquid Paper keeps its warm serif display face for the
+brand and dialog headings. JetBrains Mono is used for code and ids. A second
+switcher keeps Inter, Space Grotesk and the style default available for
+comparison. Direct links: `?style=liquid-paper` (default),
+`?style=<name>&popup=1`, `?font=manrope` (default), `?font=inter`. See its
+README.
 
 ## 8. Input map (proposed; F-keys stay parked)
 
@@ -168,10 +173,11 @@ for comparison. Direct links: `?style=<name>`, `?style=<name>&popup=1`,
 | F6 | sessions and skills screens | node tests |
 | F7 | polish: GSAP transitions, a11y, reduced motion, e2e turn flow | e2e |
 
-## 11. Confirmed decisions (2026-10-26)
+## 11. Confirmed decisions (2026-10-27)
 
 1. Web delivery: static shell served by the loopback API, opened in the
    system browser. No Electron (V32).
 2. TUI runtime: JS on a bundled Node runtime, provisioned in the background;
    zero npm at runtime (V33).
 3. Streaming: SSE over the loopback API (V34).
+4. Design: Liquid Paper with Manrope as the UI text font (V36, V38).

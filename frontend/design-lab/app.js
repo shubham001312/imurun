@@ -1,16 +1,17 @@
 /* Theme + font switcher and popup demo for the design lab. */
 (function () {
   var THEMES = [
-    { id: 'obsidian', file: 'styles/obsidian.css', label: 'Obsidian', note: 'dark · amber · dense' },
+    { id: 'liquid-paper', file: 'styles/liquid-paper.css', label: 'Liquid Paper', note: 'light glass · warm · serif' },
     { id: 'paper',    file: 'styles/paper.css',    label: 'Paper',    note: 'light · warm · editorial' },
+    { id: 'obsidian', file: 'styles/obsidian.css', label: 'Obsidian', note: 'dark · amber · dense' },
     { id: 'neon',     file: 'styles/neon.css',     label: 'Neon',     note: 'dark · cyan/violet · glass' },
     { id: 'slate',    file: 'styles/slate.css',    label: 'Slate',    note: 'light · cool · clean' },
     { id: 'phosphor', file: 'styles/phosphor.css', label: 'Phosphor', note: 'CRT · green · mono' },
     { id: 'aurora',   file: 'styles/aurora.css',   label: 'Aurora',   note: 'dark · soft · rounded' },
     { id: 'liquid',   file: 'styles/liquid.css',   label: 'Liquid',   note: 'glass · blur · pointer light' },
-    { id: 'liquid-paper', file: 'styles/liquid-paper.css', label: 'Liquid Paper', note: 'light glass · warm · serif' },
     { id: 'liquid-slate', file: 'styles/liquid-slate.css', label: 'Liquid Slate', note: 'light glass · cool · clean' }
   ];
+  var THEME_KEY = 'imurun.design.theme.v3';
 
   var link = document.getElementById('theme-link');
   var note = document.getElementById('lab-note');
@@ -24,7 +25,7 @@
     Object.keys(buttons).forEach(function (id) {
       buttons[id].classList.toggle('active', id === theme.id);
     });
-    try { localStorage.setItem('imurun.design.theme', theme.id); } catch (e) { /* file:// may refuse */ }
+    try { localStorage.setItem(THEME_KEY, theme.id); } catch (e) { /* file:// may refuse */ }
   }
 
   THEMES.forEach(function (theme) {
@@ -38,7 +39,7 @@
   });
 
   var saved = null;
-  try { saved = localStorage.getItem('imurun.design.theme'); } catch (e) { /* ignore */ }
+  try { saved = localStorage.getItem(THEME_KEY); } catch (e) { /* ignore */ }
   var fromUrl = null;
   try { fromUrl = new URLSearchParams(location.search).get('style'); } catch (e) { /* ignore */ }
   var wanted = fromUrl || saved;

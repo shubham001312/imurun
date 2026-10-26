@@ -137,6 +137,13 @@ Format: ID | date | decision | decided by | evidence / status
 - V36 | 2026-10-27 | UI text font: Manrope. JetBrains Mono stays the code and
   id font; Inter and Space Grotesk remain vendored for comparison in the
   design lab. | user |
+- V37 | 2026-10-27 | UI design: Paper is the selected design. The lab opens on
+  Paper + Manrope; the warm serif display face stays for the brand and dialog
+  headings. Liquid, Liquid Paper, Liquid Slate and the rest remain in the lab
+  for comparison. | user |
+- V38 | 2026-10-27 | Final UI design: Liquid Paper, with Manrope as the UI text
+  font. Supersedes V37 (Paper). The warm serif display face stays for the
+  brand and dialog headings; the other lab styles remain for comparison. | user |
 
 ## Process decisions (standing law)
 

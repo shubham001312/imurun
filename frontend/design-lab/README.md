@@ -1,5 +1,10 @@
 # Design lab - pick a style, then we refine it
 
+**Finalised: Liquid Paper, with Manrope as the UI text font.** The lab opens
+on that pair; the other styles and fonts stay available for comparison.
+Liquid Paper keeps its warm serif display face for the brand and dialog
+headings; Manrope is used for the working text, ids and controls.
+
 Static mockups of the main chat screen, one style per file, all using the
 same markup. Open `index.html` directly, or serve the folder:
 
@@ -9,8 +14,9 @@ python -m http.server 8731
 
 Then open <http://127.0.0.1:8731/>.
 
-Direct links: `?style=neon` opens a style, `?style=paper&popup=1` opens the
-approval popup on load, `?style=liquid&font=inter` picks the text font.
+Direct links: `?style=liquid-paper` is the default; `?style=neon` opens another
+style, `?style=liquid-paper&popup=1` opens the approval popup on load,
+`?style=liquid&font=inter` picks a comparison font.
 
 ## The nine styles
 
