@@ -41,8 +41,10 @@ button { cursor: pointer; }
 .sidebar {
   display: flex; flex-direction: column; gap: 18px;
   padding: 18px 14px; min-height: 0; overflow: auto;
+  scrollbar-width: none; -ms-overflow-style: none;
   background: var(--surface); border-right: 1px solid var(--line);
 }
+.sidebar::-webkit-scrollbar { width: 0; height: 0; }
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: .02em; }
 .logo { color: var(--accent); font-size: 18px; }
 .ver {
@@ -94,7 +96,10 @@ button { cursor: pointer; }
 .transcript {
   overflow: auto; padding: 26px 20px 18px;
   display: flex; flex-direction: column; gap: 18px;
+  scrollbar-width: none; -ms-overflow-style: none;
+  overscroll-behavior: contain;
 }
+.transcript::-webkit-scrollbar { width: 0; height: 0; }
 .msg { width: 100%; max-width: 780px; }
 .msg.user { align-self: flex-end; display: flex; flex-direction: column; align-items: flex-end; }
 .who {
@@ -121,7 +126,7 @@ button { cursor: pointer; }
 }
 .bubble pre code { background: transparent; padding: 0; }
 
-.thinking { margin: 0 0 8px; font-size: 12.5px; color: var(--muted); }
+.thinking { margin: 0 0 8px; font-size: 12.5px; color: var(--muted-soft, var(--muted)); }
 .thinking summary {
   cursor: pointer; font: 10.5px/1.5 var(--mono);
   letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
@@ -129,6 +134,36 @@ button { cursor: pointer; }
 .thinking p {
   margin: 8px 0 0; padding: 10px 12px;
   border-left: 2px solid var(--line-strong); background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  transform-origin: 20px 0;
+}
+.thinking[open] p {
+  animation: thinking-droplet .38s cubic-bezier(.2, .8, .2, 1) both;
+}
+@keyframes thinking-droplet {
+  0% {
+    opacity: 0;
+    transform: scale(.08, .2) translateY(-4px);
+    border-radius: 50% 50% 46% 46% / 60% 60% 40% 40%;
+  }
+  40% {
+    opacity: 1;
+    transform: scale(.72, .92) translateY(1px);
+    border-radius: 22px;
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.015, 1.03) translateY(1px);
+    border-radius: 18px;
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    border-radius: var(--radius-sm);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thinking[open] p { animation: none; }
 }
 
 .tool-row {

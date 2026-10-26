@@ -157,6 +157,10 @@ Format: ID | date | decision | decided by | evidence / status
   the native 1px caret is hidden. | user |
 - V44 | 2026-10-27 | Composer strip: mode and model effort only; the scope
   chips are not shown. Scopes stay a backend concern (V4). | user |
+- V45 | 2026-10-27 | Thinking block: rounded corners, softer muted text, and a
+  short droplet-like opening animation. | user |
+- V46 | 2026-10-27 | The chat transcript and sidebar scroll without a visible
+  scrollbar. | user |
 
 ## Process decisions (standing law)
 

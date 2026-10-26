@@ -130,7 +130,9 @@ a yellow focus ring. The caret is a 3px accent bar drawn over the textarea
 (the native 1px caret is hidden). It grows from two lines to five, then
 scrolls with the wheel or trackpad while its scrollbar stays hidden. Ctrl+A
 (Cmd+A on macOS) inside the composer selects the prompt text only, never the
-page. `aria-live="polite"` for streaming text.
+page. `aria-live="polite"` for streaming text. Thinking blocks are rounded
+glass panels with softer muted text; opening one plays a short droplet
+animation. The transcript and sidebar scroll without a visible scrollbar.
 
 ## 7a. Design lab (finalised)
 

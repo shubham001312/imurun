@@ -54,6 +54,10 @@ caret rather than a yellow ring. The caret is a 3px accent bar, not the
 native 1px line. Ctrl+A (Cmd+A on macOS) selects only the prompt text. The
 left side of the action row shows Plan/Build and the model effort.
 
+The thinking block is a rounded glass panel with softer text; opening it
+plays a short droplet animation. The transcript and sidebar scroll without a
+visible scrollbar.
+
 ## Creating a new style
 
 1. Copy `styles/obsidian.css` to `styles/<name>.css`.
