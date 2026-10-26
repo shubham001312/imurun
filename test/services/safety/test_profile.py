@@ -1,4 +1,7 @@
-"""G-1 probe: real values, and the failure path is marked, not raised."""
+"""G-2 probe: real values, injected failures, timeout, model volume."""
+import os
+import tempfile
+import time
 import unittest
 
 from services.safety.profile import GpuInfo, probe
@@ -7,8 +10,9 @@ from services.safety.profile import GpuInfo, probe
 class ProbeTests(unittest.TestCase):
     def test_reads_real_machine(self):
         profile = probe()
-        self.assertGreater(profile.ram_total, 0)
-        self.assertGreaterEqual(profile.ram_available, 0)
+        # A restricted machine may legitimately fail a part; the contract is
+        # "value or a marked error", never a crash and never a silent zero.
+        self.assertTrue(profile.ram_total > 0 or any(e.startswith("memory:") for e in profile.errors))
         self.assertGreaterEqual(profile.cpu_cores, 1)
         self.assertGreaterEqual(profile.disk_free, 0)
 
@@ -47,6 +51,33 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(profile.disk_free, 100 * 1024**3)
         self.assertTrue(profile.gpu.present)
         self.assertEqual(profile.errors, ())
+
+    def test_slow_part_hits_the_overall_deadline(self):
+        def slow():
+            time.sleep(1.0)
+            return GpuInfo(present=True, vendor="slow")
+
+        started = time.monotonic()
+        profile = probe(gpu=slow, deadline=0.1)
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 0.8, "probe must give up at the deadline")
+        self.assertFalse(profile.gpu.present)
+        self.assertTrue(any(e.startswith("gpu:") and "timed out" in e for e in profile.errors))
+
+    def test_disk_is_measured_on_the_model_volume(self):
+        seen: list[str] = []
+        model_dir = tempfile.mkdtemp(prefix="imu-models-")
+
+        def disk(path):
+            seen.append(path)
+            return type("U", (), {"free": 1 * 1024**3})()
+
+        profile = probe(disk=disk, model_dir=model_dir)
+        self.assertEqual(profile.disk_free, 1 * 1024**3)
+        self.assertEqual(os.path.normcase(seen[0]), os.path.normcase(os.path.realpath(model_dir)))
+
+    def test_physical_cores_are_at_least_one(self):
+        self.assertGreaterEqual(probe(deadline=5.0).cpu_cores, 1)
 
 
 if __name__ == "__main__":
