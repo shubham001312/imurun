@@ -1,8 +1,0 @@
-# IMURUN workspace — Bun configuration.
-#
-# The test preload forces chalk to emit colour codes. Chalk decides whether the
-# terminal supports colour once, when it is first loaded, and caches that inside
-# every style function; a test process is not a TTY, so without this the styled
-# output would be plain text and colour assertions would be vacuous.
-[test]
-preload = ["./scripts/test-preload.ts"]

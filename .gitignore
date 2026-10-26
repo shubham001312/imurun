@@ -1,8 +1,15 @@
 node_modules/
 dist/
 out/
+build/
 *.log
 *.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
 
 # Env / secrets
 .env
@@ -13,6 +20,7 @@ out/
 .DS_Store
 Thumbs.db
 
-# Local overrides
+# Local overrides and runtime data
 imurun.local.json
+.imurun/
 .bun-cache/
