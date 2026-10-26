@@ -272,5 +272,42 @@ class RequestTests(unittest.TestCase):
         self.assertEqual(check_request(10, 1.0, self.caps).kind, "allow")
 
 
+class InputValidationTests(unittest.TestCase):
+    def setUp(self):
+        self.profile = machine()
+        self.caps = limits(self.profile, "conservative")
+
+    def test_negative_model_bytes_are_denied(self):
+        decision = check_start(ModelRequest(model_bytes=-1), self.caps, self.profile)
+        self.assertEqual(decision.kind, "deny")
+
+    def test_zero_threads_are_denied(self):
+        decision = check_start(ModelRequest(model_bytes=1 * GB, threads=0), self.caps, self.profile)
+        self.assertEqual(decision.kind, "deny")
+
+    def test_negative_context_is_denied(self):
+        decision = check_start(
+            ModelRequest(model_bytes=1 * GB, context_tokens=-1), self.caps, self.profile
+        )
+        self.assertEqual(decision.kind, "deny")
+
+    def test_negative_request_size_is_denied(self):
+        self.assertEqual(check_request(-1, 0.0, self.caps).kind, "deny")
+
+    def test_negative_elapsed_is_denied(self):
+        self.assertEqual(check_request(1, -1.0, self.caps).kind, "deny")
+
+    def test_secret_files_are_protected(self):
+        project = tempfile.mkdtemp(prefix="imu-project-")
+        for name in (".env", ".env.local", ".netrc", ".npmrc", ".pypirc", ".git-credentials"):
+            with self.subTest(name=name):
+                decision = check_action(
+                    {"kind": "file_read", "path": os.path.join(project, name)},
+                    project_root=project,
+                    user_data_root=project,
+                )
+                self.assertEqual(decision.kind, "deny")
+
+
 if __name__ == "__main__":
     unittest.main()

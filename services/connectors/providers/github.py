@@ -1,7 +1,15 @@
 """GitHub connector: read repos/issues, open issues and comments (gated)."""
 from __future__ import annotations
 
-from ..base import READ, WRITE, Capability, Connector, ConnectorError, HttpTransport
+from ..base import (
+    READ,
+    WRITE,
+    Capability,
+    Connector,
+    ConnectorError,
+    HttpTransport,
+    require_repo,
+)
 
 
 class GitHubConnector(Connector):
@@ -29,22 +37,21 @@ class GitHubConnector(Connector):
 
     def execute(self, action: str, params: dict) -> dict:
         headers = self._headers()
-        repo = str(params.get("repo", "")).strip()
 
         if action == "list_repos":
             return self._transport.request("GET", "https://api.github.com/user/repos", headers)
 
         if action == "list_issues":
-            if not repo:
-                raise ConnectorError("repo is required")
+            repo = require_repo(params.get("repo", ""))
             return self._transport.request(
                 "GET", f"https://api.github.com/repos/{repo}/issues", headers
             )
 
         if action == "create_issue":
+            repo = require_repo(params.get("repo", ""))
             title = str(params.get("title", "")).strip()
-            if not repo or not title:
-                raise ConnectorError("repo and title are required")
+            if not title:
+                raise ConnectorError("title is required")
             return self._transport.request(
                 "POST",
                 f"https://api.github.com/repos/{repo}/issues",
@@ -53,10 +60,13 @@ class GitHubConnector(Connector):
             )
 
         if action == "comment":
-            number = params.get("number")
+            repo = require_repo(params.get("repo", ""))
+            number = str(params.get("number", "")).strip()
+            if not number.isdigit():
+                raise ConnectorError("number must be a positive integer")
             body = str(params.get("body", "")).strip()
-            if not repo or not number or not body:
-                raise ConnectorError("repo, number and body are required")
+            if not body:
+                raise ConnectorError("body is required")
             return self._transport.request(
                 "POST",
                 f"https://api.github.com/repos/{repo}/issues/{number}/comments",

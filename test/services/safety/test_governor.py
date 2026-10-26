@@ -145,5 +145,18 @@ class GovernorAdmissionTests(unittest.TestCase):
         self.assertEqual(governor.status()["used"], 0)
 
 
+class GovernorTicketOwnershipTests(unittest.TestCase):
+    def test_a_ticket_from_another_governor_cannot_free_capacity(self):
+        first = Governor(capacity=10)
+        second = Governor(capacity=10)
+        ticket = first.acquire(weight=4, timeout=0.1)
+        self.assertIsNotNone(ticket)
+        second.release(ticket)
+        self.assertEqual(first.status()["used"], 4)
+        self.assertEqual(second.status()["used"], 0)
+        first.release(ticket)
+        self.assertEqual(first.status()["used"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

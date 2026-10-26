@@ -79,5 +79,22 @@ class KillSwitchTests(unittest.TestCase):
         self.assertEqual(len(results), 2)
 
 
+class KillSwitchUnregisterTests(unittest.TestCase):
+    def test_unregistering_an_unknown_id_is_marked(self):
+        marks = []
+        switch = KillSwitch(
+            mark=lambda rule, subject, why: marks.append((rule, subject, why))
+        )
+        self.assertFalse(switch.unregister(99))
+        self.assertEqual(marks[0][0], "G6-killswitch")
+        self.assertIn("unknown", marks[0][2])
+
+    def test_unregistering_a_known_id_removes_it(self):
+        switch = KillSwitch()
+        stop_id = switch.register("engine", lambda: None)
+        self.assertTrue(switch.unregister(stop_id))
+        self.assertEqual(switch.fire(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

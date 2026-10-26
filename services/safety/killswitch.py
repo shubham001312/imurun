@@ -37,9 +37,17 @@ class KillSwitch:
             self._stops.append((stop_id, name, stop))
             return stop_id
 
-    def unregister(self, stop_id: int) -> None:
+    def unregister(self, stop_id: int) -> bool:
         with self._lock:
+            before = len(self._stops)
             self._stops = [entry for entry in self._stops if entry[0] != stop_id]
+            removed = len(self._stops) != before
+        if not removed and self._mark is not None:
+            try:
+                self._mark("G6-killswitch", str(stop_id), "unregister: unknown id")
+            except Exception:  # noqa: BLE001 - marking must never break the kill
+                pass
+        return removed
 
     def fire(self) -> list[StopResult]:
         """Stop everything registered. A failing stop is recorded, never

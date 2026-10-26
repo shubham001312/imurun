@@ -1,7 +1,16 @@
 """Gmail connector: read messages, create drafts, send (draft-first, gated)."""
 from __future__ import annotations
 
-from ..base import READ, WRITE, Capability, Connector, ConnectorError, HttpTransport
+from ..base import (
+    READ,
+    WRITE,
+    Capability,
+    Connector,
+    ConnectorError,
+    HttpTransport,
+    quote_query,
+    require_token,
+)
 
 BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 
@@ -34,13 +43,11 @@ class GmailConnector(Connector):
 
         if action == "list_messages":
             query = str(params.get("q", "")).strip()
-            suffix = f"?q={query}" if query else ""
+            suffix = f"?q={quote_query(query)}" if query else ""
             return self._transport.request("GET", f"{BASE}/messages{suffix}", headers)
 
         if action == "get_message":
-            message_id = str(params.get("id", "")).strip()
-            if not message_id:
-                raise ConnectorError("id is required")
+            message_id = require_token(params.get("id", ""), "id")
             return self._transport.request("GET", f"{BASE}/messages/{message_id}", headers)
 
         if action == "create_draft":

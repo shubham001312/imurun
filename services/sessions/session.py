@@ -86,14 +86,25 @@ class Session:
     def start(cls, first_command: str, root: Path | str | None = None, mark=None) -> "Session":
         if not first_command or not first_command.strip():
             raise ValueError("the first command is required to start a session")
-        identity = SessionIdentity(
-            id=new_session_id(first_command),
-            name=derive_name(first_command),
-            created_at=time.time(),
-        )
-        session = cls(identity, {}, _path_for(identity.id, root), mark)
-        session.save()
-        return session
+        directory = Path(root) if root else default_root()
+        directory.mkdir(parents=True, exist_ok=True)
+        for _ in range(10):
+            session_id = new_session_id(first_command)
+            path = directory / f"{_safe_filename(session_id)}.json"
+            try:
+                handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                continue
+            os.close(handle)
+            identity = SessionIdentity(
+                id=session_id,
+                name=derive_name(first_command),
+                created_at=time.time(),
+            )
+            session = cls(identity, {}, path, mark)
+            session.save()
+            return session
+        raise RuntimeError("could not allocate a unique session id")
 
     @classmethod
     def load(cls, session_id: str, root: Path | str | None = None, mark=None) -> "Session":
@@ -188,6 +199,15 @@ class Session:
                 f"reading session {target_session_id} requires the user's explicit permission"
             )
         data = json.loads(_path_for(target_session_id, root).read_text(encoding="utf-8"))
+        if mark is not None:
+            try:
+                mark(
+                    "G3-cross-session",
+                    target_session_id,
+                    f"read allowed for {requester or 'unknown'}",
+                )
+            except Exception:  # noqa: BLE001 - marking must never change the answer
+                pass
         return dict(data.get("memory", {}))
 
     @staticmethod

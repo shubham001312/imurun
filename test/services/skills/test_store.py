@@ -112,5 +112,11 @@ class SkillSafetyTests(unittest.TestCase):
         self.assertEqual(len(ids), 1)
 
 
+    def test_a_flat_skill_file_blocks_the_same_id(self):
+        (self.root / "good.md").write_text("# Good", encoding="utf-8")
+        with self.assertRaises(FileExistsError):
+            self.store.create("Good", "works", "body", skill_id="good")
+
+
 if __name__ == "__main__":
     unittest.main()

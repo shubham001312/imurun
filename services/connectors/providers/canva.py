@@ -1,7 +1,7 @@
 """Canva: read designs, create a design or start an export (gated)."""
 from __future__ import annotations
 
-from ..base import READ, WRITE, Capability, ConnectorError
+from ..base import READ, WRITE, Capability, ConnectorError, require_token
 from ._rest import BearerConnector
 
 
@@ -20,16 +20,12 @@ class CanvaConnector(BearerConnector):
             return self._request("GET", "/designs")
 
         if action == "create_design":
-            design_type = str(params.get("design_type", "")).strip()
-            if not design_type:
-                raise ConnectorError("design_type is required")
+            design_type = require_token(params.get("design_type", ""), "design_type")
             return self._request("POST", "/designs", {"design_type": design_type})
 
         if action == "export_design":
-            design_id = str(params.get("design_id", "")).strip()
-            fmt = str(params.get("format", "")).strip()
-            if not design_id or not fmt:
-                raise ConnectorError("design_id and format are required")
+            design_id = require_token(params.get("design_id", ""), "design_id")
+            fmt = require_token(params.get("format", ""), "format")
             return self._request(
                 "POST",
                 "/exports",

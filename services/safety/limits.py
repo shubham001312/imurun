@@ -47,7 +47,7 @@ def limits(profile: MachineProfile, mode: str = "conservative") -> Limits:
         raise ValueError(f"unknown limits mode: {mode}")
     conservative = mode == "conservative"
     share = CONSERVATIVE_RAM_SHARE if conservative else FULL_RAM_SHARE
-    total = profile.ram_total or profile.ram_available
+    total = max(0, profile.ram_total or profile.ram_available)
     return Limits(
         mode=mode,
         max_model_ram=int(total * share),

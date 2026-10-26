@@ -61,5 +61,20 @@ class LimitsTests(unittest.TestCase):
         self.assertEqual(caps.max_model_ram, int(8 * GB * 0.60))
 
 
+class LimitsSafetyTests(unittest.TestCase):
+    def test_a_negative_profile_yields_a_zero_budget(self):
+        profile = MachineProfile(
+            ram_total=-1,
+            ram_available=-1,
+            cpu_cores=4,
+            disk_free=-1,
+            gpu=GpuInfo(present=False),
+        )
+        caps = limits(profile)
+        self.assertEqual(caps.max_model_ram, 0)
+        self.assertGreaterEqual(caps.max_threads, 1)
+        self.assertGreater(caps.request_timeout, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

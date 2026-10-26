@@ -19,6 +19,7 @@ class QueuedPrompt:
     text: str
     at: float
     delivered: bool = False
+    cancelled: bool = False
 
 
 class PromptQueue:
@@ -82,14 +83,32 @@ class PromptQueue:
                 self._history = self._history[-self._history_limit :]
             return marked
 
-    def cancel(self, prompt_id: int) -> bool:
-        """Cancel a message that has not been delivered yet."""
+    def cancel(self, prompt_id: int, mark=None) -> bool:
+        """Cancel a message that has not been delivered yet. Kept in history."""
+        cancelled = None
         with self._lock:
             for index, item in enumerate(self._pending):
                 if item.id == prompt_id:
                     self._pending.pop(index)
-                    return True
+                    cancelled = QueuedPrompt(
+                        id=item.id,
+                        session_id=item.session_id,
+                        text=item.text,
+                        at=item.at,
+                        cancelled=True,
+                    )
+                    self._history.append(cancelled)
+                    if len(self._history) > self._history_limit:
+                        self._history = self._history[-self._history_limit :]
+                    break
+        if cancelled is None:
             return False
+        if mark is not None:
+            try:
+                mark("G1-prompt", str(prompt_id), "cancelled before delivery")
+            except Exception:  # noqa: BLE001 - marking must never change the answer
+                pass
+        return True
 
     def wait(self, session_id: str, timeout: float | None = None) -> QueuedPrompt | None:
         """Block until a message is waiting for this session, or timeout."""

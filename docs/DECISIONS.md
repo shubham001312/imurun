@@ -110,6 +110,12 @@ Format: ID | date | decision | decided by | evidence / status
   keychain, never files or logs; every action is audited. Provider order:
   GitHub, Gmail, Slack, Vercel, Render, Cloudflare, Supabase, Canva.
   docs/06-CONNECT.md. | user |
+- V30 | 2026-10-26 | Audit register: every re-audit publishes its flaws,
+  severity, points and proof test in docs/AUDIT.md; a flaw is closed only
+  when its test passes. Re-audit of the built tree found 12 flaws (138
+  points), all fixed. The original 80-flaw sheet is not in the repository,
+  so its 50 open ids cannot be closed one by one until the sheet is
+  provided; the remaining criticals are C-03, C-04, C-08. | user |
 
 ## Process decisions (standing law)
 

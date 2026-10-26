@@ -115,7 +115,8 @@ class SkillsStore:
 
         with self._lock:
             target = self._root / identifier / "SKILL.md"
-            if target.exists():
+            flat = self._root / f"{identifier}.md"
+            if target.exists() or flat.exists():
                 raise FileExistsError(f"skill {identifier!r} already exists at {target}")
             target.parent.mkdir(parents=True, exist_ok=True)
             _private_dir(target.parent)

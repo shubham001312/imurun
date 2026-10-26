@@ -1,9 +1,16 @@
 """GitHub and Gmail adapters: real request shapes, gated writes."""
 import unittest
 
+from services.connectors.base import ConnectorError
 from services.connectors.gate import ConnectorGate
+from services.connectors.providers.canva import CanvaConnector
+from services.connectors.providers.cloudflare import CloudflareConnector
 from services.connectors.providers.github import GitHubConnector
 from services.connectors.providers.gmail import GmailConnector
+from services.connectors.providers.render import RenderConnector
+from services.connectors.providers.slack import SlackConnector
+from services.connectors.providers.supabase import SupabaseConnector
+from services.connectors.providers.vercel import VercelConnector
 from services.connectors.tokens import MemoryTokenStore
 from services.safety.decisions import PermissionRequired
 
@@ -65,7 +72,7 @@ class ProviderTests(unittest.TestCase):
         self.tokens.set("gmail", "gm-token")
         gmail = GmailConnector(self.transport, self.tokens)
         self.gate.execute(gmail, "list_messages", {"q": "is:unread"})
-        self.assertIn("q=is:unread", self.transport.calls[0]["url"])
+        self.assertIn("q=is%3Aunread", self.transport.calls[0]["url"])
 
     def test_gmail_send_needs_approval(self):
         self.tokens.set("gmail", "gm-token")
@@ -97,6 +104,50 @@ class ProviderTests(unittest.TestCase):
         joined = " ".join(mark[2] for mark in self.marks)
         self.assertNotIn("gh-token-1234", joined)
         self.assertNotIn("gm-token-5678", joined)
+
+
+class ProviderInjectionTests(unittest.TestCase):
+    def setUp(self):
+        self.tokens = MemoryTokenStore()
+        self.transport = FakeTransport()
+        self.gate = ConnectorGate()
+
+    def test_url_path_and_query_injection_is_refused(self):
+        cases = [
+            ("github", GitHubConnector, "list_issues", {"repo": "a/../../b"}),
+            (
+                "github",
+                GitHubConnector,
+                "comment",
+                {"repo": "a/b", "number": "1/../../x", "body": "hi"},
+            ),
+            ("gmail", GmailConnector, "get_message", {"id": "../x"}),
+            ("slack", SlackConnector, "get_history", {"channel": "C1&x=1"}),
+            ("vercel", VercelConnector, "list_deployments", {"project": "p?x=1"}),
+            ("render", RenderConnector, "list_deploys", {"service": "s/../x"}),
+            ("cloudflare", CloudflareConnector, "list_dns_records", {"zone": "z/../x"}),
+            ("canva", CanvaConnector, "export_design", {"design_id": "../x", "format": "png"}),
+            (
+                "supabase",
+                SupabaseConnector,
+                "create_project",
+                {"name": "n", "organization": "../x", "db_pass": "p"},
+            ),
+        ]
+        for provider, cls, action, params in cases:
+            with self.subTest(provider=provider, action=action):
+                self.tokens.set(provider, f"{provider}-token")
+                connector = cls(self.transport, self.tokens)
+                with self.assertRaises(ConnectorError):
+                    self.gate.execute(connector, action, params, approved=True)
+        self.assertEqual(self.transport.calls, [])
+
+    def test_a_gmail_query_cannot_add_parameters(self):
+        self.tokens.set("gmail", "gm-token")
+        gmail = GmailConnector(self.transport, self.tokens)
+        self.gate.execute(gmail, "list_messages", {"q": "is:unread&maxResults=1"})
+        url = self.transport.calls[0]["url"]
+        self.assertIn("q=is%3Aunread%26maxResults%3D1", url)
 
 
 if __name__ == "__main__":

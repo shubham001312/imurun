@@ -1,8 +1,12 @@
 """Cloudflare: read zones and DNS, change DNS and purge cache (gated)."""
 from __future__ import annotations
 
-from ..base import READ, WRITE, Capability, ConnectorError
+import re
+
+from ..base import READ, WRITE, Capability, ConnectorError, require_token
 from ._rest import BearerConnector
+
+RECORD_TYPE = re.compile(r"^[A-Za-z]{1,10}$")
 
 
 class CloudflareConnector(BearerConnector):
@@ -21,18 +25,18 @@ class CloudflareConnector(BearerConnector):
         if action == "list_zones":
             return self._request("GET", "/zones")
 
-        zone = str(params.get("zone", "")).strip()
+        zone = require_token(params.get("zone", ""), "zone")
         if action == "list_dns_records":
-            if not zone:
-                raise ConnectorError("zone is required")
             return self._request("GET", f"/zones/{zone}/dns_records")
 
         if action == "create_dns_record":
             record_type = str(params.get("type", "")).strip()
             name = str(params.get("name", "")).strip()
             content = str(params.get("content", "")).strip()
-            if not zone or not record_type or not name or not content:
-                raise ConnectorError("zone, type, name and content are required")
+            if not RECORD_TYPE.fullmatch(record_type):
+                raise ConnectorError("type is not a valid DNS record type")
+            if not name or not content:
+                raise ConnectorError("name and content are required")
             return self._request(
                 "POST",
                 f"/zones/{zone}/dns_records",
@@ -40,9 +44,7 @@ class CloudflareConnector(BearerConnector):
             )
 
         if action == "update_dns_record":
-            record_id = str(params.get("record_id", "")).strip()
-            if not zone or not record_id:
-                raise ConnectorError("zone and record_id are required")
+            record_id = require_token(params.get("record_id", ""), "record_id")
             body = {
                 key: str(params[key])
                 for key in ("type", "name", "content")
@@ -51,8 +53,6 @@ class CloudflareConnector(BearerConnector):
             return self._request("PATCH", f"/zones/{zone}/dns_records/{record_id}", body)
 
         if action == "purge_cache":
-            if not zone:
-                raise ConnectorError("zone is required")
             return self._request("POST", f"/zones/{zone}/purge_cache", {"purge_everything": True})
 
         raise ConnectorError(f"cloudflare has no action {action!r}")

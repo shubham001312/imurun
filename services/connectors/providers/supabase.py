@@ -1,7 +1,7 @@
 """Supabase: read projects and organizations, create a project (admin, gated)."""
 from __future__ import annotations
 
-from ..base import ADMIN, READ, Capability, ConnectorError
+from ..base import ADMIN, READ, Capability, ConnectorError, require_token
 from ._rest import BearerConnector
 
 
@@ -24,10 +24,10 @@ class SupabaseConnector(BearerConnector):
 
         if action == "create_project":
             name = str(params.get("name", "")).strip()
-            organization = str(params.get("organization", "")).strip()
+            organization = require_token(params.get("organization", ""), "organization")
             db_pass = str(params.get("db_pass", ""))
-            if not name or not organization or not db_pass:
-                raise ConnectorError("name, organization and db_pass are required")
+            if not name or not db_pass:
+                raise ConnectorError("name and db_pass are required")
             return self._request(
                 "POST",
                 "/projects",

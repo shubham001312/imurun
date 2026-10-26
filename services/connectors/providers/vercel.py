@@ -1,8 +1,10 @@
 """Vercel: read projects and deployments, create a deployment (gated)."""
 from __future__ import annotations
 
-from ..base import READ, WRITE, Capability, ConnectorError
+from ..base import READ, WRITE, Capability, ConnectorError, require_token
 from ._rest import BearerConnector
+
+TARGETS = ("production", "preview")
 
 
 class VercelConnector(BearerConnector):
@@ -20,20 +22,19 @@ class VercelConnector(BearerConnector):
             return self._request("GET", "/v9/projects")
 
         if action == "list_deployments":
-            project = str(params.get("project", "")).strip()
-            if not project:
-                raise ConnectorError("project is required")
+            project = require_token(params.get("project", ""), "project")
             return self._request("GET", f"/v6/deployments?projectId={project}")
 
         if action == "create_deployment":
-            name = str(params.get("name", "")).strip()
-            if not name:
-                raise ConnectorError("name is required")
+            name = require_token(params.get("name", ""), "name")
             body = {"name": name}
             if params.get("project"):
-                body["project"] = str(params["project"])
+                body["project"] = require_token(params["project"], "project")
             if params.get("target"):
-                body["target"] = str(params["target"])
+                target = str(params["target"]).strip()
+                if target not in TARGETS:
+                    raise ConnectorError(f"target must be one of {TARGETS}")
+                body["target"] = target
             return self._request("POST", "/v13/deployments", body)
 
         raise ConnectorError(f"vercel has no action {action!r}")

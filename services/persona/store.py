@@ -15,6 +15,7 @@ from pathlib import Path
 MAX_NAME = 80
 MAX_ROLE = 120
 MAX_DESCRIPTION = 500
+MAX_FILE_BYTES = 64 * 1024
 
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
 
@@ -64,6 +65,8 @@ class PersonaStore:
         with self._lock:
             if not self._path.exists():
                 return None
+            if self._path.stat().st_size > MAX_FILE_BYTES:
+                raise ValueError("the persona file is too large")
             data = json.loads(self._path.read_text(encoding="utf-8"))
         return Persona(
             name=str(data.get("name", "")),

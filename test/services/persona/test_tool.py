@@ -40,5 +40,13 @@ class PersonaToolTests(unittest.TestCase):
         self.assertNotIn(str(self.path), repr(view))
 
 
+    def test_an_oversized_persona_file_returns_an_error(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("x" * (64 * 1024 + 1), encoding="utf-8")
+        view = self.tool.read()
+        self.assertFalse(view.configured)
+        self.assertTrue(view.error)
+
+
 if __name__ == "__main__":
     unittest.main()

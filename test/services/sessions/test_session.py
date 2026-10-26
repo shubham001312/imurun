@@ -5,6 +5,7 @@ import re
 import stat
 import tempfile
 import unittest
+from unittest import mock
 
 from services.safety.decisions import PermissionRequired
 from services.sessions.session import Session, new_session_id, slugify
@@ -157,6 +158,33 @@ class SessionSafetyTests(unittest.TestCase):
     def test_a_newline_in_the_first_command_does_not_enter_the_name(self):
         name = Session.start("hello\nworld", root=self.root).name
         self.assertNotIn("\n", name)
+
+
+class SessionAllocationTests(unittest.TestCase):
+    def test_a_colliding_id_is_replaced(self):
+        root = tempfile.mkdtemp(prefix="imu-sessions-")
+        with open(os.path.join(root, "dup-0000.json"), "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        with mock.patch(
+            "services.sessions.session.new_session_id",
+            side_effect=["dup-0000", "dup-1111"],
+        ):
+            session = Session.start("Fix it", root=root)
+        self.assertEqual(session.id, "dup-1111")
+
+    def test_an_allowed_cross_session_read_is_marked(self):
+        root = tempfile.mkdtemp(prefix="imu-sessions-")
+        target = Session.start("Target", root=root)
+        marks = []
+        Session.read_other(
+            target.id,
+            root=root,
+            allowed=True,
+            requester="user",
+            mark=lambda rule, subject, why: marks.append((rule, subject, why)),
+        )
+        self.assertEqual(marks[0][0], "G3-cross-session")
+        self.assertIn("allowed", marks[0][2])
 
 
 if __name__ == "__main__":

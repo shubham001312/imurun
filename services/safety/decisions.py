@@ -144,7 +144,9 @@ def _protected(path: str, project_root: str, extra: tuple[str, ...]) -> bool:
         if candidate == base or candidate.startswith(base + os.sep):
             return True
     name = os.path.basename(candidate)
-    return name == ".env" or name.startswith(".env.")
+    if name == ".env" or name.startswith(".env."):
+        return True
+    return name in {".netrc", ".npmrc", ".pypirc", ".git-credentials", ".htpasswd"}
 
 
 def require(decision: Decision, granted: bool = False) -> Decision:
@@ -155,6 +157,13 @@ def require(decision: Decision, granted: bool = False) -> Decision:
 
 
 def check_start(request: ModelRequest, limits: Limits, profile: MachineProfile) -> Decision:
+    if request.model_bytes < 0 or request.context_tokens < 0 or request.threads < 1:
+        return Decision(
+            "deny",
+            "G1-governor",
+            ("sizes must be non-negative and threads must be at least 1",),
+        )
+
     if profile.errors:
         return Decision(
             "ask",
@@ -204,6 +213,12 @@ def check_start(request: ModelRequest, limits: Limits, profile: MachineProfile) 
 
 
 def check_request(size: int, elapsed: float, limits: Limits) -> Decision:
+    if size < 0 or elapsed < 0:
+        return Decision(
+            "deny",
+            "G1-request",
+            ("request size and elapsed time must be non-negative",),
+        )
     if size > limits.max_request_bytes:
         return Decision(
             "deny",

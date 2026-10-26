@@ -128,7 +128,7 @@ class Governor:
         return ticket
 
     def _release_locked(self, ticket: Ticket) -> None:
-        if ticket.released:
+        if ticket.released or self._tickets.get(ticket.id) is not ticket:
             return
         ticket.released = True
         self._tickets.pop(ticket.id, None)

@@ -1,7 +1,7 @@
 """Slack: read channels and history, post messages (gated)."""
 from __future__ import annotations
 
-from ..base import READ, WRITE, Capability, ConnectorError
+from ..base import READ, WRITE, Capability, ConnectorError, require_channel
 from ._rest import BearerConnector
 
 
@@ -20,16 +20,14 @@ class SlackConnector(BearerConnector):
             return self._request("GET", "/conversations.list")
 
         if action == "get_history":
-            channel = str(params.get("channel", "")).strip()
-            if not channel:
-                raise ConnectorError("channel is required")
+            channel = require_channel(params.get("channel", ""))
             return self._request("GET", f"/conversations.history?channel={channel}")
 
         if action == "post_message":
-            channel = str(params.get("channel", "")).strip()
+            channel = require_channel(params.get("channel", ""))
             text = str(params.get("text", "")).strip()
-            if not channel or not text:
-                raise ConnectorError("channel and text are required")
+            if not text:
+                raise ConnectorError("text is required")
             return self._request("POST", "/chat.postMessage", {"channel": channel, "text": text})
 
         raise ConnectorError(f"slack has no action {action!r}")

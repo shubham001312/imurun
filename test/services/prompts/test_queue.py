@@ -101,5 +101,19 @@ class PromptSizeTests(unittest.TestCase):
             PromptQueue(max_text=0)
 
 
+class CancelledHistoryTests(unittest.TestCase):
+    def test_a_cancelled_prompt_is_kept_in_history_and_marked(self):
+        queue = PromptQueue()
+        prompt = queue.push("s1", "stop")
+        marks = []
+        self.assertTrue(
+            queue.cancel(prompt.id, mark=lambda rule, subject, why: marks.append((rule, subject, why)))
+        )
+        history = queue.history("s1")
+        self.assertEqual(len(history), 1)
+        self.assertTrue(history[0].cancelled)
+        self.assertEqual(marks[0][0], "G1-prompt")
+
+
 if __name__ == "__main__":
     unittest.main()
