@@ -1,0 +1,32 @@
+/* Obsidian - near-black, warm amber, dense, technical. */
+:root {
+  --bg: #0b0b0d;
+  --surface: #111114;
+  --surface-2: #17171c;
+  --text: #ececf1;
+  --muted: #8b8b96;
+  --line: #232329;
+  --line-strong: #33333c;
+  --accent: #f5a524;
+  --accent-text: #1a1206;
+  --accent-soft: rgba(245, 165, 36, .10);
+  --accent-line: rgba(245, 165, 36, .35);
+  --code-bg: #0e0e12;
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, .14);
+  --danger: #ef4444;
+  --danger-line: rgba(239, 68, 68, .40);
+  --danger-text: #fff;
+  --backdrop: rgba(5, 5, 7, .72);
+  --focus-ring: 0 0 0 3px rgba(245, 165, 36, .15);
+  --shadow: 0 24px 60px rgba(0, 0, 0, .55);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+}
+
+.brand { letter-spacing: .04em; }
+.bubble { box-shadow: 0 1px 0 rgba(255, 255, 255, .02); }
+.msg.user .bubble { border-color: var(--accent-line); }
+.send:hover { background: #ffb63d; }

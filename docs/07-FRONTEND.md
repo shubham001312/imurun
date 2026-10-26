@@ -100,6 +100,14 @@ vendored; GSAP only for 120-200 ms transitions and disabled under
 `prefers-reduced-motion`. Contrast AA, visible focus, `aria-live="polite"`
 for streaming text.
 
+## 7a. Design lab (current step)
+
+`frontend/design-lab/` holds six static style variants of the chat screen
+and the email Send/Cancel popup, switchable in the browser. Every style is
+only a variable block in `styles/`; layout lives in `base.css`, so the chosen
+style becomes the token source for `frontend/web/` before F3. Direct links:
+`?style=<name>` and `?style=<name>&popup=1`. See its README.
+
 ## 8. Input map (proposed; F-keys stay parked)
 
 | Key | Action |

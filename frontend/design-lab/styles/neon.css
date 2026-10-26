@@ -1,0 +1,49 @@
+/* Neon - deep blue, cyan/violet glow, glassy. */
+:root {
+  --bg: #070a14;
+  --surface: rgba(15, 21, 38, .86);
+  --surface-2: rgba(24, 33, 58, .66);
+  --text: #e8f0ff;
+  --muted: #8ea0c4;
+  --line: rgba(120, 160, 255, .16);
+  --line-strong: rgba(120, 160, 255, .32);
+  --accent: #22d3ee;
+  --accent-text: #04141a;
+  --accent-soft: rgba(34, 211, 238, .10);
+  --accent-line: rgba(34, 211, 238, .45);
+  --code-bg: rgba(5, 10, 22, .80);
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, .16);
+  --danger: #fb7185;
+  --danger-line: rgba(251, 113, 133, .45);
+  --danger-text: #1a0509;
+  --backdrop: rgba(3, 5, 12, .70);
+  --focus-ring: 0 0 0 3px rgba(34, 211, 238, .18), 0 0 24px rgba(34, 211, 238, .18);
+  --shadow: 0 30px 80px rgba(0, 0, 0, .60);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --font: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+body {
+  background:
+    radial-gradient(900px 500px at 80% -10%, rgba(168, 85, 247, .18), transparent 60%),
+    radial-gradient(700px 400px at 0% 100%, rgba(34, 211, 238, .12), transparent 60%),
+    var(--bg);
+}
+.sidebar { backdrop-filter: blur(14px); }
+.topbar { backdrop-filter: blur(14px); }
+.dialog { background: #0e1526; }
+.bubble { backdrop-filter: blur(6px); }
+.msg.user .bubble {
+  background: linear-gradient(135deg, rgba(34, 211, 238, .16), rgba(168, 85, 247, .14));
+  border-color: var(--accent-line);
+}
+.send {
+  background: linear-gradient(135deg, #22d3ee, #a855f7);
+  border: 0;
+  color: #05121a;
+}
+.send:hover { filter: brightness(1.08); }
+.logo { text-shadow: 0 0 18px rgba(34, 211, 238, .55); }
