@@ -45,13 +45,14 @@
   var start = THEMES.filter(function (t) { return t.id === wanted; })[0] || THEMES[0];
   select(start);
 
-  /* Text font - overrides the style font when chosen. */
+  /* Text font - Manrope is the selected UI font; the others stay for comparison. */
   var FONTS = [
-    { id: 'default', label: 'Style' },
-    { id: 'inter',   label: 'Inter' },
     { id: 'manrope', label: 'Manrope' },
-    { id: 'grotesk', label: 'Grotesk' }
+    { id: 'inter',   label: 'Inter' },
+    { id: 'grotesk', label: 'Grotesk' },
+    { id: 'default', label: 'Style default' }
   ];
+  var FONT_KEY = 'imurun.design.font.v2';
   var fontSwitcher = document.getElementById('font-switcher');
   var fontButtons = {};
 
@@ -61,7 +62,7 @@
     Object.keys(fontButtons).forEach(function (id) {
       fontButtons[id].classList.toggle('active', id === font.id);
     });
-    try { localStorage.setItem('imurun.design.font', font.id); } catch (e) { /* ignore */ }
+    try { localStorage.setItem(FONT_KEY, font.id); } catch (e) { /* ignore */ }
   }
 
   FONTS.forEach(function (font) {
@@ -75,7 +76,7 @@
   });
 
   var savedFont = null;
-  try { savedFont = localStorage.getItem('imurun.design.font'); } catch (e) { /* ignore */ }
+  try { savedFont = localStorage.getItem(FONT_KEY); } catch (e) { /* ignore */ }
   var urlFont = null;
   try { urlFont = new URLSearchParams(location.search).get('font'); } catch (e) { /* ignore */ }
   var wantedFont = urlFont || savedFont;

@@ -33,10 +33,12 @@ a few flourishes.
 
 ## Fonts
 
-The lab bar has a **TEXT** switcher: Style default, Inter, Manrope, Grotesk.
-All four are vendored in `fonts/` (SIL OFL) and work offline; JetBrains Mono
-is used for code. The chosen font is remembered and can be linked with
-`?font=inter`, `?font=manrope`, or `?font=grotesk`.
+**Manrope is the selected UI text font.** The lab bar still has a **TEXT**
+switcher (Manrope, Inter, Grotesk, Style default) so the alternatives can be
+compared; the default and the remembered choice is Manrope. All four are
+vendored in `fonts/` (SIL OFL) and work offline; JetBrains Mono is used for
+code and ids. The choice can be linked with `?font=manrope` (default),
+`?font=inter`, `?font=grotesk`, or `?font=default` for the style's own font.
 
 ## Creating a new style
 

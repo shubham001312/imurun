@@ -134,6 +134,9 @@ Format: ID | date | decision | decided by | evidence / status
   `EventSource` cannot send a bearer token; transcripts are per-session
   JSONL; turns run in worker threads and cancel at a loop boundary; the
   model is injected, so without FISH a turn is an honest 503. | assistant |
+- V36 | 2026-10-27 | UI text font: Manrope. JetBrains Mono stays the code and
+  id font; Inter and Space Grotesk remain vendored for comparison in the
+  design lab. | user |
 
 ## Process decisions (standing law)
 
