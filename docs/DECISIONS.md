@@ -88,6 +88,13 @@ Format: ID | date | decision | decided by | evidence / status
 - V26 | 2026-10-26 | Governor: FIFO wait queue with per-client cap, leases
   (300 s default) reclaimed and marked on expiry, slot unit = megabytes of
   RAM, status reports capacity/used/queued. Closes H-12, H-13, M-32. | user |
+- V27 | 2026-10-26 | Sessions: readable id (slug + 4 hex), name from the
+  first command (60 chars), /rename-session changes the name only (id stays
+  stable). Each session has its own memory under ~/.imurun/sessions/;
+  cross-session reads need the user's explicit grant and refusals are
+  marked. Skills live in ~/.imurun/skills/ as <id>/SKILL.md; the agent can
+  create a skill (validated, atomic, origin marked) and any added skill can
+  be listed and used. | user |
 
 ## Process decisions (standing law)
 
