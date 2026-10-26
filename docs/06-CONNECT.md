@@ -67,3 +67,9 @@ PUT  /api/persona                    -> save (user gesture only)
 
 The model can request an action; only the gate decides, and a write/admin
 request without approval returns `ask` to the user - never a silent run.
+
+Implemented in `services/server/api.py`: loopback-only bind, a per-run
+bearer token on every call, a 1 MB body cap, and routes for persona,
+connectors, prompts and sessions. OAuth lives in
+`services/connectors/oauth.py` (PKCE, one-time state, loopback redirect,
+token in the OS keychain).

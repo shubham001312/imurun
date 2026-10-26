@@ -116,6 +116,12 @@ Format: ID | date | decision | decided by | evidence / status
   points), all fixed. The original 80-flaw sheet is not in the repository,
   so its 50 open ids cannot be closed one by one until the sheet is
   provided; the remaining criticals are C-03, C-04, C-08. | user |
+- V31 | 2026-10-26 | Response and API: AgentLoop delivers queued prompts only
+  at step boundaries and again before the final answer; the kill switch stops
+  it between steps. ApiServer binds loopback only, requires a per-run bearer
+  token, caps bodies at 1 MB, and exposes persona, connectors, prompts and
+  sessions. OAuth uses PKCE with one-time state and a loopback redirect.
+  | user |
 
 ## Process decisions (standing law)
 

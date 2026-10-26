@@ -1,6 +1,7 @@
 """Connectors: linked accounts, capability-gated, audited."""
 from .base import ADMIN, READ, WRITE, Capability, Connector, ConnectorError, HttpTransport
 from .gate import ConnectorGate
+from .oauth import OAuthError, OAuthFlow, OAuthProvider
 from .registry import ConnectorRegistry
 from .tokens import KeyringTokenStore, MemoryTokenStore, TokenStoreUnavailable, redact
 from .providers import (
@@ -30,6 +31,9 @@ __all__ = [
     "HttpTransport",
     "KeyringTokenStore",
     "MemoryTokenStore",
+    "OAuthError",
+    "OAuthFlow",
+    "OAuthProvider",
     "RenderConnector",
     "SlackConnector",
     "SupabaseConnector",
