@@ -29,8 +29,8 @@ The other documents in docs/ (tools.md, models.md, ...) describe the released
 | monitor/    | Python     | APPROVED (shape) - function list not yet drafted |
 | providers/  | Python     | APPROVED (shape) - function list not yet drafted |
 | server/     | Python     | IN BUILD - loopback API: token gate, body cap, persona/connectors/prompts/sessions |
-| frontend/sections/ | JS  | APPROVED (shape) - pages not yet designed |
-| frontend/input/    | JS  | APPROVED (shape) - key map not yet defined |
+| frontend/sections/ | JS  | IN BUILD - plan approved (docs/07); F1 core next |
+| frontend/input/    | JS  | IN BUILD - input map proposed; F-keys parked |
 | rules/      | documents  | APPROVED - drafts pending user review |
 | docs/       | documents  | APPROVED - drafts pending user review |
 

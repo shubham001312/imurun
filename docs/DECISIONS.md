@@ -122,6 +122,13 @@ Format: ID | date | decision | decided by | evidence / status
   token, caps bodies at 1 MB, and exposes persona, connectors, prompts and
   sessions. OAuth uses PKCE with one-time state and a loopback redirect.
   | user |
+- V32 | 2026-10-26 | Frontend delivery: the web UI is a static shell served
+  by the loopback agent API and opened in the system browser; no Electron.
+  docs/07-FRONTEND.md. | user |
+- V33 | 2026-10-26 | TUI runtime: JS on a bundled Node runtime provisioned
+  in the background; zero npm packages at runtime. | user |
+- V34 | 2026-10-26 | Turn events stream over SSE on the loopback API
+  (tokens, thinking, tool, queue, turn-end, status). | user |
 
 ## Process decisions (standing law)
 
