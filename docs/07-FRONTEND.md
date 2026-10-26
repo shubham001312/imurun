@@ -132,7 +132,10 @@ scrolls with the wheel or trackpad while its scrollbar stays hidden. Ctrl+A
 (Cmd+A on macOS) inside the composer selects the prompt text only, never the
 page. `aria-live="polite"` for streaming text. Thinking blocks are rounded
 glass panels with softer muted text; opening one plays a short droplet
-animation. The transcript and sidebar scroll without a visible scrollbar.
+animation. A completed row is labelled "Thought" and has no step count. While
+a thinking step is live, a fast blue/pink liquid orb sits beside "Thinking";
+it is not an avatar next to "Imurun" and it disappears when the step ends. The
+transcript and sidebar scroll without a visible scrollbar.
 
 ## 7a. Design lab (finalised)
 

@@ -106,6 +106,71 @@ button { cursor: pointer; }
   font: 10.5px/1 var(--mono); letter-spacing: .1em; text-transform: uppercase;
   color: var(--muted); margin-bottom: 6px;
 }
+
+/* A live thinking indicator, never an avatar. It is hidden unless the
+   thinking step carries .is-thinking. */
+.liquid-orb {
+  --orb-size: 22px;
+  --orb-blur: calc(var(--orb-size) * .055);
+  --orb-core: #0b1f5e;
+  --orb-a: #2563eb;
+  --orb-b: #f472b6;
+  --orb-c: #22d3ee;
+  --orb-d: #e0f2fe;
+  position: relative; display: inline-block; flex: none;
+  width: var(--orb-size); height: var(--orb-size);
+  border-radius: 50%; overflow: hidden; isolation: isolate;
+  background:
+    radial-gradient(circle at 35% 26%, rgba(255, 255, 255, .95) 0 5%, transparent 22%),
+    radial-gradient(circle at 50% 50%, var(--orb-core) 0 34%, #1d4ed8 52%, var(--orb-a) 76%, #bae6fd 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, .55),
+    inset 0 0 7px rgba(255, 255, 255, .55),
+    0 0 10px rgba(56, 189, 248, .28);
+  animation: orb-turn 3s linear infinite;
+}
+.liquid-orb::before {
+  content: ""; position: absolute; inset: -6%;
+  background: conic-gradient(from 210deg,
+    transparent 0 7%,
+    var(--orb-c) 15%,
+    var(--orb-a) 27%,
+    var(--orb-b) 39%,
+    var(--orb-d) 49%,
+    #1d4ed8 61%,
+    var(--orb-b) 73%,
+    var(--orb-c) 85%,
+    transparent 93%);
+  filter: blur(var(--orb-blur)) saturate(1.45);
+  mix-blend-mode: screen;
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, transparent 0 18%, #000 44%, #000 78%, transparent 100%);
+  mask-image: radial-gradient(circle at 50% 50%, transparent 0 18%, #000 44%, #000 78%, transparent 100%);
+  animation: orb-swirl 2s linear infinite;
+}
+.liquid-orb::after {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  background:
+    radial-gradient(circle at 34% 26%, rgba(255, 255, 255, .95) 0 4%, rgba(255, 255, 255, .18) 13%, transparent 27%),
+    radial-gradient(circle at 66% 76%, transparent 54%, rgba(255, 255, 255, .45) 70%, transparent 82%);
+  mix-blend-mode: screen;
+  animation: orb-shine 2.4s ease-in-out infinite alternate;
+}
+.liquid-orb-sm { --orb-size: 18px; vertical-align: -4px; margin-right: 6px; }
+.thinking .liquid-orb { display: none; }
+.thinking.is-thinking .liquid-orb { display: inline-block; }
+.thinking summary .liquid-orb { margin-right: 6px; }
+@keyframes orb-turn { to { transform: rotate(360deg); } }
+@keyframes orb-swirl {
+  from { transform: rotate(0deg) scale(1); }
+  to { transform: rotate(360deg) scale(1.04); }
+}
+@keyframes orb-shine {
+  0%, 100% { transform: translate(-4%, -2%) scale(1); opacity: .8; }
+  50% { transform: translate(5%, 4%) scale(1.08); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .liquid-orb, .liquid-orb::before, .liquid-orb::after { animation: none; }
+}
 .bubble {
   padding: 12px 14px; border-radius: var(--radius);
   background: var(--surface-2); border: 1px solid var(--line);

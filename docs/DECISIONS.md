@@ -161,6 +161,11 @@ Format: ID | date | decision | decided by | evidence / status
   short droplet-like opening animation. | user |
 - V46 | 2026-10-27 | The chat transcript and sidebar scroll without a visible
   scrollbar. | user |
+- V47 | 2026-10-27 | Thinking label: no step count. A completed thought is
+  labelled "Thought"; a live one is labelled "Thinking". | user |
+- V48 | 2026-10-27 | A fast liquid-orb animation sits beside a live thinking
+  row only. It is not an avatar beside the model name, and it disappears when
+  the thinking step ends. | user |
 
 ## Process decisions (standing law)
 

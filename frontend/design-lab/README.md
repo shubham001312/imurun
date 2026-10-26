@@ -55,8 +55,10 @@ native 1px line. Ctrl+A (Cmd+A on macOS) selects only the prompt text. The
 left side of the action row shows Plan/Build and the model effort.
 
 The thinking block is a rounded glass panel with softer text; opening it
-plays a short droplet animation. The transcript and sidebar scroll without a
-visible scrollbar.
+plays a short droplet animation. A completed row is labelled "Thought" and has
+no step count. While a thinking step is live, a fast blue/pink liquid orb sits
+beside "Thinking"; it is not shown beside "Imurun" and disappears when the
+step ends. The transcript and sidebar scroll without a visible scrollbar.
 
 ## Creating a new style
 
