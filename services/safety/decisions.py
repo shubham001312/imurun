@@ -1,12 +1,15 @@
-"""G-3 check_start() and G-4 check_action(): the code decides, not the model.
+"""G3 action gating and G1/G2/G4 admission: the code decides, not the model.
 
-Every decision is one of allow / ask / deny with a reason and the rule that
-produced it (V4: enforcement in code; V9: a denial always says why).
+Every decision is allow / ask / deny with a reason and the canonical rule id
+from rules/guardrails.md (G1 governor, G2 hardware, G3 action, G4 disk).
+Nothing here trusts the caller: protected paths, grants and the require()
+helper make "ask" impossible to ignore by accident.
 """
 from __future__ import annotations
 
 import os
 import re
+import sys
 from dataclasses import dataclass
 
 from .limits import Limits
@@ -14,40 +17,64 @@ from .profile import MachineProfile
 
 GB = 1024**3
 
-SYSTEM_PREFIXES = (
-    # Windows
-    "c:\\windows",
-    "c:\\program files",
-    "c:\\program files (x86)",
-    "c:\\programdata",
-    # Linux
-    "/etc",
-    "/usr",
-    "/bin",
-    "/sbin",
-    "/boot",
-    "/sys",
-    "/proc",
-    "/dev",
-    # macOS
-    "/system",
-    "/library",
-    "/private/etc",
-    "/private/var",
-)
+GUARDRAIL_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _gb(value: int) -> str:
+    return f"{value / GB:.1f} GB"
+
+
+def _system_prefixes() -> tuple[str, ...]:
+    if os.name == "nt":
+        roots: list[str] = []
+        for name in ("SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"):
+            value = os.environ.get(name)
+            if value:
+                roots.append(value)
+        drive = os.environ.get("SystemDrive")
+        if drive:
+            roots.append(drive + "\\Windows")
+        return tuple(dict.fromkeys(roots))
+    if sys.platform == "darwin":
+        return (
+            "/etc",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/boot",
+            "/sys",
+            "/proc",
+            "/dev",
+            "/System",
+            "/Library",
+            "/Applications",
+            "/Volumes",
+            "/private/etc",
+            "/private/var",
+        )
+    return ("/etc", "/usr", "/bin", "/sbin", "/boot", "/sys", "/proc", "/dev", "/var", "/opt")
+
+
+SYSTEM_PREFIXES = _system_prefixes()
 
 DANGEROUS_COMMANDS = (
-    re.compile(r"rm\s+-[a-z]*r[a-z]*f?[a-z]*\s+/(\s|$)"),
-    re.compile(r"mkfs(\.|\s|$)"),
-    re.compile(r"dd\s+.*of=/dev/"),
-    re.compile(r"format\s+[a-z]:"),
-    re.compile(r"del\s+/[fsq].*[a-z]:\\", re.IGNORECASE),
-    re.compile(r"rd\s+/s\s+/q\s+[a-z]:\\", re.IGNORECASE),
-    re.compile(r"reg\s+delete", re.IGNORECASE),
-    re.compile(r"bcdedit", re.IGNORECASE),
-    re.compile(r"diskpart", re.IGNORECASE),
-    re.compile(r"shutdown\s+/(s|r)", re.IGNORECASE),
-    re.compile(r":\(\)\s*\{.*\};\s*:"),  # fork bomb
+    re.compile(r"rm\s+-[a-z]*r[a-z]*f[a-z]*\s+/(\*)?(\s|$)", re.IGNORECASE),
+    re.compile(r"--no-preserve-root", re.IGNORECASE),
+    re.compile(r"\bmkfs(\.|\s|$)", re.IGNORECASE),
+    re.compile(r"\bdd\b.*\bof=/dev/", re.IGNORECASE),
+    re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE),
+    re.compile(r"\bdel\s+/[fsq].*[a-z]:\\", re.IGNORECASE),
+    re.compile(r"\brd\s+/s\s+/q\s+[a-z]:\\", re.IGNORECASE),
+    re.compile(r"\bremove-item\b.*-recurse.*[a-z]:\\?\s*$", re.IGNORECASE),
+    re.compile(r"\bformat-volume\b", re.IGNORECASE),
+    re.compile(r"\bclear-disk\b", re.IGNORECASE),
+    re.compile(r"\binitialize-disk\b", re.IGNORECASE),
+    re.compile(r"\breg\s+delete\b", re.IGNORECASE),
+    re.compile(r"\bbcdedit\b", re.IGNORECASE),
+    re.compile(r"\bdiskpart\b", re.IGNORECASE),
+    re.compile(r"\b(shutdown|stop-computer|restart-computer)\b", re.IGNORECASE),
+    re.compile(r"\bset-executionpolicy\s+(unrestricted|bypass)", re.IGNORECASE),
+    re.compile(r":\(\)\s*\{.*\};\s*:"),
 )
 
 
@@ -56,6 +83,35 @@ class Decision:
     kind: str  # allow | ask | deny
     rule: str
     reasons: tuple[str, ...] = ()
+
+    @property
+    def allowed(self) -> bool:
+        return self.kind == "allow"
+
+
+class PermissionRequired(PermissionError):
+    """Raised when a caller tries to act on an 'ask' without a grant."""
+
+
+@dataclass(frozen=True)
+class Grant:
+    """What a session (or spawned child) is allowed to do."""
+
+    tools: frozenset[str]
+    roots: tuple[str, ...] = ()
+    hosts: frozenset[str] = frozenset()
+
+    @staticmethod
+    def full(project_root: str, user_data_root: str) -> "Grant":
+        return Grant(
+            tools=frozenset({"file_read", "file_write", "file_delete", "shell", "network"}),
+            roots=(project_root, user_data_root),
+            hosts=frozenset(),
+        )
+
+    def intersect(self, other: "Grant") -> "Grant":
+        roots = tuple(root for root in self.roots if any(_inside(root, keep) for keep in other.roots))
+        return Grant(tools=self.tools & other.tools, roots=roots, hosts=self.hosts & other.hosts)
 
 
 @dataclass(frozen=True)
@@ -67,56 +123,100 @@ class ModelRequest:
 
 def _norm(path: str) -> str:
     resolved = os.path.realpath(os.path.expanduser(path))
-    return resolved.casefold() if os.name == "nt" else resolved
+    return resolved.casefold() if (os.name == "nt" or sys.platform == "darwin") else resolved
 
 
 def _inside(path: str, root: str) -> bool:
-    path, root = _norm(path), _norm(root)
-    return path == root or path.startswith(root + os.sep)
+    candidate, base = _norm(path), _norm(root)
+    return candidate == base or candidate.startswith(base + os.sep)
 
 
 def _system_path(path: str) -> bool:
     candidate = _norm(path)
-    return any(candidate == prefix or candidate.startswith(prefix + os.sep) for prefix in SYSTEM_PREFIXES)
+    return any(candidate == _norm(prefix) or candidate.startswith(_norm(prefix) + os.sep) for prefix in SYSTEM_PREFIXES)
+
+
+def _protected(path: str, project_root: str, extra: tuple[str, ...]) -> bool:
+    candidate = _norm(path)
+    roots = (GUARDRAIL_DIR, os.path.join(project_root, ".git")) + tuple(extra)
+    for root in roots:
+        base = _norm(root)
+        if candidate == base or candidate.startswith(base + os.sep):
+            return True
+    name = os.path.basename(candidate)
+    return name == ".env" or name.startswith(".env.")
+
+
+def require(decision: Decision, granted: bool = False) -> Decision:
+    """Enforce a decision: deny always raises, ask needs an explicit grant."""
+    if decision.kind == "deny" or (decision.kind == "ask" and not granted):
+        raise PermissionRequired(f"{decision.rule}: {'; '.join(decision.reasons)}")
+    return decision
 
 
 def check_start(request: ModelRequest, limits: Limits, profile: MachineProfile) -> Decision:
-    reasons: list[str] = []
+    if profile.errors:
+        return Decision(
+            "ask",
+            "G2-hardware",
+            (f"hardware probe incomplete: {'; '.join(profile.errors)}",),
+        )
+
+    resident = (
+        request.model_bytes
+        + request.context_tokens * limits.kv_bytes_per_token
+        + limits.compute_overhead
+    )
 
     if request.model_bytes > profile.disk_free - limits.min_free_disk:
         return Decision(
             "deny",
             "G4-disk",
             (
-                f"model needs {request.model_bytes // GB} GB, "
-                f"only {profile.disk_free // GB} GB free (keeping {limits.min_free_disk // GB} GB)",
+                f"model needs {_gb(request.model_bytes)}, only {_gb(profile.disk_free)} free "
+                f"(keeping {_gb(limits.min_free_disk)})",
             ),
         )
 
-    # FISH streams weights from disk, but the resident window must fit in RAM.
-    if request.model_bytes > limits.max_model_ram * 2:
+    if resident > limits.max_model_ram * 2:
         return Decision(
-            "deny",
-            "G1-ram",
+            "ask",
+            "G1-governor",
             (
-                f"model is {request.model_bytes // GB} GB, more than twice the "
-                f"{limits.max_model_ram // GB} GB RAM budget even with streaming",
+                f"{_gb(resident)} resident need is more than twice the {_gb(limits.max_model_ram)} "
+                "RAM budget; it can stream from disk but will be slow - explicit opt-in required",
             ),
         )
-    if request.model_bytes > limits.max_model_ram:
+
+    reasons: list[str] = []
+    if resident > limits.max_model_ram:
         reasons.append(
-            f"{request.model_bytes // GB} GB model exceeds the {limits.max_model_ram // GB} GB "
+            f"{_gb(resident)} resident need exceeds the {_gb(limits.max_model_ram)} "
             f"{limits.mode} budget; needs full-resource opt-in (G1)"
         )
-
     if request.threads > limits.max_threads:
         reasons.append(
             f"{request.threads} threads requested, {limits.max_threads} allowed in {limits.mode} mode"
         )
-
     if reasons:
-        return Decision("ask", "G1-resources", tuple(reasons))
-    return Decision("allow", "G1-resources", ("within the safe budget",))
+        return Decision("ask", "G1-governor", tuple(reasons))
+    return Decision("allow", "G1-governor", ("within the safe budget",))
+
+
+def check_request(size: int, elapsed: float, limits: Limits) -> Decision:
+    if size > limits.max_request_bytes:
+        return Decision(
+            "deny",
+            "G1-request",
+            (f"request is {size} bytes, cap is {limits.max_request_bytes}",),
+        )
+    if elapsed > limits.request_timeout:
+        return Decision(
+            "deny",
+            "G1-timeout",
+            (f"request ran {elapsed:.1f}s, timeout is {limits.request_timeout:.0f}s",),
+        )
+    return Decision("allow", "G1-request", ("within the request budget",))
 
 
 def check_action(
@@ -125,39 +225,57 @@ def check_action(
     project_root: str,
     user_data_root: str,
     allowed_hosts: tuple[str, ...] = (),
+    grant: Grant | None = None,
+    protected_roots: tuple[str, ...] = (),
 ) -> Decision:
     kind = str(action.get("kind", ""))
-    if kind in ("file_write", "file_delete", "file_read"):
+
+    if grant is not None and kind not in grant.tools:
+        return Decision("deny", "G3-grant", (f"the grant does not include {kind}",))
+
+    if kind in ("file_read", "file_write", "file_delete"):
         path = str(action.get("path", ""))
         if not path:
-            return Decision("deny", "G3-path", ("no path given",))
+            return Decision("deny", "G3-action", ("no path given",))
+        if _protected(path, project_root, protected_roots):
+            return Decision(
+                "deny",
+                "G3-protected",
+                (f"{path} is guardrail source, version control, or a secrets file",),
+            )
         if _system_path(path):
             return Decision("deny", "G3-system-path", (f"{path} is a system location",))
-        inside = _inside(path, project_root) or _inside(path, user_data_root)
-        if not inside:
-            return Decision("deny", "G3-outside-roots", (f"{path} is outside the project and user data",))
+        roots = grant.roots if grant is not None else (project_root, user_data_root)
+        if not any(_inside(path, root) for root in roots):
+            return Decision(
+                "deny",
+                "G3-outside-roots",
+                (f"{path} is outside the approved roots",),
+            )
         if kind == "file_delete":
-            return Decision("ask", "G3-delete", ("deleting a file needs permission",))
-        return Decision("allow", "G3-file", (f"{kind} inside the approved roots",))
+            return Decision("ask", "G3-action", ("deleting a file needs permission",))
+        return Decision("allow", "G3-action", (f"{kind} inside the approved roots",))
 
     if kind == "shell":
         command = str(action.get("command", ""))
         if not command:
-            return Decision("deny", "G3-shell", ("no command given",))
+            return Decision("deny", "G3-action", ("no command given",))
         for pattern in DANGEROUS_COMMANDS:
             if pattern.search(command):
                 return Decision("deny", "G3-destructive", (f"blocked by pattern {pattern.pattern!r}",))
-        return Decision("ask", "G3-shell", ("running a shell command needs permission",))
+        return Decision("ask", "G3-action", ("running a shell command needs permission",))
 
     if kind == "network":
         host = str(action.get("host", "")).casefold()
         if not host:
-            return Decision("deny", "G3-network", ("no host given",))
-        if host in {h.casefold() for h in allowed_hosts}:
-            return Decision("allow", "G3-network", (f"{host} is on the allowlist",))
-        return Decision("ask", "G3-network", (f"{host} is not on the allowlist",))
+            return Decision("deny", "G5-network", ("no host given",))
+        hosts = set(grant.hosts) if grant is not None else set()
+        hosts.update(h.casefold() for h in allowed_hosts)
+        if host in hosts:
+            return Decision("allow", "G5-network", (f"{host} is on the allowlist",))
+        return Decision("ask", "G5-network", (f"{host} is not on the allowlist",))
 
     if kind in ("registry", "device", "disk"):
-        return Decision("deny", "G3-device", (f"{kind} access is never automatic",))
+        return Decision("deny", "G3-action", (f"{kind} access is never automatic",))
 
-    return Decision("deny", "G3-unknown", (f"unknown action kind: {kind!r}",))
+    return Decision("deny", "G3-action", (f"unknown action kind: {kind!r}",))
