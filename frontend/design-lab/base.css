@@ -162,10 +162,15 @@ button { cursor: pointer; }
   border: 1px solid var(--line-strong); border-radius: var(--radius);
 }
 textarea {
+  display: block;
   width: 100%; min-height: 44px; resize: none; border: 0; outline: 0;
   background: transparent;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  overscroll-behavior: contain;
 }
 .input-wrap textarea:focus-visible { outline: 0; }
+.input-wrap textarea::-webkit-scrollbar { width: 0; height: 0; }
 .composer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 .icon {
   width: 30px; height: 30px; border-radius: var(--radius-sm);

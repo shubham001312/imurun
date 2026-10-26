@@ -84,6 +84,26 @@
   var startFont = FONTS.filter(function (f) { return f.id === wantedFont; })[0] || FONTS[0];
   applyFont(startFont);
 
+  /* Prompt grows to five lines, then scrolls; the scrollbar stays hidden. */
+  var prompt = document.querySelector('.input-wrap textarea');
+  if (prompt) {
+    var maxPromptLines = 5;
+    var resizePrompt = function () {
+      prompt.style.height = 'auto';
+      var style = window.getComputedStyle(prompt);
+      var line = parseFloat(style.lineHeight);
+      if (!line || isNaN(line)) line = (parseFloat(style.fontSize) || 15) * 1.5;
+      var padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+      var border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+      var max = line * maxPromptLines + padding + border;
+      prompt.style.height = Math.min(prompt.scrollHeight, max) + 'px';
+      prompt.style.overflowY = prompt.scrollHeight > max ? 'auto' : 'hidden';
+    };
+    prompt.addEventListener('input', resizePrompt);
+    window.addEventListener('resize', resizePrompt);
+    resizePrompt();
+  }
+
   /* Pointer light, used by the Liquid style. */
   var glow = document.getElementById('pointer-glow');
   var reduceMotion = false;

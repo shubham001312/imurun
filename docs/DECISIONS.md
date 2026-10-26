@@ -145,6 +145,8 @@ Format: ID | date | decision | decided by | evidence / status
   font. Supersedes V37 (Paper). The warm serif display face stays for the
   brand and dialog headings; the other lab styles remain for comparison. | user |
 - V39 | 2026-10-27 | Composer: no yellow focus ring; the caret is the focus cue. | user |
+- V40 | 2026-10-27 | Composer: starts at two lines, grows to five, then scrolls
+  with the wheel/trackpad; the scrollbar stays hidden. | user |
 
 ## Process decisions (standing law)
 

@@ -46,6 +46,12 @@ vendored in `fonts/` (SIL OFL) and work offline; JetBrains Mono is used for
 code and ids. The choice can be linked with `?font=manrope` (default),
 `?font=inter`, `?font=grotesk`, or `?font=default` for the style's own font.
 
+## Composer
+
+The prompt starts at two lines, grows to five as you type, then scrolls with
+the wheel or trackpad. Its scrollbar is hidden, and focus is shown by the
+caret rather than a yellow ring.
+
 ## Creating a new style
 
 1. Copy `styles/obsidian.css` to `styles/<name>.css`.
