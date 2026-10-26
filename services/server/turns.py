@@ -160,10 +160,7 @@ class TurnRunner:
             turn.answer = result.answer
             turn.steps = len(result.steps)
             turn.state = "stopped" if result.status == "stopped" else "done"
-            if result.answer:
-                self._transcripts.append(
-                    turn.session_id, "assistant", result.answer, turn.id
-                )
+            self._append_result(turn, result)
             self._publish_queue(turn)
             self._events.publish(
                 "turn.end",
@@ -208,3 +205,22 @@ class TurnRunner:
                 "pending": self._queue.pending_count(),
             },
         )
+
+    def _append_result(self, turn: Turn, result: LoopResult) -> None:
+        """Keep the transcript complete: every delivered queued prompt and
+        every step answer, in order. The initial prompt was appended at start."""
+        seen_initial = False
+        for message in result.messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role == "user" and not seen_initial:
+                seen_initial = True
+                continue
+            if role not in {"user", "assistant"}:
+                continue
+            if not content:
+                self._mark_turn(turn.id, f"skipped an empty {role} message")
+                continue
+            self._transcripts.append(
+                turn.session_id, role, str(content), turn.id
+            )
