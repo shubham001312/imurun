@@ -34,6 +34,12 @@ class Skill:
     origin: str = "user"
 
 
+def _single_line(value: str, limit: int) -> str:
+    """Frontmatter is line-based: a newline in a field would inject YAML."""
+    cleaned = re.sub(r"[\r\n]+", " ", value).strip()
+    return cleaned[:limit]
+
+
 class SkillsStore:
     def __init__(self, root: Path | str | None = None, mark=None) -> None:
         self._root = Path(root) if root else default_root()
@@ -57,9 +63,19 @@ class SkillsStore:
                 continue
             if file.is_file():
                 skill = self._parse(file)
-                if skill is not None:
-                    found.append(skill)
+                if skill is None:
+                    self._mark_failure(file, "unreadable skill file")
+                    continue
+                found.append(skill)
         return found
+
+    def _mark_failure(self, path: Path, why: str) -> None:
+        if self._mark is None:
+            return
+        try:
+            self._mark("G3-skills", str(path), why)
+        except Exception:  # noqa: BLE001 - a broken sink must not hide the skill list
+            pass
 
     def get(self, skill_id: str) -> Skill | None:
         for skill in self.list():
@@ -76,9 +92,9 @@ class SkillsStore:
         skill_id: str | None = None,
         origin: str = "user",
     ) -> Skill:
-        cleaned_name = name.strip()
-        cleaned_description = description.strip()
-        cleaned_body = body.strip()
+        cleaned_name = _single_line(name, MAX_NAME)
+        cleaned_description = _single_line(description, MAX_DESCRIPTION)
+        cleaned_body = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", body).strip()
         if not cleaned_name:
             raise ValueError("a skill needs a name")
         if len(cleaned_name) > MAX_NAME:
@@ -94,6 +110,8 @@ class SkillsStore:
         identifier = skill_id or slugify(cleaned_name, max_words=8, max_len=60)
         if not SKILL_ID.match(identifier):
             raise ValueError(f"invalid skill id: {identifier!r}")
+        if not re.fullmatch(r"[a-z0-9_-]+", origin or ""):
+            raise ValueError("origin must be a short lowercase token")
 
         with self._lock:
             target = self._root / identifier / "SKILL.md"
@@ -126,7 +144,7 @@ class SkillsStore:
     def _parse(self, path: Path) -> Skill | None:
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return None
         if not text.startswith("---"):
             return Skill(

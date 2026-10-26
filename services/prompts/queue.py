@@ -22,10 +22,13 @@ class QueuedPrompt:
 
 
 class PromptQueue:
-    def __init__(self, history_limit: int = 1000) -> None:
+    def __init__(self, history_limit: int = 1000, max_text: int = 1_000_000) -> None:
         if history_limit <= 0:
             raise ValueError("history_limit must be positive")
+        if max_text <= 0:
+            raise ValueError("max_text must be positive")
         self._history_limit = history_limit
+        self._max_text = max_text
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._pending: list[QueuedPrompt] = []
@@ -37,6 +40,8 @@ class PromptQueue:
             raise ValueError("session_id is required")
         if not text:
             raise ValueError("text is required")
+        if len(text) > self._max_text:
+            raise ValueError(f"a queued prompt cannot exceed {self._max_text} characters")
         with self._condition:
             prompt = QueuedPrompt(
                 id=self._next_id,

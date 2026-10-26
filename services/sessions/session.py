@@ -40,7 +40,7 @@ def new_session_id(first_command: str) -> str:
 
 
 def derive_name(first_command: str) -> str:
-    name = first_command.strip()[:60].rstrip()
+    name = re.sub(r"[\x00-\x1f]", " ", first_command).strip()[:60].rstrip()
     return name or "Untitled session"
 
 
@@ -99,6 +99,8 @@ class Session:
     def load(cls, session_id: str, root: Path | str | None = None, mark=None) -> "Session":
         path = _path_for(session_id, root)
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("id") != session_id:
+            raise ValueError(f"session file {path} does not belong to {session_id!r}")
         identity = SessionIdentity(
             id=data["id"],
             name=data["name"],
@@ -189,7 +191,7 @@ class Session:
         return dict(data.get("memory", {}))
 
     @staticmethod
-    def list_sessions(root: Path | str | None = None) -> list[SessionIdentity]:
+    def list_sessions(root: Path | str | None = None, mark=None) -> list[SessionIdentity]:
         directory = Path(root) if root else default_root()
         if not directory.exists():
             return []
@@ -205,7 +207,12 @@ class Session:
                         renamed_at=data.get("renamed_at"),
                     )
                 )
-            except (OSError, KeyError, ValueError):
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                if mark is not None:
+                    try:
+                        mark("G3-session", str(path), f"unreadable session: {type(exc).__name__}")
+                    except Exception:  # noqa: BLE001 - a broken sink must not hide the list
+                        pass
                 continue
         return sorted(found, key=lambda identity: identity.created_at)
 

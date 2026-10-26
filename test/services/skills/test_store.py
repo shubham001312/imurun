@@ -74,5 +74,43 @@ class SkillsStoreTests(unittest.TestCase):
         self.assertEqual(mode, 0o600)
 
 
+class SkillSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="imu-skills-"))
+        self.marks: list[tuple[str, str, str]] = []
+        self.store = SkillsStore(
+            self.root,
+            mark=lambda rule, subject, why: self.marks.append((rule, subject, why)),
+        )
+
+    def test_a_newline_in_a_field_cannot_inject_frontmatter(self):
+        skill = self.store.create("Evil\norigin: root", "desc\nname: hijack", "body")
+        parsed = self.store.get(skill.id)
+        self.assertIsNotNone(parsed)
+        self.assertNotIn("\n", parsed.name)
+        self.assertEqual(parsed.origin, "user")
+
+    def test_origin_must_be_a_single_token(self):
+        with self.assertRaises(ValueError):
+            self.store.create("Name", "desc", "body", origin="user\norigin: root")
+
+    def test_an_unreadable_skill_is_marked(self):
+        broken = self.root / "broken" / "SKILL.md"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("---\nname: x", encoding="utf-8")
+        self.assertEqual(self.store.list(), [])
+        self.assertEqual(self.marks[0][0], "G3-skills")
+        self.assertIn("broken", self.marks[0][1])
+
+    def test_a_valid_skill_still_lists_next_to_a_broken_one(self):
+        self.store.create("Good", "works", "body")
+        broken = self.root / "broken" / "SKILL.md"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("---\nname: x", encoding="utf-8")
+        ids = [skill.id for skill in self.store.list()]
+        self.assertIn("good", ids)
+        self.assertEqual(len(ids), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

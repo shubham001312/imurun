@@ -1,4 +1,5 @@
 """E2: readable session ids, name from the first command, rename, isolation."""
+import json
 import os
 import re
 import stat
@@ -125,6 +126,37 @@ class MemoryTests(unittest.TestCase):
             return
         mode = stat.S_IMODE(os.stat(session._path).st_mode)
         self.assertEqual(mode, 0o600)
+
+
+class SessionSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="imu-sessions-")
+
+    def test_a_corrupt_session_file_is_marked(self):
+        with open(os.path.join(self.root, "broken.json"), "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        marks = []
+        sessions = Session.list_sessions(
+            self.root,
+            mark=lambda rule, subject, why: marks.append((rule, subject, why)),
+        )
+        self.assertEqual(sessions, [])
+        self.assertEqual(marks[0][0], "G3-session")
+
+    def test_load_rejects_a_file_with_another_id(self):
+        session = Session.start("hello world", root=self.root)
+        path = os.path.join(self.root, f"{session.id}.json")
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        data["id"] = "someone-else"
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        with self.assertRaises(ValueError):
+            Session.load(session.id, root=self.root)
+
+    def test_a_newline_in_the_first_command_does_not_enter_the_name(self):
+        name = Session.start("hello\nworld", root=self.root).name
+        self.assertNotIn("\n", name)
 
 
 if __name__ == "__main__":

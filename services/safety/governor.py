@@ -77,6 +77,10 @@ class Governor:
         """Wait in line for a slot. Returns a ticket, or None on timeout."""
         if weight <= 0:
             raise ValueError("weight must be positive")
+        if weight > self._capacity:
+            raise ValueError(f"weight {weight} exceeds the governor capacity {self._capacity}")
+        if self._per_client is not None and weight > self._per_client:
+            raise ValueError(f"weight {weight} exceeds the per-client cap {self._per_client}")
         deadline = None if timeout is None else time.monotonic() + timeout
         waiter = _Waiter(client=client, weight=weight)
         with self._condition:

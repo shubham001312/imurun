@@ -126,5 +126,24 @@ class GovernorTests(unittest.TestCase):
             gov.acquire(0)
 
 
+class GovernorAdmissionTests(unittest.TestCase):
+    def test_a_weight_larger_than_capacity_is_refused(self):
+        governor = Governor(capacity=10)
+        with self.assertRaises(ValueError):
+            governor.acquire(weight=11)
+
+    def test_a_weight_larger_than_the_per_client_cap_is_refused(self):
+        governor = Governor(capacity=10, per_client=4)
+        with self.assertRaises(ValueError):
+            governor.acquire(weight=5)
+
+    def test_a_full_capacity_weight_is_granted(self):
+        governor = Governor(capacity=10)
+        ticket = governor.acquire(weight=10, timeout=0.1)
+        self.assertIsNotNone(ticket)
+        governor.release(ticket)
+        self.assertEqual(governor.status()["used"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

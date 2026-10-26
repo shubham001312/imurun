@@ -86,5 +86,20 @@ class PromptQueueTests(unittest.TestCase):
         self.assertTrue(history[0].delivered)
 
 
+class PromptSizeTests(unittest.TestCase):
+    def test_an_oversized_prompt_is_refused(self):
+        queue = PromptQueue(max_text=10)
+        with self.assertRaises(ValueError):
+            queue.push("s1", "x" * 11)
+
+    def test_a_prompt_at_the_limit_is_accepted(self):
+        queue = PromptQueue(max_text=10)
+        self.assertEqual(queue.push("s1", "x" * 10).text, "x" * 10)
+
+    def test_max_text_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            PromptQueue(max_text=0)
+
+
 if __name__ == "__main__":
     unittest.main()
