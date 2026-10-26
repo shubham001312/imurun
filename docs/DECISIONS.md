@@ -70,6 +70,10 @@ Format: ID | date | decision | decided by | evidence / status
 - V22 | 2026-10-26 | Depth confirmed at 2: grandchildren cannot spawn.
   Orphan results are delivered as a notice when the parent resumes or next
   acts, plus the session tree entry. | user |
+- V23 | 2026-10-26 | Guardrails live in services/safety/ (inside services,
+  no layout change). Build order starts with them. G-1..G-8 approved and
+  built: probe, limits, check_start, check_action, governor, killswitch,
+  mark/audit. Evidence: 45 passing tests (test/services/safety/). | user |
 
 ## Process decisions (standing law)
 

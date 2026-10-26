@@ -23,7 +23,7 @@ The other documents in docs/ (tools.md, models.md, ...) describe the released
 | model/      | C++        | APPROVED (shape) - function list not yet drafted |
 | server/     | C++        | APPROVED (shape) - function list not yet drafted |
 | response/   | Python     | APPROVED (shape) - function list not yet drafted |
-| services/   | Python     | APPROVED (shape) - function list not yet drafted |
+| services/   | Python     | IN BUILD - services/safety/ (G-1..G-8) built, 45 tests |
 | powers/     | Python     | APPROVED (shape) - function list not yet drafted |
 | monitor/    | Python     | APPROVED (shape) - function list not yet drafted |
 | providers/  | Python     | APPROVED (shape) - function list not yet drafted |
