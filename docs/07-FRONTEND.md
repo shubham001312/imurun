@@ -124,8 +124,9 @@ JetBrains Mono is used for code and ids. Tailwind output vendored; GSAP only
 for 120-200 ms transitions and disabled under `prefers-reduced-motion`.
 Contrast AA, visible focus on controls; the composer uses its caret instead of
 a yellow focus ring. It grows from two lines to five, then scrolls with the
-wheel or trackpad while its scrollbar stays hidden. `aria-live="polite"` for
-streaming text.
+wheel or trackpad while its scrollbar stays hidden. Ctrl+A (Cmd+A on macOS)
+inside the composer selects the prompt text only, never the page.
+`aria-live="polite"` for streaming text.
 
 ## 7a. Design lab (finalised)
 

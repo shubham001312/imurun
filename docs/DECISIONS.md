@@ -147,6 +147,8 @@ Format: ID | date | decision | decided by | evidence / status
 - V39 | 2026-10-27 | Composer: no yellow focus ring; the caret is the focus cue. | user |
 - V40 | 2026-10-27 | Composer: starts at two lines, grows to five, then scrolls
   with the wheel/trackpad; the scrollbar stays hidden. | user |
+- V41 | 2026-10-27 | Composer: Ctrl+A (Cmd+A on macOS) selects only the prompt
+  text, never the page. | user |
 
 ## Process decisions (standing law)
 

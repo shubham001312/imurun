@@ -50,7 +50,8 @@ code and ids. The choice can be linked with `?font=manrope` (default),
 
 The prompt starts at two lines, grows to five as you type, then scrolls with
 the wheel or trackpad. Its scrollbar is hidden, and focus is shown by the
-caret rather than a yellow ring.
+caret rather than a yellow ring. Ctrl+A (Cmd+A on macOS) selects only the
+prompt text.
 
 ## Creating a new style
 

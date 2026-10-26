@@ -101,6 +101,13 @@
     };
     prompt.addEventListener('input', resizePrompt);
     window.addEventListener('resize', resizePrompt);
+    prompt.addEventListener('keydown', function (event) {
+      var selectAll = (event.ctrlKey || event.metaKey) && !event.altKey &&
+        (event.code === 'KeyA' || (event.key && event.key.toLowerCase() === 'a'));
+      if (!selectAll) return;
+      event.preventDefault();
+      prompt.select();
+    });
     resizePrompt();
   }
 
