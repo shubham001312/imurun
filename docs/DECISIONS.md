@@ -74,6 +74,20 @@ Format: ID | date | decision | decided by | evidence / status
   no layout change). Build order starts with them. G-1..G-8 approved and
   built: probe, limits, check_start, check_action, governor, killswitch,
   mark/audit. Evidence: 45 passing tests (test/services/safety/). | user |
+- V24 | 2026-10-26 | FISH foundation = HYBRID: llama.cpp is the compute
+  core linked into the server process; FISH owns the streaming scheduler
+  (resident window, mmap, swap, stats). The from-scratch path was rejected
+  in favour of reaching the speed goal sooner. The earlier "oracle only"
+  answer applied to the from-scratch path and is superseded. | user |
+- V25 | 2026-10-26 | Queued prompts must reach the model before the task
+  ends and during the task: at the next step boundary the waiting message
+  is injected in order (marked as queued), and before the final answer the
+  loop checks again and continues instead of ending unaware. Never mid
+  token. Order and wording preserved (V16); cancel before delivery; child
+  queues isolated. Code-enforced in services/prompts/ (PromptQueue). | user |
+- V26 | 2026-10-26 | Governor: FIFO wait queue with per-client cap, leases
+  (300 s default) reclaimed and marked on expiry, slot unit = megabytes of
+  RAM, status reports capacity/used/queued. Closes H-12, H-13, M-32. | user |
 
 ## Process decisions (standing law)
 
