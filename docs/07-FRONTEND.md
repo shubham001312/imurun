@@ -122,8 +122,8 @@ Liquid Paper keeps its warm serif display face for the brand and dialog
 headings, while Inter and Space Grotesk stay vendored for comparison.
 JetBrains Mono is used for code and ids. Tailwind output vendored; GSAP only
 for 120-200 ms transitions and disabled under `prefers-reduced-motion`.
-Contrast AA, visible focus,
-`aria-live="polite"` for streaming text.
+Contrast AA, visible focus on controls; the composer uses its caret instead of
+a yellow focus ring. `aria-live="polite"` for streaming text.
 
 ## 7a. Design lab (finalised)
 

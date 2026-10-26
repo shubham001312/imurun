@@ -144,6 +144,7 @@ Format: ID | date | decision | decided by | evidence / status
 - V38 | 2026-10-27 | Final UI design: Liquid Paper, with Manrope as the UI text
   font. Supersedes V37 (Paper). The warm serif display face stays for the
   brand and dialog headings; the other lab styles remain for comparison. | user |
+- V39 | 2026-10-27 | Composer: no yellow focus ring; the caret is the focus cue. | user |
 
 ## Process decisions (standing law)
 
