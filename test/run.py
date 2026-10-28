@@ -20,6 +20,13 @@ import threading
 import time
 import unittest
 
+# Running this file directly puts test/ at the front of sys.path, so
+# `import services` would resolve to test/services/ instead of the real
+# package and every test would fail on a missing submodule. Drop it.
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if sys.path and os.path.abspath(sys.path[0] or os.getcwd()) == _THIS_DIR:
+    del sys.path[0]
+
 WHEEL = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 ASCII_WHEEL = "|/-\\"
 PROGRESS_STEPS = 10
