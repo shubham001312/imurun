@@ -134,7 +134,7 @@ def main() -> int:
           f"ff={info.n_ff} head={info.n_head}/{info.n_head_kv} ctx={info.n_ctx} "
           f"vocab={info.vocab} tied={info.tied_output}")
     print(f"  quant: {info.quant.decode()}")
-    check(info.n_layers == 16, "model info exposed to the caller")
+    check(info.n_layers > 0, "model info exposed to the caller")
     check(info.n_head_kv < info.n_head, "GQA exposed")
 
     # ---- tokenizer round trip

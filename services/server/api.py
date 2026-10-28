@@ -35,6 +35,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from ..config import load_config
 from ..connectors.base import ConnectorError
 from ..connectors.gate import ConnectorGate
 from ..connectors.oauth import OAuthError, OAuthFlow
@@ -46,8 +47,86 @@ from ..safety.decisions import PermissionRequired
 from ..sessions.session import Session
 from ..sessions.transcript import TranscriptStore
 from ..skills.store import SkillsStore
+from .clients import ClientStore
 from .events import CLOSE, EventBroker
+from .resources import ResourceSampler
+from .settings import SettingsStore
+from .stack import StackController
 from .turns import TurnRunner
+from .usage import UsageTracker
+try:  # run as ``imurun.services.server.api``
+    from ..model.fish_client import SyncFishModelClient
+except ImportError:  # run as ``services.server.api`` from the imurun directory
+    from model.fish_client import SyncFishModelClient
+
+
+def _selected_model_name(server) -> str:
+    """Name of the model the engine will load, or an empty string."""
+    model = getattr(server, "_model", None)
+    getter = getattr(model, "selected_name", None)
+    if getter is None:
+        return ""
+    try:
+        return str(getter())
+    except Exception:  # noqa: BLE001 - a broken picker must not break the list
+        return ""
+
+
+def _tools_summary(server) -> dict:
+    """A one-line view of the live-fact tools for /api/status.
+
+    The full record is on /api/tools; this is only what a status line needs:
+    how many tools exist, how many can run now, and whether the machine can
+    reach the network at all. A missing runner is reported as empty rather
+    than as an error.
+    """
+    runner = getattr(server, "_tools", None)
+    if runner is None:
+        return {"total": 0, "available": 0, "network": False, "offline": True}
+    try:
+        status = runner.status()
+    except Exception:  # noqa: BLE001 - a status line must never fail
+        return {"total": 0, "available": 0, "network": False, "offline": True}
+    tools = status.get("tools") or []
+    network = bool(status.get("network"))
+    return {
+        "total": len(tools),
+        "available": sum(1 for tool in tools if tool.get("available")),
+        "network": network,
+        "offline": not network,
+    }
+
+
+def _model_status(server) -> dict:
+    """Which compute path is live, and whether it can answer."""
+    model = getattr(server, "_model", None)
+    reporter = getattr(model, "status", None)
+    if reporter is None:
+        return {"engine": "none", "available": bool(getattr(model, "available", False))}
+    try:
+        status = dict(reporter())
+    except Exception:  # noqa: BLE001
+        return {"engine": "unknown", "available": False}
+    status.setdefault("available", bool(getattr(model, "available", False)))
+    return status
+
+# Optional FastAPI models API (requires huggingface_hub, fastapi)
+try:
+    from .models_api import DownloadRequest, get_model_manager
+    _HAS_MODELS_API = True
+except ImportError:
+    DownloadRequest = None
+    get_model_manager = None
+    _HAS_MODELS_API = False
+
+# Fallback model manager if FastAPI not available
+if not _HAS_MODELS_API:
+    try:
+        from services.model_manager import get_model_manager as _get_mm
+        get_model_manager = _get_mm
+        _HAS_MODELS_API = True
+    except ImportError:
+        pass
 
 MAX_BODY = 1_000_000
 MAX_READ = 1_000
@@ -94,8 +173,15 @@ class ApiServer:
         static_root: Path | str | None = None,
         oauth_flows: dict[str, OAuthFlow] | None = None,
         persona=None,
+        tools=None,
         kill=None,
         version: str = "0.2",
+        data_root: Path | str | None = None,
+        settings: SettingsStore | None = None,
+        clients: ClientStore | None = None,
+        usage: UsageTracker | None = None,
+        resources: ResourceSampler | None = None,
+        stack: StackController | None = None,
     ) -> None:
         if host not in LOOPBACK:
             raise ValueError("the API may only bind to a loopback address")
@@ -118,6 +204,12 @@ class ApiServer:
             sessions_root, mark=self._transcript_mark
         )
         self._events = events or EventBroker(mark=self._event_mark)
+        # Create default FISH model client if no model and no turns provided
+        if model is None and turns is None:
+            cfg = load_config()
+            model = SyncFishModelClient(cfg.fish)
+        self._model = model  # Keep reference for cleanup
+        self._tools = tools
         self._turns = turns or TurnRunner(
             model,
             queue=self._queue,
@@ -125,11 +217,25 @@ class ApiServer:
             events=self._events,
             kill=kill,
             persona=persona,
+            tools=tools,
             mark=mark,
         )
         self._oauth_flows = dict(oauth_flows or {})
         self._oauth_states: dict[str, tuple[str, OAuthFlow]] = {}
         self._oauth_lock = threading.Lock()
+
+        home = (
+            Path(data_root)
+            if data_root is not None
+            else (Path(sessions_root).parent if sessions_root is not None else Path.home() / ".imurun")
+        )
+        self._home = home
+        self._settings = settings or SettingsStore(home / "settings")
+        self._clients = clients or ClientStore(home / "clients.json")
+        self._usage = usage or UsageTracker(home / "usage.json")
+        self._resources = resources or ResourceSampler(home, home / "models")
+        self._stack = stack or StackController()
+
         self._httpd = ThreadingHTTPServer((host, port), self._handler())
         self._thread: threading.Thread | None = None
 
@@ -154,10 +260,19 @@ class ApiServer:
 
     def stop(self) -> None:
         self._events.close()
-        self._httpd.shutdown()
+        # shutdown() waits for the serve loop to end, so it is only safe once
+        # the server was actually started.
+        if self._thread is not None:
+            self._httpd.shutdown()
         self._httpd.server_close()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+        # Close model client if it has a close method
+        if hasattr(self._model, 'close'):
+            try:
+                self._model.close()
+            except Exception:
+                pass
 
     def _record(self, subject: str, why: str) -> None:
         if self._mark is None:
@@ -219,18 +334,33 @@ class ApiServer:
                     name = host
                 if name in LOOPBACK:
                     return True
-                server._record(self.path, f"denied: host {name!r}")
+                server._record(urlsplit(self.path).path, f"denied: host {name!r}")
                 self._reply(403, {"error": "forbidden host"})
                 return False
 
+            @staticmethod
+            def _same_token(candidate: str, expected: str) -> bool:
+                try:
+                    return secrets.compare_digest(candidate, expected)
+                except TypeError:  # non-ASCII input can never match
+                    return False
+
             def _authorized(self) -> bool:
                 header = self.headers.get("Authorization", "")
-                expected = f"Bearer {server.token}"
-                if not secrets.compare_digest(header, expected):
-                    server._record(self.path, "denied: bad token")
-                    self._reply(401, {"error": "unauthorized"})
-                    return False
-                return True
+                if self._same_token(header, f"Bearer {server.token}"):
+                    return True
+                # EventSource cannot set request headers, so a GET may present
+                # the token as a query parameter. The header stays primary and
+                # every other method still requires it.
+                if self.command == "GET":
+                    query = parse_qs(urlsplit(self.path).query)
+                    candidate = (query.get("token") or [""])[0]
+                    if candidate and self._same_token(candidate, server.token):
+                        return True
+                # Record the path only: the query string may carry the token.
+                server._record(urlsplit(self.path).path, "denied: bad token")
+                self._reply(401, {"error": "unauthorized"})
+                return False
 
             def _drain(self, length: int) -> None:
                 """Consume a refused body so the client can read the reply.
@@ -371,13 +501,14 @@ class ApiServer:
                 if path == "/oauth/callback":
                     self._callback()
                     return
-                if not path.startswith("/api/") and path != "/health":
+                # Liveness probe: no secrets, so it answers before the token gate.
+                if path == "/health":
+                    self._reply(200, {"ok": True})
+                    return
+                if not path.startswith("/api/"):
                     if self._static(path):
                         return
                 if not self._authorized():
-                    return
-                if path == "/health":
-                    self._reply(200, {"ok": True})
                     return
                 if path == "/api/status":
                     connectors = server._connectors.list()
@@ -407,6 +538,12 @@ class ApiServer:
                             },
                             "model": server._turns.available,
                             "runtime": "ready" if server._turns.available else "provisioning",
+                            "engine": _model_status(server),
+                            "selected_model": _selected_model_name(server),
+                            # A one-line summary of the live-fact tools so the
+                            # shell can show honest state without a second call.
+                            # The full detail is on /api/tools.
+                            "tools": _tools_summary(server),
                         },
                     )
                     return
@@ -428,6 +565,56 @@ class ApiServer:
                     return
                 if path == "/api/connectors":
                     self._reply(200, {"connectors": server._connectors.list()})
+                    return
+                if path == "/api/tools":
+                    # Honest state: which tools exist, and whether they can
+                    # run right now (network, location, key).
+                    runner = server._tools
+                    if runner is None:
+                        self._reply(200, {"tools": [], "network": False})
+                        return
+                    self._reply(200, runner.status())
+                    return
+                parts = [part for part in path.split("/") if part]
+                if len(parts) == 3 and parts[:2] == ["api", "connectors"]:
+                    connector = server._connectors.get(parts[2])
+                    if connector is None:
+                        self._reply(404, {"error": "unknown connector"})
+                        return
+                    view = connector.status()
+                    view["oauth"] = parts[2] in server._oauth_flows
+                    self._reply(200, view)
+                    return
+                if path == "/api/clients":
+                    self._reply(200, {"clients": server._clients.list()})
+                    return
+                if path == "/api/usage":
+                    self._reply(200, server._usage.view())
+                    return
+                if path == "/api/resources":
+                    self._reply(200, server._resources.view())
+                    return
+                if path == "/api/stack/status":
+                    self._reply(200, server._stack.status())
+                    return
+                if path == "/api/settings":
+                    self._reply(200, {"sections": server._settings.sections()})
+                    return
+                if len(parts) == 3 and parts[:2] == ["api", "settings"]:
+                    try:
+                        values = server._settings.read(parts[2])
+                    except ValueError as exc:
+                        self._reply(400, {"error": str(exc)})
+                        return
+                    self._reply(200, {"section": parts[2], "values": values})
+                    return
+                if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
+                    try:
+                        session = Session.load(parts[2], server._sessions_root)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        self._reply(404, {"error": "unknown session"})
+                        return
+                    self._reply(200, asdict(session.identity))
                     return
                 if path == "/api/skills":
                     self._reply(
@@ -469,6 +656,43 @@ class ApiServer:
                         self._reply(404, {"error": "unknown turn"})
                     else:
                         self._reply(200, turn.view())
+                    return
+                # Models API
+                if path == "/api/models" or path == "/api/models/":
+                    if not _HAS_MODELS_API or get_model_manager is None:
+                        self._reply(501, {"error": "models API not available"})
+                        return
+                    manager = get_model_manager()
+                    models = manager.list_models()
+                    selected = _selected_model_name(server)
+                    payload = []
+                    for model in models:
+                        view = asdict(model)
+                        view["selected"] = bool(
+                            selected and model.path and Path(model.path).name == selected
+                        )
+                        payload.append(view)
+                    self._reply(
+                        200,
+                        {
+                            "models": payload,
+                            "selected": selected,
+                            "engine": _model_status(server),
+                        },
+                    )
+                    return
+                if path.startswith("/api/models/") and path != "/api/models/download":
+                    model_id = path.split("/api/models/")[1]
+                    if not _HAS_MODELS_API or get_model_manager is None:
+                        self._reply(501, {"error": "models API not available"})
+                        return
+                    manager = get_model_manager()
+                    models = manager.list_models()
+                    for model in models:
+                        if model.id == model_id:
+                            self._reply(200, asdict(model))
+                            return
+                    self._reply(404, {"error": "Model not found"})
                     return
                 self._reply(404, {"error": "not found"})
 
@@ -583,11 +807,14 @@ class ApiServer:
                             return
                     try:
                         turn = server._turns.start(session_id, prompt)
-                    except RuntimeError:
-                        self._reply(503, {"error": "model unavailable"})
-                        return
                     except ValueError as exc:
                         self._reply(400, {"error": str(exc)})
+                        return
+                    except RuntimeError as exc:
+                        if "model unavailable" in str(exc).lower():
+                            self._reply(503, {"error": "model_unavailable", "message": "FISH engine is not running. Use /api/stack/start to start the full stack."})
+                        else:
+                            self._reply(500, {"error": str(exc)})
                         return
                     self._reply(200, {"turn_id": turn.id})
                     return
@@ -718,6 +945,283 @@ class ApiServer:
                     self._reply(200, {"result": result})
                     return
 
+                if (
+                    len(parts) == 4
+                    and parts[:2] == ["api", "connectors"]
+                    and parts[3] == "disconnect"
+                ):
+                    connector = server._connectors.get(parts[2])
+                    if connector is None:
+                        self._reply(404, {"error": "unknown connector"})
+                        return
+                    disconnected = False
+                    if hasattr(connector, "disconnect"):
+                        disconnected = bool(connector.disconnect())
+                    server._events.publish(
+                        "connector",
+                        {
+                            "connector": parts[2],
+                            "connected": False,
+                            "message": "Disconnected",
+                        },
+                    )
+                    self._reply(200, {"disconnected": disconnected})
+                    return
+
+                # Stack control endpoints
+                if path == "/api/stack/build":
+                    result = server._stack.build()
+                    self._reply(200 if result.get("ok") else 500, result)
+                    return
+
+                if path == "/api/stack/start":
+                    result = server._stack.start()
+                    self._reply(200 if result.get("ok") else 500, result)
+                    return
+
+                if path == "/api/stack/ensure":
+                    result = server._stack.ensure()
+                    self._reply(200 if result.get("ok") else 500, result)
+                    return
+
+                if path == "/api/stack/stop":
+                    result = server._stack.stop()
+                    self._reply(200 if result.get("ok") else 500, result)
+                    return
+
+                # Select the model the engine should use.
+                if path == "/api/models/select":
+                    if not _HAS_MODELS_API or get_model_manager is None:
+                        self._reply(501, {"error": "models API not available"})
+                        return
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    model_id = str(payload.get("id") or payload.get("model_id") or "")
+                    if not model_id:
+                        self._reply(400, {"error": "id is required"})
+                        return
+                    manager = get_model_manager()
+                    target = manager.get_model_path(model_id)
+                    if target is None:
+                        self._reply(404, {"error": "that model is not downloaded"})
+                        return
+                    selector = getattr(server._model, "select", None)
+                    if selector is None:
+                        self._reply(501, {"error": "this engine cannot switch models"})
+                        return
+                    if not selector(target):
+                        self._reply(500, {"error": "the model could not be selected"})
+                        return
+                    server._record("model", f"selected {model_id}")
+                    self._reply(200, {"selected": target.name, "id": model_id})
+                    return
+
+                # Models API - POST /api/models/download (SSE progress)
+                if path == "/api/models/download":
+                    if not _HAS_MODELS_API or get_model_manager is None:
+                        self._reply(501, {"error": "models API not available"})
+                        return
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    model_id = str(payload.get("model_id", ""))
+                    token = payload.get("token")
+                    if not model_id:
+                        self._reply(400, {"error": "model_id is required"})
+                        return
+
+                    manager = get_model_manager()
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Connection", "keep-alive")
+                    self.send_header("X-Accel-Buffering", "no")
+                    self.end_headers()
+                    self.wfile.write(b"retry: 3000\n\n")
+                    self.wfile.flush()
+
+                    import asyncio
+                    import dataclasses
+
+                    async def stream_progress() -> None:
+                        async for progress in manager.download_model(model_id, token):
+                            data = (
+                                dataclasses.asdict(progress)
+                                if dataclasses.is_dataclass(progress)
+                                else dict(progress)
+                            )
+                            if not data.get("percent") and hasattr(progress, "percent"):
+                                data["percent"] = progress.percent
+                            self.wfile.write(
+                                f"data: {json.dumps(data)}\n\n".encode("utf-8")
+                            )
+                            self.wfile.flush()
+                            if data.get("status") in ("complete", "error"):
+                                return
+
+                    loop = asyncio.new_event_loop()
+                    try:
+                        loop.run_until_complete(stream_progress())
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    except Exception as exc:  # noqa: BLE001 - report, never crash
+                        try:
+                            self.wfile.write(
+                                f"data: {json.dumps({'status': 'error', 'error': str(exc)})}\n\n".encode("utf-8")
+                            )
+                            self.wfile.flush()
+                        except OSError:
+                            pass
+                    finally:
+                        loop.close()
+                        self.close_connection = True
+                    return
+
+                # API clients
+                if path == "/api/clients":
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    try:
+                        client = server._clients.create(
+                            str(payload.get("name", "")),
+                            payload.get("scopes") or [],
+                        )
+                    except ValueError as exc:
+                        self._reply(400, {"error": str(exc)})
+                        return
+                    self._reply(201, client)
+                    return
+
+                # The browser shares its position so local questions can be
+                # answered without an IP lookup.
+                if path == "/api/tools/location":
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    try:
+                        from ..tools.builtin.location import set_client_location
+
+                        if payload:
+                            set_client_location(
+                                {
+                                    "name": str(payload.get("name") or "") or None,
+                                    "region": str(payload.get("region") or "") or None,
+                                    "country": str(payload.get("country") or "") or None,
+                                    "latitude": payload.get("latitude"),
+                                    "longitude": payload.get("longitude"),
+                                    "timezone": str(payload.get("timezone") or "") or None,
+                                }
+                            )
+                        else:
+                            set_client_location(None)
+                    except Exception as exc:  # noqa: BLE001 - reported, not raised
+                        self._reply(500, {"error": str(exc)})
+                        return
+                    self._reply(200, {"ok": True})
+                    return
+
+                # Token rotation
+                if path == "/api/auth/rotate":
+                    server._token = secrets.token_urlsafe(24)
+                    server._record("auth", "token rotated")
+                    self._reply(200, {"token": server._token})
+                    return
+
+                # Resources
+                if path == "/api/resources/clear":
+                    result = server._resources.clear_cache()
+                    self._reply(200, result)
+                    return
+
                 self._reply(404, {"error": "not found"})
+
+            def do_PUT(self) -> None:  # noqa: N802
+                if not self._local():
+                    return
+                if not self._authorized():
+                    return
+                path = unquote(urlsplit(self.path).path)
+                if path == "/api/persona":
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    try:
+                        server._persona_store.save(
+                            Persona(
+                                name=str(payload.get("name", "")),
+                                email_role=str(payload.get("email_role", "")),
+                                description=str(payload.get("description", "")),
+                            )
+                        )
+                    except (ValueError, TypeError) as exc:
+                        self._reply(400, {"error": str(exc)})
+                        return
+                    server._record("persona", "saved")
+                    self._reply(200, {"ok": True})
+                    return
+
+                parts = [part for part in path.split("/") if part]
+                if len(parts) == 3 and parts[:2] == ["api", "settings"]:
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    try:
+                        merged = server._settings.write(parts[2], payload)
+                    except ValueError as exc:
+                        self._reply(400, {"error": str(exc)})
+                        return
+                    self._reply(200, {"section": parts[2], "values": merged})
+                    return
+
+                self._reply(404, {"error": "not found"})
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                if not self._local():
+                    return
+                if not self._authorized():
+                    return
+                path = unquote(urlsplit(self.path).path)
+                parts = [part for part in path.split("/") if part]
+
+                if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
+                    try:
+                        Session.delete(parts[2], server._sessions_root)
+                    except (OSError, ValueError):
+                        self._reply(404, {"error": "unknown session"})
+                        return
+                    server._record("session", f"deleted {parts[2]}")
+                    self._reply(200, {"deleted": parts[2]})
+                    return
+
+                if len(parts) == 3 and parts[:2] == ["api", "clients"]:
+                    if server._clients.revoke(parts[2]):
+                        self._reply(200, {"revoked": parts[2]})
+                    else:
+                        self._reply(404, {"error": "unknown client"})
+                    return
+
+                if len(parts) == 3 and parts[:2] == ["api", "models"]:
+                    if not _HAS_MODELS_API or get_model_manager is None:
+                        self._reply(501, {"error": "models API not available"})
+                        return
+                    if get_model_manager().delete_model(parts[2]):
+                        self._reply(200, {"status": "deleted", "model_id": parts[2]})
+                    else:
+                        self._reply(404, {"error": "Model not found or not downloaded"})
+                    return
+
+                if len(parts) == 3 and parts[:2] == ["api", "skills"]:
+                    if server._skills.delete(parts[2]):
+                        server._record("skills", f"deleted {parts[2]}")
+                        self._reply(200, {"deleted": parts[2]})
+                    else:
+                        self._reply(404, {"error": "unknown skill"})
+                    return
+
+                self._reply(404, {"error": "not found"})
+
 
         return Handler
