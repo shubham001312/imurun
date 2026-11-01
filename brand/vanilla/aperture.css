@@ -1,0 +1,85 @@
+/* ============================================================
+   aperture.css — tokens, the mark, and the landing intro.
+   Pair with aperture.js. Port of the ImuTechz website's intro
+   (app/styles/home.css). Timeline: ../docs/LANDING-ANIMATION.md
+   ============================================================ */
+
+:root {
+  --imu-canvas: #f3ede2;     /* cream ground */
+  --imu-ink: #1c1915;        /* blades, text */
+  --imu-ink-rgb: 28, 25, 20;
+  --imu-accent: #d9481e;     /* the red blade and the pupil */
+  --imu-steel: #7e858d;      /* wordmark "echz" */
+}
+
+.imu-mark { display: inline-block; overflow: visible; vertical-align: middle; flex: none; color: var(--imu-ink); }
+
+/* the wordmark lockup: mark + "ImuTechz" (red I and T, steel "echz") */
+.imu-wordmark { display: inline-flex; align-items: center; gap: 8px; font-weight: 700; letter-spacing: -0.03em; color: var(--imu-ink); }
+.imu-wordmark .r { color: var(--imu-accent); }
+.imu-wordmark .s { color: var(--imu-steel); }
+
+/* ---- the landing intro ----
+   0.10–1.15 s  mark whooshes in: blurred speck -> 1.1x overshoot -> settle
+   0.45 / 0.62 s two ripples (ink, then red) expand behind it
+   1.30–2.02 s  the curtain lifts upward and the page is revealed
+   2.05 s       the node is removed */
+.imu-intro {
+  position: fixed; inset: 0; z-index: 2147483000;
+  display: grid; place-items: center;
+  background: var(--imu-canvas);
+  will-change: transform;
+  pointer-events: none;
+}
+.imu-intro.imu-intro-go { animation: imu-intro-up 0.72s cubic-bezier(0.8, 0, 0.2, 1) 1.3s both; }
+.imu-intro::after {
+  /* the curtain's bottom edge: a soft shadow so the lift reads as a sheet, not a cut */
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 48px;
+  background: linear-gradient(to bottom, rgba(var(--imu-ink-rgb), 0.14), rgba(var(--imu-ink-rgb), 0));
+  transform: translateY(100%); opacity: 0;
+}
+.imu-intro.imu-intro-go::after { animation: imu-intro-edge 0.72s ease 1.3s both; }
+.imu-intro-in { position: relative; display: grid; place-items: center; width: min(90vw, 420px); aspect-ratio: 1; }
+.imu-intro-mark {
+  position: relative; z-index: 1;
+  width: clamp(160px, 24vw, 250px); height: auto;
+  opacity: 0; transform: scale(0.14); filter: blur(16px);
+}
+.imu-intro-go .imu-intro-mark { animation: imu-intro-zoom 1.05s cubic-bezier(0.22, 1.2, 0.3, 1) 0.1s both; }
+.imu-intro-ring {
+  position: absolute; width: clamp(160px, 24vw, 250px); aspect-ratio: 1; border-radius: 50%;
+  border: 1.5px solid rgba(var(--imu-ink-rgb), 0.35);
+  opacity: 0; transform: scale(0.45);
+}
+.imu-intro-go .imu-intro-ring { animation: imu-intro-ripple 1.1s cubic-bezier(0.2, 0.8, 0.2, 1) 0.45s both; }
+.imu-intro-ring-2 { border-color: var(--imu-accent); }
+.imu-intro-go .imu-intro-ring-2 { animation-delay: 0.62s; }
+
+@keyframes imu-intro-zoom {
+  0% { opacity: 0; transform: scale(0.14); filter: blur(16px); }
+  55% { opacity: 1; filter: blur(0); }
+  78% { transform: scale(1.1); }
+  100% { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+@keyframes imu-intro-ripple {
+  0% { opacity: 0; transform: scale(0.45); }
+  20% { opacity: 0.7; }
+  100% { opacity: 0; transform: scale(2.4); }
+}
+@keyframes imu-intro-up { to { transform: translateY(-104%); } }
+@keyframes imu-intro-edge { 0% { opacity: 0; } 15% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes imu-intro-fade { to { opacity: 0; } }
+
+/* page content can rise in behind the lifting curtain: give elements
+   .imu-rise and an optional --n (0, 1, 2…) for the stagger, set from a
+   class in your stylesheet (inline style attributes break a strict CSP) */
+.has-intro .imu-rise { opacity: 0; animation: imu-rise 0.75s cubic-bezier(0.22, 1, 0.36, 1) both; animation-delay: calc(1.55s + var(--n, 0) * 0.09s); }
+@keyframes imu-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .imu-intro, .imu-intro.imu-intro-go { animation: imu-intro-fade 0.3s ease both; }
+  .imu-intro::after, .imu-intro.imu-intro-go::after { display: none; animation: none; }
+  .imu-intro-mark, .imu-intro-go .imu-intro-mark { opacity: 1; transform: none; filter: none; animation: none; }
+  .imu-intro-ring { display: none; }
+  .has-intro .imu-rise { animation: none; opacity: 1; }
+}
