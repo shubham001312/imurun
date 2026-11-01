@@ -1,0 +1,65 @@
+{
+  "name": "Aperture",
+  "owner": "ImuTechz",
+  "source": "WebSite/frontend/components/Mark.jsx (single source of truth); brand/vanilla/aperture.js is a line-for-line port",
+  "color": {
+    "canvas": "#f3ede2",
+    "ink": "#1c1915",
+    "inkRgb": "28, 25, 20",
+    "accent": "#d9481e",
+    "accentDark": "#ff5c35",
+    "steel": "#7e858d",
+    "teal": "#15858d"
+  },
+  "mark": {
+    "viewBox": "0 0 64 64",
+    "center": [32, 32],
+    "bladeRadius": 24,
+    "pupilRadius": 5.9,
+    "blades": 6,
+    "accentBlade": "twelve o'clock (blade 0)",
+    "strokeBySize": { "<=20px": 7.6, "21-32px": 6.4, ">32px": 5.2 },
+    "stroke": { "linecap": "round", "linejoin": "round" },
+    "samplesPerBlade": 41,
+    "samplesPupil": 121,
+    "pupilShadow": { "fill": "ink", "opacity": 0.16, "offset": [1.1, 1.3] },
+    "pupilCounterRotation": 0.6
+  },
+  "superformula": {
+    "formula": "r(θ) = ( |cos(mθ/4)|^n2 + |sin(mθ/4)|^n3 )^(-1/n1), a = b = 1, n3 = n2",
+    "m": 6,
+    "rest": { "n1": 0.38, "n2": 1.2, "gap": 11, "cen": 0.5, "rot": 0 },
+    "pupilN2": "1 + (n2 - 1) * 0.5"
+  },
+  "motion": {
+    "tempo": 1.8,
+    "introSpeed": 3,
+    "baseAngularFrequency": "2π / 8 rad per mark-second",
+    "frequencyRatios": ["1", "φ", "φ²", "φ³"],
+    "phases": [0.4, 2.1, 4.0, 1.0],
+    "ranges": {
+      "n1": { "from": 0.3, "to": 6, "interp": "exponential" },
+      "n2": { "from": 0.55, "to": 1.5, "interp": "exponential" },
+      "gap": { "from": 5, "to": 22, "unit": "deg", "interp": "linear" },
+      "cen": { "from": 0, "to": 1, "interp": "ease-in-out quad" },
+      "rot": { "rate": 14, "unit": "deg per mark-second" }
+    },
+    "smallMarkFrameInterval": "30 ms when size <= 40 px",
+    "sharedClock": "one epoch per page; every live mark reads it"
+  },
+  "intro": {
+    "markSize": "clamp(160px, 24vw, 250px)",
+    "zoom": { "delay": 0.1, "duration": 1.05, "from": 0.14, "overshoot": 1.1, "blur": 16, "easing": "cubic-bezier(0.22, 1.2, 0.3, 1)" },
+    "ripples": [
+      { "delay": 0.45, "color": "rgba(ink, .35)" },
+      { "delay": 0.62, "color": "accent" }
+    ],
+    "rippleMotion": { "duration": 1.1, "scale": [0.45, 2.4], "peakOpacity": 0.7, "easing": "cubic-bezier(0.2, 0.8, 0.2, 1)" },
+    "curtainLift": { "delay": 1.3, "duration": 0.72, "translateY": "-104%", "easing": "cubic-bezier(0.8, 0, 0.2, 1)" },
+    "contentRise": { "delay": 1.55, "stagger": 0.09, "duration": 0.75, "distance": 18 },
+    "removeAt": 2.05,
+    "reducedMotion": "0.3 s fade, still mark, removed at 0.35 s",
+    "plays": "on a real page load only, not on in-app navigation"
+  },
+  "wordmark": { "text": "ImuTechz", "font": "Inter", "size": "17px (nav)", "weight": 700, "tracking": "-0.03em", "accentLetters": ["I", "T"], "steelPart": "echz", "markGap": "8px", "navMarkSize": 26 }
+}

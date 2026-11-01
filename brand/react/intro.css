@@ -1,0 +1,75 @@
+﻿/* intro.css — the website's landing-intro styles, copied verbatim from
+   WebSite/frontend/app/styles/home.css. Uses the site tokens
+   (--color-canvas, --color-fg, --color-accent, --ink-rgb, --ease-out-soft).
+   The .hero3d-* rules stagger the website's hero copy behind the curtain;
+   the nav hides while .intro exists (globals.css, html:has(.intro)). */
+
+/* ---- the intro curtain (components/Intro): plays on a real load of "/"
+   (first visit or reload), not on in-app clicks back to Home ----
+   0.0–1.1 s  the mark whooshes in: blurred speck → overshoot → settle
+   0.45 s     one ripple expands behind it, a second a beat later
+   1.3–2.0 s  the whole curtain drops upward and the site is revealed */
+.intro {
+  position: fixed; inset: 0; z-index: 70;
+  display: grid; place-items: center;
+  background: var(--color-canvas);
+  will-change: transform;
+  pointer-events: none;
+}
+/* before hydration the curtain is plain cream; `.intro-go` starts the clock */
+.intro.intro-go { animation: intro-up 0.72s cubic-bezier(0.8, 0, 0.2, 1) 1.3s both; }
+.intro::after {
+  /* the curtain's bottom edge: a soft shadow line so the lift reads as a sheet, not a cut */
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 48px;
+  background: linear-gradient(to bottom, rgba(var(--ink-rgb), 0.14), rgba(var(--ink-rgb), 0));
+  transform: translateY(100%); opacity: 0;
+}
+.intro.intro-go::after { animation: intro-edge 0.72s ease 1.3s both; }
+.intro-in { position: relative; display: grid; place-items: center; width: min(90vw, 420px); aspect-ratio: 1; }
+.intro-mark {
+  position: relative; z-index: 1; color: var(--color-fg);
+  width: clamp(160px, 24vw, 250px); height: auto;
+  opacity: 0; transform: scale(0.14); filter: blur(16px);
+}
+.intro-go .intro-mark { animation: intro-zoom 1.05s cubic-bezier(0.22, 1.2, 0.3, 1) 0.1s both; }
+.intro-ring {
+  position: absolute; width: clamp(160px, 24vw, 250px); aspect-ratio: 1; border-radius: 50%;
+  border: 1.5px solid rgba(var(--ink-rgb), 0.35);
+  opacity: 0; transform: scale(0.45);
+}
+.intro-go .intro-ring { animation: intro-ripple 1.1s cubic-bezier(0.2, 0.8, 0.2, 1) 0.45s both; }
+.intro-ring-2 { border-color: var(--color-accent); }
+.intro-go .intro-ring-2 { animation-delay: 0.62s; }
+@keyframes intro-zoom {
+  0% { opacity: 0; transform: scale(0.14); filter: blur(16px); }
+  55% { opacity: 1; filter: blur(0); }
+  78% { transform: scale(1.1); }
+  100% { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+@keyframes intro-ripple {
+  0% { opacity: 0; transform: scale(0.45); }
+  20% { opacity: 0.7; }
+  100% { opacity: 0; transform: scale(2.4); }
+}
+@keyframes intro-up { to { transform: translateY(-104%); } }
+@keyframes intro-edge { 0% { opacity: 0; } 15% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes intro-fade { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .intro, .intro.intro-go { animation: intro-fade 0.3s ease both; }
+  .intro::after, .intro.intro-go::after { display: none; animation: none; }
+  .intro-mark, .intro-go .intro-mark { opacity: 1; transform: none; filter: none; animation: none; }
+  .intro-ring { display: none; }
+}
+
+/* the hero copy rises in behind the lifting curtain */
+.has-intro .hero3d-copy > * { opacity: 0; animation: hero-rise 0.75s var(--ease-out-soft) both; animation-delay: calc(1.55s + var(--n, 0) * 0.09s); }
+.has-intro .hero3d-copy > :nth-child(1) { --n: 0; }
+.has-intro .hero3d-copy > :nth-child(2) { --n: 1; }
+.has-intro .hero3d-copy > :nth-child(3) { --n: 2; }
+.has-intro .hero3d-copy > :nth-child(4) { --n: 3; }
+.has-intro .hero3d-copy > :nth-child(5) { --n: 4; }
+.has-intro .hero3d-stage { opacity: 0; animation: hero-fade 0.9s ease 1.6s both; }
+@keyframes hero-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+@keyframes hero-fade { to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .has-intro .hero3d-copy > *, .has-intro .hero3d-stage { animation: none; opacity: 1; } }
+
