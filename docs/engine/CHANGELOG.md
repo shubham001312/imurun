@@ -1,5 +1,15 @@
 # Engine changelog
 
+## 2026-11-02 — manylinux engine build fix (pthread link)
+
+- Symptom: GitHub Actions job `engine / Engine (Linux x64, manylinux_2_28)`
+  failed while linking `fish_server` with:
+  `libfish.so: undefined reference to pthread_create/pthread_join`.
+- Cause: the engine CMake target did not explicitly link thread support, so on
+  glibc 2.28 in manylinux the pthread symbols remained unresolved at link time.
+- Fix: require CMake Threads and link `Threads::Threads` into the engine shared
+  library and C++ engine tests (`model/fish/CMakeLists.txt:19-20,179,253`).
+
 ## 2026-11-02 — LoRA adapters merged at load (ABI 3, request E1)
 
 Design: `ARCHITECTURE.md` → "LoRA adapters".
