@@ -38,6 +38,21 @@ import threading
 import time
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    """``HTTPServer.server_bind`` calls ``socket.getfqdn()`` for the Server
+    header; on hosts with slow reverse DNS (the macOS CI runner) that lookup
+    took longer than 18 s and the app looked hung before its first request.
+    We serve loopback only, so the name is the bind address."""
+
+    def server_bind(self) -> None:
+        import socketserver
+
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = str(host)
+        self.server_port = int(port)
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -298,7 +313,7 @@ class ApiServer:
         self._resources = resources or ResourceSampler(home, home / "models")
         self._stack = stack or StackController()
 
-        self._httpd = ThreadingHTTPServer((host, port), self._handler())
+        self._httpd = _LoopbackHTTPServer((host, port), self._handler())
         self._thread: threading.Thread | None = None
 
     @property
