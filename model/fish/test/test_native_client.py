@@ -27,7 +27,14 @@ def check(ok: bool, label: str, detail: str = "") -> None:
 
 
 async def main() -> int:
-    client = FishNativeClient()
+    # Use the 3B model which is known to work well
+    model_path = str(Path(__file__).resolve().parents[3] / "models" / "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
+
+    class _Cfg:
+        pass
+
+    _Cfg.model_path = model_path
+    client = FishNativeClient(_Cfg)
     if not client.configured:
         print(f"  [SKIP] no engine available (library={client.library_path}, "
               f"model={client.model_path})")

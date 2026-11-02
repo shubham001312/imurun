@@ -1,4 +1,3 @@
-"""The response layer: the agent loop that enforces delivery and stopping."""
-from .loop import AgentLoop, LoopResult, ModelClient, Step
+from .loop import DEFAULT_MAX_STEPS, AgentLoop, LoopResult, ModelClient, Step
 
-__all__ = ["AgentLoop", "LoopResult", "ModelClient", "Step"]
+__all__ = ["DEFAULT_MAX_STEPS", "AgentLoop", "LoopResult", "ModelClient", "Step"]

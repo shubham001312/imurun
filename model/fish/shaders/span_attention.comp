@@ -1,0 +1,96 @@
+#version 450
+// FISH layer span — causal multi-head attention over the f16 KV cache.
+//
+// Workgroup = (head, token). Keys are walked in chunks of 128 with an online
+// softmax (running max m, running sum l, rescaled accumulator), so the
+// context length is not limited by shared memory and no score buffer is
+// needed. Per chunk: thread j scores key c0+j (full head_dim dot product),
+// the workgroup reduces max and sum, then every thread accumulates its
+// output dims over the chunk's values (coalesced V reads).
+// Matches ops.cpp::attention_batch: GQA (head h uses kv head h / group),
+// optional soft-cap on scores, optional sliding window.
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) buffer Arena { float a[]; };
+layout(std430, binding = 2) readonly buffer KV { uint kv[]; };
+
+layout(push_constant) uniform PC {
+    uint head_dim, group, kvd;
+    uint q_off, q_stride, o_off, o_stride;
+    uint ck_off, cv_off;     // word offsets of this layer's K / V cache
+    uint pos0, window;
+    float scale, softcap;
+} pc;
+
+shared float qs[256];
+shared float pr[128];
+shared float red[128];
+
+const float NEG_INF = uintBitsToFloat(0xFF800000u);
+
+float wg_reduce(float v, bool is_max) {
+    const uint tid = gl_LocalInvocationID.x;
+    red[tid] = v;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1) {
+        if (tid < s) red[tid] = is_max ? max(red[tid], red[tid + s]) : red[tid] + red[tid + s];
+        barrier();
+    }
+    const float r = red[0];
+    barrier();
+    return r;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y;
+    const uint D = pc.head_dim;
+    const uint kvh = h / pc.group;
+    const int pos = int(pc.pos0 + t);
+
+    for (uint d = tid; d < D; d += 128u) qs[d] = a[pc.q_off + t * pc.q_stride + h * D + d];
+    barrier();
+
+    int tb = 0;
+    if (pc.window > 0u && pos - int(pc.window) + 1 > 0) tb = pos - int(pc.window) + 1;
+
+    float m = NEG_INF, l = 0.0, acc0 = 0.0, acc1 = 0.0;
+    const uint d0 = tid, d1 = tid + 128u;
+    for (int c0 = tb; c0 <= pos; c0 += 128) {
+        const int j = c0 + int(tid);
+        float s = NEG_INF;
+        if (j <= pos) {
+            const uint kb = pc.ck_off + (uint(j) * pc.kvd + kvh * D) / 2u;
+            float dotv = 0.0;
+            for (uint p = 0u; p < D / 2u; ++p) {
+                const vec2 k = unpackHalf2x16(kv[kb + p]);
+                dotv += qs[2u * p] * k.x + qs[2u * p + 1u] * k.y;
+            }
+            s = dotv * pc.scale;
+            // clamp: some drivers build tanh from exp and overflow to NaN
+            if (pc.softcap > 0.0) s = pc.softcap * tanh(clamp(s / pc.softcap, -15.0, 15.0));
+        }
+        const float cm = wg_reduce(s, true);
+        const float nm = max(m, cm);
+        const float p = j <= pos ? exp(s - nm) : 0.0;
+        pr[tid] = p;
+        const float cs = wg_reduce(p, false);    // its barriers also publish pr[]
+        const float f = exp(m - nm);             // 0 on the first chunk (m = -inf)
+        l = l * f + cs;
+        acc0 *= f;
+        acc1 *= f;
+        m = nm;
+        const int cn = min(128, pos - c0 + 1);
+        for (int jj = 0; jj < cn; ++jj) {
+            const uint vb = pc.cv_off + (uint(c0 + jj) * pc.kvd + kvh * D) / 2u;
+            const float pj = pr[jj];
+            if (d0 < D) acc0 += pj * unpackHalf2x16(kv[vb + d0 / 2u])[d0 & 1u];
+            if (d1 < D) acc1 += pj * unpackHalf2x16(kv[vb + d1 / 2u])[d1 & 1u];
+        }
+        barrier();   // pr[] is rewritten by the next chunk
+    }
+    const float inv = l > 0.0 ? 1.0 / l : 0.0;
+    const uint ob = pc.o_off + t * pc.o_stride + h * D;
+    if (d0 < D) a[ob + d0] = acc0 * inv;
+    if (d1 < D) a[ob + d1] = acc1 * inv;
+}

@@ -2,17 +2,91 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>IMURUN design lab</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="api-token" content="__IMURUN_TOKEN__" />
+  <meta name="color-scheme" content="light dark" />
+  <title>IMURUN</title>
+  <meta name="application-name" content="IMURUN" />
+  <link rel="icon" href="logo.ico" sizes="16x16 24x24 32x32 48x48 64x64 128x128 256x256" />
+  <link rel="icon" href="logo.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="logo-512.png" />
   <link rel="stylesheet" href="fonts.css" />
   <link rel="stylesheet" href="base.css" />
-  <link id="theme-link" rel="stylesheet" href="styles/liquid-paper.css" />
+  <link id="theme-link" rel="stylesheet" href="styles/imutechz.css" />
+  <link rel="stylesheet" href="styles/tokens.css" />
+  <link rel="stylesheet" href="styles/models.css" />
+  <link rel="stylesheet" href="styles/landing.css" />
+  <link rel="stylesheet" href="styles/skeleton.css" />
+  <link rel="stylesheet" href="styles/thinking.css" />
+  <link rel="stylesheet" href="styles/markdown.css" />
+  <link rel="stylesheet" href="styles/boot.css" />
+  <link rel="stylesheet" href="styles/polish.css" />
+  <link rel="stylesheet" href="styles/panels.css" />
+  <link rel="stylesheet" href="styles/brand.css" />
+  <link rel="stylesheet" href="styles/agent.css" />
+  <link rel="stylesheet" href="styles/integrations.css" />
+  <link rel="stylesheet" href="styles/customise.css" />
 </head>
-<body data-theme="liquid-paper" data-font="manrope">
-  <div class="pointer-glow" id="pointer-glow"></div>
+<body data-theme="imutechz" data-scheme="light" data-motion="full" data-ambient="mixed" data-glass="frosted" data-density="comfortable">
+  <!-- The landing intro curtain (brand.js, a port of the website's Intro.jsx):
+       cream from the first paint; removed at once when the intro is off. -->
+  <div class="intro" id="intro" aria-hidden="true"></div>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="ambient" aria-hidden="true">
+    <span class="ambient-orb ambient-a"></span>
+    <span class="ambient-orb ambient-b"></span>
+    <span class="ambient-orb ambient-c"></span>
+    <span class="ambient-sheen"></span>
+  </div>
+  <div class="pointer-glow" id="pointer-glow" aria-hidden="true"></div>
   <div id="app"></div>
-  <div class="notifications" id="notifications" role="region" aria-label="Notifications" aria-live="polite"></div>
+  <div class="notifications" id="notifications" role="region" aria-label="Notifications"></div>
+  <div id="sr-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+  <div id="boot" class="boot" role="status" aria-live="polite" aria-label="Starting IMURUN">
+    <div class="boot-card">
+      <div class="boot-mark" data-logo data-logo-size="84" aria-hidden="true"></div>
+      <div class="boot-copy">
+        <h1 class="boot-title">Starting IMURUN</h1>
+        <p class="boot-status">Starting IMURUN&hellip;</p>
+      </div>
+      <div class="boot-bar" aria-hidden="true"><span></span></div>
+      <div class="boot-actions" hidden>
+        <button class="btn primary" type="button" data-boot-retry>Retry</button>
+        <button class="btn" type="button" data-boot-skip>Continue anyway</button>
+      </div>
+      <p class="boot-hint" hidden></p>
+    </div>
+  </div>
+
+  <!-- Load order matters only for start-up: modules talk through
+       window.IMURUN at call time. See docs/frontend/README.md. -->
   <script src="mockup.js"></script>
+  <script src="aperture.js"></script>
+  <script src="api.js"></script>
+  <script src="markdown.js"></script>
+  <script src="core.js"></script>
+  <script src="sound.js"></script>
+  <script src="toast.js"></script>
+  <script src="boot.js"></script>
+  <script src="theme.js"></script>
+  <script src="settings.js"></script>
+  <script src="brand.js"></script>
   <script src="app.js"></script>
+  <script src="chat.js"></script>
+  <script src="activity.js"></script>
+  <script src="research.js"></script>
+  <script src="approvals.js"></script>
+  <script src="slash.js"></script>
+  <script src="agent-settings.js"></script>
+  <script src="connectors-settings.js"></script>
+  <script src="mcp-settings.js"></script>
+  <script src="tuning-settings.js"></script>
+  <script src="feedback.js"></script>
+  <script src="models.js"></script>
+  <script src="panels.js"></script>
+  <script src="voice.js"></script>
+  <script src="voice-server.js"></script>
+  <script src="dotfield.js"></script>
 </body>
 </html>

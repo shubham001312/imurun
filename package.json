@@ -1,0 +1,35 @@
+{
+  "name": "imurun",
+  "version": "0.3.0",
+  "description": "IMURUN: local-first AI chat with its own C++ inference engine. This npm package is a thin launcher that installs the Python app from PyPI into ~/.imurun/venv and runs it.",
+  "license": "MIT",
+  "author": "ImuTechz <dev@imutechz.in>",
+  "homepage": "https://github.com/shubham001312/imurun#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shubham001312/imurun.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shubham001312/imurun/issues"
+  },
+  "keywords": [
+    "llm",
+    "local-ai",
+    "gguf",
+    "chat",
+    "offline",
+    "inference"
+  ],
+  "bin": {
+    "imurun": "npm/imurun.js"
+  },
+  "files": [
+    "npm/imurun.js"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "scripts": {
+    "test": "node --check npm/imurun.js && node npm/imurun.js --launcher-info"
+  }
+}

@@ -210,6 +210,15 @@ class Session:
                 pass
         return dict(data.get("memory", {}))
 
+    @classmethod
+    def delete(cls, session_id: str, root: Path | str | None = None) -> None:
+        """Remove one session file. The caller is responsible for authorization."""
+        path = _path_for(session_id, root)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            raise ValueError(f"unknown session {session_id!r}") from None
+
     @staticmethod
     def list_sessions(root: Path | str | None = None, mark=None) -> list[SessionIdentity]:
         directory = Path(root) if root else default_root()

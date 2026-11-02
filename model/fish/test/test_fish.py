@@ -27,6 +27,21 @@ class Stats(ctypes.Structure):
         ("weights_bytes", ctypes.c_ulonglong),
         ("kv_bytes", ctypes.c_ulonglong),
         ("peak_rss_mb", ctypes.c_double),
+        # ABI 2
+        ("truncated", ctypes.c_int),
+        ("cached_tokens", ctypes.c_int),
+        ("n_threads", ctypes.c_int),
+        ("streaming", ctypes.c_int),
+        ("prefill_tokens_per_second", ctypes.c_double),
+        ("gpu_layers", ctypes.c_int),
+        ("ram_layers", ctypes.c_int),
+        ("disk_layers", ctypes.c_int),
+        ("gpu_bytes", ctypes.c_ulonglong),
+        ("gpu_name", ctypes.c_char * 64),
+        ("draft_proposed", ctypes.c_int),
+        ("draft_accepted", ctypes.c_int),
+        ("draft_active", ctypes.c_int),
+        ("gpu_mix", ctypes.c_char * 160),
     ]
 
 class ModelInfo(ctypes.Structure):
@@ -42,6 +57,12 @@ class ModelInfo(ctypes.Structure):
         ("vocab", ctypes.c_int),
         ("tied_output", ctypes.c_int),
         ("quant", ctypes.c_char * 64),
+        # ABI 2
+        ("n_experts", ctypes.c_int),
+        ("n_experts_per_tok", ctypes.c_int),
+        ("n_ctx_train", ctypes.c_int),
+        ("chat_format", ctypes.c_char * 16),
+        ("tokenizer", ctypes.c_char * 8),
     ]
 
 CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_void_p)
@@ -85,19 +106,27 @@ def load_lib(path: str):
     lib.fish_kernel_name.restype = ctypes.c_char_p
     lib.fish_specs_json.argtypes = [ctypes.c_void_p]
     lib.fish_specs_json.restype = ctypes.c_char_p
+    lib.fish_generate_chat.argtypes = [ctypes.c_void_p,
+                                       ctypes.POINTER(ctypes.c_char_p),
+                                       ctypes.POINTER(ctypes.c_char_p), ctypes.c_int,
+                                       ctypes.c_int, ctypes.c_float, ctypes.c_int,
+                                       ctypes.c_float, ctypes.c_float, CB, ctypes.c_void_p]
+    lib.fish_generate_chat.restype = ctypes.c_int
+    lib.fish_abi_version.restype = ctypes.c_int
     return lib
 
 
 def main() -> int:
     dll = os.path.join(ROOT, "bin", "fish.dll")
     model = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
-        ROOT, "models", "Llama-3.2-1B-Instruct-Q4_K_M.gguf")
+        ROOT, "models", "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
     if not os.path.exists(dll):
         print(f"[FAIL] missing {dll}")
         return 1
 
     lib = load_lib(dll)
-    print(f"kernel: {lib.fish_kernel_name().decode()}")
+    print(f"kernel: {lib.fish_kernel_name().decode()}  abi: {lib.fish_abi_version()}")
+    check(lib.fish_abi_version() >= 2, "engine ABI is 2 or newer")
 
     ctx = lib.fish_create()
     check(bool(ctx), "context created")
@@ -175,7 +204,8 @@ def main() -> int:
 
     cb = CB(on_token)
     t1 = time.time()
-    n_gen = lib.fish_generate(ctx, prompt.encode(), 0, 48, 0.3, 40, 0.9, 1.1, cb, None)
+    # Structural chat generation: the engine applies the template itself.
+    n_gen = lib.fish_generate_chat(ctx, roles, contents, 2, 48, 0.0, 40, 0.9, 1.1, cb, None)
     elapsed = time.time() - t1
     print()
     answer = "".join(chunks)
@@ -184,11 +214,27 @@ def main() -> int:
 
     st = Stats()
     lib.fish_get_stats(ctx, ctypes.byref(st))
-    print(f"  prefill {st.prefill_seconds:.2f}s  decode {st.decode_seconds:.2f}s  "
-          f"tok/s {st.tokens_per_second:.2f}  rss {st.peak_rss_mb:.0f} MB")
+    print(f"  prefill {st.prefill_seconds:.2f}s ({st.prefill_tokens_per_second:.0f} tok/s)  "
+          f"decode {st.decode_seconds:.2f}s  tok/s {st.tokens_per_second:.2f}  "
+          f"threads {st.n_threads}  streaming {st.streaming}  cached {st.cached_tokens}")
 
     check(n_gen > 0, "generated tokens")
     check("Paris" in answer, "answers 'Paris'")
+
+    # Second turn: the prefix cache should serve the shared system prompt.
+    roles2 = (ctypes.c_char_p * 4)(b"system", b"user", b"assistant", b"user")
+    contents2 = (ctypes.c_char_p * 4)(
+        b"Answer in one short sentence.", b"What is the capital of France?",
+        answer.encode(), b"And of Germany?")
+    chunks.clear()
+    print("streaming (turn 2): ", end="", flush=True)
+    n2 = lib.fish_generate_chat(ctx, roles2, contents2, 4, 32, 0.0, 40, 0.9, 1.1, cb, None)
+    print()
+    lib.fish_get_stats(ctx, ctypes.byref(st))
+    print(f"  prefill {st.prefill_seconds:.2f}s  cached {st.cached_tokens} of {st.prompt_tokens} prompt tokens")
+    check(n2 > 0, "second turn generated tokens")
+    check(st.cached_tokens > 8, "prefix cache reused the first turn")
+    check("Berlin" in "".join(chunks), "answers 'Berlin'")
 
     lib.fish_destroy(ctx)
     print(f"\n{'M2/M3/M4 FAILED' if failures else 'M2/M3/M4 PASSED'} "

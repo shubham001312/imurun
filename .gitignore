@@ -1,26 +1,105 @@
-node_modules/
-dist/
-out/
-build/
-*.log
-*.tsbuildinfo
+# IMURUN .gitignore
+#
+# Rules are targeted on purpose. Earlier versions used catch-alls such as
+# *token*, *secret*, *credential* and core.*, which silently hid real sources
+# (services/connectors/tokens.py, frontend/design-lab/core.js,
+# frontend/design-lab/styles/tokens.css, tests/test_connectors_secrets.py).
+# Check a new rule with:  git status --ignored  /  git check-ignore -v <file>
 
-# Python
+# ---------------------------------------------------------------- engine build
+# The FISH library is a build artifact: CI builds it per OS, bundles it in the
+# wheels and attaches it to each GitHub Release (docs/setup/RELEASE.md).
+bin/*.dll
+bin/*.so
+bin/*.dylib
+model/fish/build*/
+model/fish/*.o
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+*.ilk
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+.ninja_deps
+.ninja_log
+compile_commands.json
+
+# ---------------------------------------------------------------- python
 __pycache__/
-*.pyc
+*.py[cod]
 .venv/
+.venv*/
+venv/
+env/
+build/
+dist/
 *.egg-info/
+.eggs/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
 
-# Env / secrets
+# ---------------------------------------------------------------- node / npm
+node_modules/
+*.tgz
+package-lock.json
+npm-debug.log*
+
+# ---------------------------------------------------------------- IMURUN data
+# Models are downloaded at run time and never committed.
+models/*.gguf
+models/*.bin
+models/*.safetensors
+models/.cache/
+*.gguf
+# Test data roots (tests/test_launcher.py) and local runtime state.
+.pytest-imurun-home/
+.imurun/
+install.log
+imurun-install.log
+
+# ---------------------------------------------------------------- secrets
+# Local OAuth app registrations (services/connectors/apps.local.json) and any
+# other machine-local config.
+*.local.json
+*.local.json.tmp
 .env
 .env.*
-!.env.example
+client_secret*.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+# Debug dumps can contain request headers and tokens.
+*_debug.txt
+*.har
 
-# OS
+# ---------------------------------------------------------------- editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+*.orig
+*.code-workspace
 .DS_Store
+._*
 Thumbs.db
+Desktop.ini
+*.log
 
-# Local overrides and runtime data
-imurun.local.json
-.imurun/
-.bun-cache/
+# regenerated on model selection (holds a local path)
+models/.imurun-selected.json

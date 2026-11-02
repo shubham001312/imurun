@@ -3,7 +3,7 @@
  *
  * Every routine here is written from the GGUF block specification. The
  * reference is deliberately simple and exact: it is the correctness oracle
- * that the AVX2 path is validated against.
+ * that the AVX2 path is validated against (see test/test_m1.cpp).
  */
 #include <fish/quant.h>
 
@@ -282,6 +282,35 @@ void deq_q8_K(const uint8_t* p, float* y) {
     for (int j = 0; j < 256; ++j) y[j] = d * static_cast<float>(b->qs[j]);
 }
 
+// Non-linear 4-bit codebook shared by IQ4_NL and IQ4_XS.
+constexpr int8_t kIQ4NL[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                 1,    13,   25,  38,  53,  69,  89,  113};
+
+void deq_iq4_nl(const uint8_t* p, float* y) {
+    const auto* b = reinterpret_cast<const BlockIQ4_NL*>(p);
+    const float d = h2f(b->d);
+    for (int j = 0; j < 16; ++j) {
+        y[j]      = d * kIQ4NL[b->qs[j] & 0x0F];
+        y[j + 16] = d * kIQ4NL[b->qs[j] >> 4];
+    }
+}
+
+void deq_iq4_xs(const uint8_t* p, float* y) {
+    const auto* b = reinterpret_cast<const BlockIQ4_XS*>(p);
+    const float d = h2f(b->d);
+    const uint8_t* qs = b->qs;
+    for (int ib = 0; ib < 8; ++ib) {
+        const int ls = ((b->scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F) |
+                       (((b->scales_h >> (2 * ib)) & 3) << 4);
+        const float dl = d * static_cast<float>(ls - 32);
+        for (int j = 0; j < 16; ++j) {
+            y[ib * 32 + j]      = dl * kIQ4NL[qs[j] & 0x0F];
+            y[ib * 32 + 16 + j] = dl * kIQ4NL[qs[j] >> 4];
+        }
+        qs += 16;
+    }
+}
+
 // E2M1 values used by MXFP4.
 constexpr float kE2M1[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
 
@@ -290,8 +319,9 @@ void deq_mxfp4(const uint8_t* p, float* y) {
     // E8M0 scale: 2^(e - 127)
     const float d = std::ldexp(1.0f, static_cast<int>(b->e) - 127);
     for (int j = 0; j < 16; ++j) {
-        y[j]      = d * kE2M1[b->qs[j] & 0x0F];
-        y[j + 16] = d * kE2M1[b->qs[j] >> 4];
+        const int lo = b->qs[j] & 0x0F, hi = b->qs[j] >> 4;
+        y[j]      = d * ((lo & 8) ? -kE2M1[lo & 7] : kE2M1[lo & 7]);
+        y[j + 16] = d * ((hi & 8) ? -kE2M1[hi & 7] : kE2M1[hi & 7]);
     }
 }
 
@@ -319,14 +349,97 @@ float dot_blockwise(const void* src, const float* y, uint64_t n, int block, size
     return sum;
 }
 
+// Reference int8 path: dequantise the weight block, expand the activations,
+// dot in f32. Exact up to rounding; the vector kernels must agree with it.
+template <typename Fn>
+float dot_blockwise_q8(const void* src, const Q8Act* x, uint64_t n, int block, size_t bsize, Fn fn) {
+    float buf[256];
+    float xs[256];
+    const uint8_t* p = static_cast<const uint8_t*>(src);
+    float sum = 0;
+    for (uint64_t i = 0; i < n; i += static_cast<uint64_t>(block)) {
+        fn(p, buf);
+        const Q8Act* a = x + i / kQ8ActBlock;
+        for (int b = 0; b < block / kQ8ActBlock; ++b)
+            for (int k = 0; k < kQ8ActBlock; ++k)
+                xs[b * kQ8ActBlock + k] = a[b].d * static_cast<float>(a[b].qs[k]);
+        sum += dot_f32(buf, xs, static_cast<size_t>(block));
+        p += bsize;
+    }
+    return sum;
+}
+
 float dot_q4_K_scalar(const void* s, const float* y, uint64_t n) { return dot_blockwise(s, y, n, 256, 144, deq_q4_K); }
 float dot_q6_K_scalar(const void* s, const float* y, uint64_t n) { return dot_blockwise(s, y, n, 256, 210, deq_q6_K); }
 float dot_q8_0_scalar(const void* s, const float* y, uint64_t n) { return dot_blockwise(s, y, n, 32, 34, deq_q8_0); }
 float dot_q4_0_scalar(const void* s, const float* y, uint64_t n) { return dot_blockwise(s, y, n, 32, 18, deq_q4_0); }
 
-QuantKernels g_kernels = {
-    dot_q4_K_scalar, dot_q6_K_scalar, dot_q8_0_scalar, dot_q4_0_scalar, "scalar"
+// Same, for the 256-wide activation layout.
+template <typename Fn>
+float dot_blockwise_q8k(const void* src, const Q8ActK* x, uint64_t n, size_t bsize, Fn fn) {
+    float buf[256];
+    float xs[256];
+    const uint8_t* p = static_cast<const uint8_t*>(src);
+    float sum = 0;
+    for (uint64_t i = 0; i < n; i += kQ8ActKBlock, ++x) {
+        fn(p, buf);
+        for (int k = 0; k < kQ8ActKBlock; ++k) xs[k] = x->d * static_cast<float>(x->qs[k]);
+        sum += dot_f32(buf, xs, kQ8ActKBlock);
+        p += bsize;
+    }
+    return sum;
+}
+
+float dot_q4_K_q8k_scalar(const void* s, const Q8ActK* x, uint64_t n) { return dot_blockwise_q8k(s, x, n, 144, deq_q4_K); }
+float dot_q5_K_q8k_scalar(const void* s, const Q8ActK* x, uint64_t n) { return dot_blockwise_q8k(s, x, n, 176, deq_q5_K); }
+float dot_q6_K_q8k_scalar(const void* s, const Q8ActK* x, uint64_t n) { return dot_blockwise_q8k(s, x, n, 210, deq_q6_K); }
+float dot_q8_0_q8_scalar(const void* s, const Q8Act* x, uint64_t n) { return dot_blockwise_q8(s, x, n, 32, 34, deq_q8_0); }
+float dot_q4_0_q8_scalar(const void* s, const Q8Act* x, uint64_t n) { return dot_blockwise_q8(s, x, n, 32, 18, deq_q4_0); }
+
+void quantize_acts_scalar(const float* x, uint64_t n, Q8Act* out) {
+    for (uint64_t i = 0; i < n; i += kQ8ActBlock, ++out) {
+        float amax = 0.0f;
+        for (int k = 0; k < kQ8ActBlock; ++k) amax = std::max(amax, std::fabs(x[i + k]));
+        const float d = amax / 127.0f;
+        const float id = d > 0.0f ? 1.0f / d : 0.0f;
+        out->d = d;
+        int32_t sum = 0;
+        for (int k = 0; k < kQ8ActBlock; ++k) {
+            const int v = static_cast<int>(std::lrintf(x[i + k] * id));
+            out->qs[k] = static_cast<int8_t>(std::max(-127, std::min(127, v)));
+            sum += out->qs[k];
+        }
+        out->sum = sum;
+    }
+}
+
+void quantize_acts_k_scalar(const float* x, uint64_t n, Q8ActK* out) {
+    for (uint64_t i = 0; i < n; i += kQ8ActKBlock, ++out) {
+        float amax = 0.0f;
+        for (int k = 0; k < kQ8ActKBlock; ++k) amax = std::max(amax, std::fabs(x[i + k]));
+        const float d = amax / 127.0f;
+        const float id = d > 0.0f ? 1.0f / d : 0.0f;
+        out->d = d;
+        for (int b = 0; b < 8; ++b) {
+            int32_t sum = 0;
+            for (int k = 0; k < 32; ++k) {
+                const int v = static_cast<int>(std::lrintf(x[i + b * 32 + k] * id));
+                out->qs[b * 32 + k] = static_cast<int8_t>(std::max(-127, std::min(127, v)));
+                sum += out->qs[b * 32 + k];
+            }
+            out->bsums[b] = static_cast<int16_t>(sum);
+        }
+    }
+}
+
+const QuantKernels g_scalar_kernels = {
+    dot_q4_K_scalar, dot_q6_K_scalar, dot_q8_0_scalar, dot_q4_0_scalar,
+    dot_q8_0_q8_scalar, dot_q4_0_q8_scalar,
+    dot_q4_K_q8k_scalar, dot_q5_K_q8k_scalar, dot_q6_K_q8k_scalar,
+    quantize_acts_scalar, quantize_acts_k_scalar,
+    "scalar"
 };
+QuantKernels g_kernels = g_scalar_kernels;
 
 float dot_f32_scalar_entry(const float* a, const float* b, uint64_t n) {
     return dot_f32(a, b, static_cast<size_t>(n));
@@ -350,11 +463,28 @@ bool quant_supported(GgmlType t) {
         case GgmlType::Q8_0:
         case GgmlType::Q2_K: case GgmlType::Q3_K: case GgmlType::Q4_K:
         case GgmlType::Q5_K: case GgmlType::Q6_K: case GgmlType::Q8_K:
+        case GgmlType::IQ4_NL: case GgmlType::IQ4_XS:
         case GgmlType::MXFP4:
             return true;
         default:
             return false;
     }
+}
+
+bool has_q8_kernel(GgmlType t) {
+    return t == GgmlType::Q4_0 || t == GgmlType::Q8_0;
+}
+
+bool has_q8k_kernel(GgmlType t) {
+    return t == GgmlType::Q4_K || t == GgmlType::Q5_K || t == GgmlType::Q6_K;
+}
+
+void quantize_acts(const float* x, uint64_t n, Q8Act* out) {
+    g_kernels.quantize(x, n, out);
+}
+
+void quantize_acts_k(const float* x, uint64_t n, Q8ActK* out) {
+    g_kernels.quantize_k(x, n, out);
 }
 
 bool dequant_row(GgmlType type, const void* src, float* dst, uint64_t n) {
@@ -386,6 +516,8 @@ bool dequant_row(GgmlType type, const void* src, float* dst, uint64_t n) {
             case GgmlType::Q5_K: deq_q5_K(p, dst + i); break;
             case GgmlType::Q6_K: deq_q6_K(p, dst + i); break;
             case GgmlType::Q8_K: deq_q8_K(p, dst + i); break;
+            case GgmlType::IQ4_NL: deq_iq4_nl(p, dst + i); break;
+            case GgmlType::IQ4_XS: deq_iq4_xs(p, dst + i); break;
             case GgmlType::MXFP4: deq_mxfp4(p, dst + i); break;
             default: return false;
         }
@@ -400,7 +532,7 @@ float vec_dot(GgmlType type, const void* src, const float* y, uint64_t n, bool* 
 
     switch (type) {
         case GgmlType::F32:
-            return dot_f32(static_cast<const float*>(src), y, static_cast<size_t>(n));
+            return g_dot_f32(static_cast<const float*>(src), y, n);
         case GgmlType::F16: {
             float buf[64];
             const uint16_t* s = static_cast<const uint16_t*>(src);
@@ -439,6 +571,8 @@ float vec_dot(GgmlType type, const void* src, const float* y, uint64_t n, bool* 
         case GgmlType::Q3_K: return dot_blockwise(src, y, n, 256, 110, deq_q3_K);
         case GgmlType::Q5_K: return dot_blockwise(src, y, n, 256, 176, deq_q5_K);
         case GgmlType::Q8_K: return dot_blockwise(src, y, n, 256, 292, deq_q8_K);
+        case GgmlType::IQ4_NL: return dot_blockwise(src, y, n, 32, 18, deq_iq4_nl);
+        case GgmlType::IQ4_XS: return dot_blockwise(src, y, n, 256, 136, deq_iq4_xs);
         case GgmlType::MXFP4: return dot_blockwise(src, y, n, 32, 17, deq_mxfp4);
         default:
             if (ok) *ok = false;
@@ -446,7 +580,27 @@ float vec_dot(GgmlType type, const void* src, const float* y, uint64_t n, bool* 
     }
 }
 
+bool vec_dot_q8(GgmlType type, const void* src, const Q8Act* x, uint64_t n, float* out) {
+    if (!src || !x || !out) return false;
+    switch (type) {
+        case GgmlType::Q4_0: *out = g_kernels.q4_0_q8(src, x, n); return true;
+        case GgmlType::Q8_0: *out = g_kernels.q8_0_q8(src, x, n); return true;
+        default: return false;
+    }
+}
+
+bool vec_dot_q8k(GgmlType type, const void* src, const Q8ActK* x, uint64_t n, float* out) {
+    if (!src || !x || !out) return false;
+    switch (type) {
+        case GgmlType::Q4_K: *out = g_kernels.q4_K_q8k(src, x, n); return true;
+        case GgmlType::Q5_K: *out = g_kernels.q5_K_q8k(src, x, n); return true;
+        case GgmlType::Q6_K: *out = g_kernels.q6_K_q8k(src, x, n); return true;
+        default: return false;
+    }
+}
+
 const QuantKernels& quant_kernels() { return g_kernels; }
+const QuantKernels& scalar_kernels() { return g_scalar_kernels; }
 
 float dot_f32_fast(const float* a, const float* b, uint64_t n) {
     return g_dot_f32(a, b, n);

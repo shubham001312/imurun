@@ -83,6 +83,34 @@ class SkillsStore:
                 return skill
         return None
 
+    def delete(self, skill_id: str) -> bool:
+        """Remove one skill. ``False`` when it does not exist.
+
+        ``DELETE /api/skills/{id}`` has always called this, but the method
+        did not exist, so the route raised ``AttributeError`` and the client
+        saw a dropped connection.
+        """
+        if not SKILL_ID.match(skill_id or ""):
+            return False
+        with self._lock:
+            folder = self._root / skill_id
+            flat = self._root / f"{skill_id}.md"
+            removed = False
+            if (folder / "SKILL.md").is_file():
+                # Only the files this store writes; a folder holding anything
+                # else is left alone rather than deleted recursively.
+                for name in ("SKILL.md", "SKILL.tmp"):
+                    (folder / name).unlink(missing_ok=True)
+                try:
+                    folder.rmdir()
+                except OSError:
+                    pass
+                removed = True
+            if flat.is_file():
+                flat.unlink()
+                removed = True
+            return removed
+
     def create(
         self,
         name: str,

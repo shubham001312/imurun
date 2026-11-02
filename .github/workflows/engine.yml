@@ -1,0 +1,124 @@
+# IMURUN: build the FISH engine library on each OS (reusable).
+#
+# Called by ci.yml (every push/PR) and workflow.yml (releases). Uploads one
+# artifact per platform, named engine-<platform>, holding the library under
+# its release-asset name:
+#
+#   engine-windows-x64   fish-windows-x64.dll        MinGW-w64 GCC (MSYS2 UCRT64), static, Vulkan ON
+#   engine-linux-x64     libfish-linux-x64.so        GCC in manylinux_2_28 (glibc 2.28+), Vulkan ON
+#   engine-macos-arm64   libfish-macos-arm64.dylib   Apple clang, Vulkan OFF (no MoltenVK path)
+#
+# MSVC is not supported (the kernels use GCC target attributes), hence MSYS2.
+# The Vulkan backend needs only the headers at build time (the loader is
+# opened at run time and shaders come from shaders/prebuilt when glslc is
+# absent), so no Vulkan SDK is installed: Windows uses the MSYS2 headers
+# package, Linux a pinned clone of KhronosGroup/Vulkan-Headers.
+# The C++ tests need a GGUF model, so they are compiled (FISH_BUILD_TESTS) but
+# not run here.
+name: Engine
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  VULKAN_HEADERS_TAG: v1.3.296
+
+jobs:
+  windows:
+    name: Engine (Windows x64, MinGW)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-vulkan-headers
+      - name: Build
+        working-directory: model/fish
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=ON
+          ninja -C build
+      - name: Check it is self-contained
+        working-directory: model/fish
+        run: |
+          objdump -p build/fish.dll | grep "DLL Name" | tee deps.txt
+          if grep -iE "libstdc|libgcc|libwinpthread" deps.txt; then
+            echo "::error::fish.dll depends on MinGW runtime DLLs; it must link statically"; exit 1
+          fi
+          mkdir -p ../../engine-out
+          cp build/fish.dll ../../engine-out/fish-windows-x64.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-windows-x64
+          path: engine-out/
+          if-no-files-found: error
+
+  linux:
+    name: Engine (Linux x64, manylinux_2_28)
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          /opt/python/cp312-cp312/bin/python -m pip install --upgrade cmake ninja
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+          git clone --depth 1 --branch "$VULKAN_HEADERS_TAG" https://github.com/KhronosGroup/Vulkan-Headers.git /opt/vulkan-headers
+      - name: Build
+        working-directory: model/fish
+        env:
+          VULKAN_SDK: /opt/vulkan-headers
+        run: |
+          gcc --version | head -1
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=ON
+          ninja -C build
+      - name: Check dependencies
+        working-directory: model/fish
+        run: |
+          objdump -p build/libfish.so | grep NEEDED
+          mkdir -p ../../engine-out
+          cp build/libfish.so ../../engine-out/libfish-linux-x64.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-linux-x64
+          path: engine-out/
+          if-no-files-found: error
+
+  macos:
+    name: Engine (macOS arm64, clang)
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: brew install ninja
+      - name: Build
+        working-directory: model/fish
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=OFF \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=arm64
+          ninja -C build
+      - name: Check dependencies
+        working-directory: model/fish
+        run: |
+          otool -L build/libfish.dylib
+          mkdir -p ../../engine-out
+          cp build/libfish.dylib ../../engine-out/libfish-macos-arm64.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-macos-arm64
+          path: engine-out/
+          if-no-files-found: error

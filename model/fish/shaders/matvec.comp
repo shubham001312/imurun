@@ -1,0 +1,71 @@
+#version 450
+// FISH Vulkan backend — decode matmul (a few tokens).
+//
+// y[y_off + t*n_out + row] = dot(W_row, x_t).
+//
+// Layout: workgroup = 8 groups of 32 lanes; each lane group owns NR rows of
+// one token (gl_WorkGroupID.y). A lane takes whole 32-element sub-blocks
+// (one scale decode, eight weight words) and loads the matching 32
+// activations ONCE for all NR rows: without that reuse the activation reads
+// (f32, 8x the bytes of a 4-bit weight) dominate L1/L2 traffic.
+// Partial sums are reduced in shared memory (portable: no subgroup feature).
+#extension GL_GOOGLE_include_directive : require
+
+#define LANES 32u
+#define GROUPS 8u
+#define NR 4u   // 8 (64 rows/WG) measured 3-5% slower on an RTX 3050
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "dequant.glsl"
+
+layout(std430, binding = 1) readonly buffer XBuf { vec4 x4[]; };
+layout(std430, binding = 2) writeonly buffer YBuf { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint n_in;
+    uint n_out;
+    uint n_tok;
+    uint row_bytes;
+    uint y_off;
+    uint x_off;      // floats, multiple of 4 (layer spans address one arena)
+} pc;
+
+shared float red[256 * NR];
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint lane = tid % LANES;
+    const uint row0 = (gl_WorkGroupID.x * GROUPS + tid / LANES) * NR;
+    const uint tok = gl_WorkGroupID.y;
+
+    float acc[NR];
+    for (uint r = 0u; r < NR; ++r) acc[r] = 0.0;
+    const uint nr = row0 < pc.n_out ? min(NR, pc.n_out - row0) : 0u;
+    if (nr > 0u) {
+        const uint xo = (pc.x_off + tok * pc.n_in) >> 2;
+        for (uint k = lane * 32u; k < pc.n_in; k += LANES * 32u) {
+            vec4 xv[8];
+            const uint xb = xo + (k >> 2);
+            for (uint j = 0u; j < 8u; ++j) xv[j] = x4[xb + j];
+            for (uint r = 0u; r < NR; ++r) {
+                if (r >= nr) break;
+                float v[32];
+                dequant32((row0 + r) * pc.row_bytes, k, v);
+                float s = 0.0;
+                for (uint j = 0u; j < 8u; ++j)
+                    s += dot(vec4(v[4u * j], v[4u * j + 1u], v[4u * j + 2u], v[4u * j + 3u]), xv[j]);
+                acc[r] += s;
+            }
+        }
+    }
+    for (uint r = 0u; r < NR; ++r) red[tid * NR + r] = acc[r];
+    barrier();
+    for (uint s = LANES / 2u; s > 0u; s >>= 1) {
+        if (lane < s)
+            for (uint r = 0u; r < NR; ++r) red[tid * NR + r] += red[(tid + s) * NR + r];
+        barrier();
+    }
+    if (lane == 0u)
+        for (uint r = 0u; r < nr; ++r)
+            y[pc.y_off + tok * pc.n_out + row0 + r] = red[tid * NR + r];
+}

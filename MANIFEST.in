@@ -1,0 +1,24 @@
+# Source distribution contents. The sdist must be able to build the wheel
+# (setup.py copies these into the imurun package) and lets a user build the
+# FISH engine from source (model/fish). Prebuilt binaries, models, local
+# secrets and debug dumps are never included.
+include LICENSE README.md pyproject.toml setup.py MANIFEST.in
+include start.py install.py window.py requirements*.txt
+include run.bat run.sh run.command
+recursive-include imurun *.py
+recursive-include services *
+recursive-include model *.py
+recursive-include frontend/design-lab *
+recursive-include docs *.md
+include model/fish/CMakeLists.txt model/fish/fish.rc
+recursive-include model/fish/src *
+recursive-include model/fish/include *
+recursive-include model/fish/shaders *
+recursive-include model/fish/test *
+
+prune model/fish/build
+prune bin
+prune models
+prune archive
+global-exclude __pycache__ *.py[cod] *.local.json *.local.json.tmp *.log *.tmp *.o *.obj
+global-exclude *.gguf *.dll *.so *.dylib *.exe .DS_Store Thumbs.db *_debug.txt

@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from ..config import load_config
+from ..config import ServerConfig, load_config
 from ..connectors.registry import ConnectorRegistry
 from ..persona.store import PersonaStore
 from ..prompts.queue import PromptQueue
@@ -23,11 +23,9 @@ from ..skills.store import SkillsStore
 from .api import ApiServer
 try:  # run as ``imurun.services.server.app``
     from ..model.fish_client import SyncFishModelClient
-    from ..model.local_client import LocalModelClient
     from ..model.engine_client import EngineModelClient
 except ImportError:  # run as ``services.server.app`` from the imurun directory
     from model.fish_client import SyncFishModelClient
-    from model.local_client import LocalModelClient
     from model.engine_client import EngineModelClient
 
 # Optional FastAPI models API (requires huggingface_hub, fastapi)
@@ -115,14 +113,11 @@ def build_server(
     home = Path(root) if root else cfg.data_root or default_root()
     sessions = home / "sessions"
 
-    # Two compute paths: the native FISH engine and the in-process llama.cpp
-    # core. The engine wins when it runs; the in-process core is the universal
-    # fallback for machines that cannot execute unsigned binaries.
+    # Single compute path: the native FISH engine only.
+    # No llama.cpp fallback.
     if model is None:
-        project = Path(__file__).resolve().parents[2]
         model = EngineModelClient(
             fish=SyncFishModelClient(cfg.fish),
-            local=LocalModelClient(models_dir=project / "models"),
         )
 
     # The live-fact tools: the clock, the weather, web search, page reading
@@ -159,12 +154,64 @@ def build_server(
         tools=tools,
     )
 
+    # Research engine: model-issued searches publish research.* events, and
+    # the planner can use the raw model for its routing generation even on
+    # paths that do not go through the agent loop (manual tool runs).
+    if tools is not None:
+        try:
+            from ..research.events import set_publisher
+
+            set_publisher(server._events.publish)
+            tools.publish = server._events.publish
+            tools.planner_model = model
+            tools.policy = getattr(getattr(server, "_executor", None), "policy", None)
+        except Exception as exc:  # noqa: BLE001 - research is optional
+            print(f"research: not wired ({exc})", file=sys.stderr)
+
+    # NVIDIA-hosted models: the engine facade gets its remote client and the
+    # user's last hosted choice is restored (services/remote/nvidia.py).
+    try:
+        from ..remote.nvidia import attach as attach_remote
+
+        attach_remote(server, model, home)
+    except Exception as exc:  # noqa: BLE001 - hosted models are optional
+        print(f"remote models: not wired ({type(exc).__name__})", file=sys.stderr)
+
     # Wire the native FISH client into the stack controller so it knows the
     # engine is already available in-process and skips docker-compose.
     if hasattr(model, "_fish") and model._fish is not None:
         server._stack.set_native_fish(model._fish)
     elif hasattr(model, "_async_client") and hasattr(model._async_client, "_native"):
         server._stack.set_native_fish(model._async_client._native)
+
+    # Start the idle-unload watchdog (no warm-start — model loads on first use).
+    def _start_idle_watchdog(cfg: ServerConfig) -> None:
+        import threading
+        import time
+
+        fish_client = None
+        if hasattr(model, "_fish") and model._fish is not None:
+            fish_client = model._fish
+        elif hasattr(model, "_async_client") and hasattr(model._async_client, "_native"):
+            fish_client = model._async_client._native
+
+        if fish_client is None:
+            return
+
+        def watchdog() -> None:
+            idle_timeout = getattr(cfg.fish, "idle_timeout_seconds", 300.0)
+            check_interval = 30.0
+            while True:
+                time.sleep(check_interval)
+                try:
+                    if hasattr(fish_client, "unload_if_idle"):
+                        fish_client.unload_if_idle(idle_timeout)
+                except Exception:  # noqa: BLE001 - watchdog must never crash
+                    pass
+
+        threading.Thread(target=watchdog, name="imurun-idle-watchdog", daemon=True).start()
+
+    _start_idle_watchdog(cfg)
 
     # Production composition registers the eight connectors and any OAuth flow
     # whose client id is configured. Tests that inject their own registry keep

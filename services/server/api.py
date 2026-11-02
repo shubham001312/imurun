@@ -22,6 +22,12 @@ GET  /api/turns/{id}       turn state
 POST /api/turns/{id}/cancel
 POST /api/connectors/{id}/connect
 GET  /oauth/callback       one-time state, then the token goes to the keychain
+GET  /api/tools            tools, schemas, availability, permission
+POST /api/tools/run        run one tool by hand (403 ask -> approved: true)
+GET/POST /api/permissions  permission mode, workspace root, toggles
+GET  /api/tools/approvals, POST /api/tools/approvals/{id}
+GET/POST /api/agent        step budget
+(the agentic handlers live in services/tools/routes.py)
 """
 from __future__ import annotations
 
@@ -47,10 +53,16 @@ from ..safety.decisions import PermissionRequired
 from ..sessions.session import Session
 from ..sessions.transcript import TranscriptStore
 from ..skills.store import SkillsStore
+from ..tools import routes as tool_routes
+from ..voice import routes as voice_routes  # /api/voice/* (docs/voice/README.md)
+from ..tuning import routes as tuning_routes  # /api/tuning/* (docs/tuning/README.md)
+from ..tools.approvals import ApprovalBroker
+from ..tools.executor import ToolExecutor
+from ..tools.permissions import PermissionPolicy
 from .clients import ClientStore
 from .events import CLOSE, EventBroker
 from .resources import ResourceSampler
-from .settings import SettingsStore
+from .settings import SettingsStore, apply_search_env, mask_secrets
 from .stack import StackController
 from .turns import TurnRunner
 from .usage import UsageTracker
@@ -133,7 +145,7 @@ MAX_READ = 1_000
 LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+    "img-src 'self' data:; font-src 'self'; connect-src 'self'; media-src 'self' blob:; "
     "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 )
 STATIC_TYPES = {
@@ -143,10 +155,30 @@ STATIC_TYPES = {
     ".mjs": "text/javascript; charset=utf-8",
     ".svg": "image/svg+xml",
     ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".jpg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
     ".ico": "image/x-icon",
     ".woff2": "font/woff2",
+    ".woff": "font/woff",
+    ".ttf": "font/ttf",
+    ".otf": "font/otf",
     ".webmanifest": "application/manifest+json",
     ".txt": "text/plain; charset=utf-8",
+    ".pdf": "application/pdf",
+    ".zip": "application/zip",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".csv": "text/csv; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".xml": "application/xml; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
 }
 
 
@@ -210,6 +242,40 @@ class ApiServer:
             model = SyncFishModelClient(cfg.fish)
         self._model = model  # Keep reference for cleanup
         self._tools = tools
+        home = (
+            Path(data_root)
+            if data_root is not None
+            else (Path(sessions_root).parent if sessions_root is not None else Path.home() / ".imurun")
+        )
+        self._home = home
+        self._usage = usage or UsageTracker(home / "usage.json")
+        self._settings = settings or SettingsStore(home / "settings")
+        # The agentic layer: one permission policy (mode + workspace from the
+        # `permissions` settings section), one approval broker on the event
+        # stream, and one executor every tool call goes through. The tools
+        # are rebound to the policy's workspace so both agree on the root.
+        self._policy = PermissionPolicy(self._settings)
+        registry = getattr(tools, "registry", None)
+
+        def _card_levels(tool_name: str, args: dict) -> tuple[str, bool]:
+            # Level + "remember" applicability for approval cards requested
+            # without them (manual route, tests); the executor passes its own.
+            reg = getattr(self._executor, "registry", None) or registry
+            tool = reg.get(tool_name) if reg is not None else None
+            if tool is None:
+                return "", True
+            return self._policy.level(tool, args), self._policy.rememberable(tool, args)
+
+        self._approvals = ApprovalBroker(self._events.publish, levels=_card_levels)
+        self._executor = None
+        if registry is not None:
+            registry.bind_workspace(self._policy.workspace)
+            if hasattr(tools, "policy"):
+                tools.policy = self._policy
+            self._executor = ToolExecutor(
+                registry, policy=self._policy, approvals=self._approvals,
+                publish=self._events.publish, mark=self._tool_mark,
+            )
         self._turns = turns or TurnRunner(
             model,
             queue=self._queue,
@@ -219,20 +285,16 @@ class ApiServer:
             persona=persona,
             tools=tools,
             mark=mark,
+            usage=self._usage,
+            executor=self._executor,
+            skills=self._skills,
+            settings=self._settings,
         )
         self._oauth_flows = dict(oauth_flows or {})
         self._oauth_states: dict[str, tuple[str, OAuthFlow]] = {}
         self._oauth_lock = threading.Lock()
 
-        home = (
-            Path(data_root)
-            if data_root is not None
-            else (Path(sessions_root).parent if sessions_root is not None else Path.home() / ".imurun")
-        )
-        self._home = home
-        self._settings = settings or SettingsStore(home / "settings")
         self._clients = clients or ClientStore(home / "clients.json")
-        self._usage = usage or UsageTracker(home / "usage.json")
         self._resources = resources or ResourceSampler(home, home / "models")
         self._stack = stack or StackController()
 
@@ -256,9 +318,11 @@ class ApiServer:
     def start(self) -> "ApiServer":
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
+        tuning_routes.attach(self)  # automation ticker; idle unless tuning.enabled
         return self
 
     def stop(self) -> None:
+        tuning_routes.detach(self)  # checkpoint + stop a running training job
         self._events.close()
         # shutdown() waits for the serve loop to end, so it is only safe once
         # the server was actually started.
@@ -267,6 +331,14 @@ class ApiServer:
         self._httpd.server_close()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
+        # MCP servers are child processes / sessions: close them before the
+        # model so a stdio server never outlives the app (connectors REQUESTS).
+        mcp = getattr(self, "_mcp", None)
+        if mcp is not None:
+            try:
+                mcp.close_all()
+            except Exception:  # noqa: BLE001 - shutdown must finish
+                pass
         # Close model client if it has a close method
         if hasattr(self._model, 'close'):
             try:
@@ -290,6 +362,15 @@ class ApiServer:
 
     def _event_mark(self, rule: str, subject: str, why: str) -> None:
         self._record(subject, f"{rule}: {why}")
+
+    def _tool_mark(self, rule: str, subject: str, why: str) -> None:
+        # Tool audit goes to the injected mark with its own rule id (G3-tool).
+        if self._mark is None:
+            return
+        try:
+            self._mark(rule, subject, why)
+        except Exception:  # noqa: BLE001 - a broken sink must not break a tool
+            pass
 
     def _handler(self):
         server = self
@@ -324,6 +405,14 @@ class ApiServer:
                 self.end_headers()
                 self.wfile.write(body)
 
+            def _raw(self, code: int, headers: dict, body: bytes) -> None:
+                self.send_response(code)
+                for name, value in headers.items():
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def _local(self) -> bool:
                 host = self.headers.get("Host", "")
                 if host.startswith("["):
@@ -346,18 +435,18 @@ class ApiServer:
                     return False
 
             def _authorized(self) -> bool:
-                header = self.headers.get("Authorization", "")
-                if self._same_token(header, f"Bearer {server.token}"):
-                    return True
-                # EventSource cannot set request headers, so a GET may present
-                # the token as a query parameter. The header stays primary and
-                # every other method still requires it.
+                # The token is never written anywhere: not to a log, not to a
+                # debug file. A failure marks only the path.
+                header = self.headers.get("Authorization", "").strip()
+                if header.lower().startswith("bearer "):
+                    if self._same_token(header[7:].strip(), server.token):
+                        return True
                 if self.command == "GET":
+                    # EventSource cannot set headers, so GET accepts ?token=.
                     query = parse_qs(urlsplit(self.path).query)
                     candidate = (query.get("token") or [""])[0]
                     if candidate and self._same_token(candidate, server.token):
                         return True
-                # Record the path only: the query string may carry the token.
                 server._record(urlsplit(self.path).path, "denied: bad token")
                 self._reply(401, {"error": "unauthorized"})
                 return False
@@ -499,7 +588,13 @@ class ApiServer:
                     return
                 path = unquote(urlsplit(self.path).path)
                 if path == "/oauth/callback":
-                    self._callback()
+                    # Connector-owned page (account name, auto-close, `connector`
+                    # event); the built-in _callback stays as the fallback.
+                    page = tool_routes.handle_callback(server, self.path)
+                    if page is None:
+                        self._callback()
+                    else:
+                        self._raw(*page)
                     return
                 # Liveness probe: no secrets, so it answers before the token gate.
                 if path == "/health":
@@ -544,6 +639,7 @@ class ApiServer:
                             # shell can show honest state without a second call.
                             # The full detail is on /api/tools.
                             "tools": _tools_summary(server),
+                            "voice": voice_routes.status_line(server),
                         },
                     )
                     return
@@ -566,16 +662,28 @@ class ApiServer:
                 if path == "/api/connectors":
                     self._reply(200, {"connectors": server._connectors.list()})
                     return
-                if path == "/api/tools":
-                    # Honest state: which tools exist, and whether they can
-                    # run right now (network, location, key).
-                    runner = server._tools
-                    if runner is None:
-                        self._reply(200, {"tools": [], "network": False})
-                        return
-                    self._reply(200, runner.status())
+                # Tools, approvals, permissions, agent limits: honest state
+                # (which tools exist, whether they can run right now, and
+                # what the permission policy would do with them).
+                if path.startswith(voice_routes.PREFIX):  # audio bodies/replies: the voice package answers
+                    voice_routes.dispatch(server, self, path)
+                    return
+                handled = (tuning_routes.handle_get(server, path, query=parse_qs(urlsplit(self.path).query))
+                           or tool_routes.handle_get(server, path))
+                if handled is not None:
+                    self._reply(*handled)
                     return
                 parts = [part for part in path.split("/") if part]
+                if len(parts) == 3 and parts[:2] == ["api", "skills"]:
+                    skill = server._skills.get(parts[2])
+                    if skill is None:
+                        self._reply(404, {"error": "unknown skill"})
+                        return
+                    self._reply(200, {"id": skill.id, "name": skill.name,
+                                      "description": skill.description,
+                                      "origin": skill.origin, "body": skill.body,
+                                      "invoke": f"/{skill.id}"})
+                    return
                 if len(parts) == 3 and parts[:2] == ["api", "connectors"]:
                     connector = server._connectors.get(parts[2])
                     if connector is None:
@@ -606,7 +714,7 @@ class ApiServer:
                     except ValueError as exc:
                         self._reply(400, {"error": str(exc)})
                         return
-                    self._reply(200, {"section": parts[2], "values": values})
+                    self._reply(200, {"section": parts[2], "values": mask_secrets(parts[2], values)})
                     return
                 if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
                     try:
@@ -716,31 +824,8 @@ class ApiServer:
                     return
                 self._reply(200, {"messages": [asdict(message) for message in messages]})
 
-            def do_PUT(self) -> None:  # noqa: N802
-                if not self._local():
-                    return
-                if not self._authorized():
-                    return
-                path = urlsplit(self.path).path
-                if path != "/api/persona":
-                    self._reply(404, {"error": "not found"})
-                    return
-                payload = self._body()
-                if payload is None:
-                    return
-                try:
-                    server._persona_store.save(
-                        Persona(
-                            name=str(payload.get("name", "")),
-                            email_role=str(payload.get("email_role", "")),
-                            description=str(payload.get("description", "")),
-                        )
-                    )
-                except (ValueError, TypeError) as exc:
-                    self._reply(400, {"error": str(exc)})
-                    return
-                server._record("persona", "saved")
-                self._reply(200, {"ok": True})
+            # (A first, dead `do_PUT` that only handled /api/persona used to
+            # sit here; the real one is below and handles persona + settings.)
 
             def do_POST(self) -> None:  # noqa: N802
                 if not self._local():
@@ -749,6 +834,25 @@ class ApiServer:
                     return
                 path = unquote(urlsplit(self.path).path)
                 parts = [part for part in path.split("/") if part]
+                if path.startswith(voice_routes.PREFIX):
+                    voice_routes.dispatch(server, self, path)
+                    return
+                if tuning_routes.is_post_route(path) or tool_routes.is_post_route(path):
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    routes = tuning_routes if tuning_routes.is_post_route(path) else tool_routes
+                    self._reply(*routes.handle_post(server, path, payload))
+                    return
+                if path == "/api/system/pick-file":
+                    # Native "choose a file" dialog for the page (filedialog.py).
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    from . import filedialog
+
+                    self._reply(*filedialog.handle(payload))
+                    return
                 if path == "/api/prompts":
                     payload = self._body()
                     if payload is None:
@@ -806,13 +910,30 @@ class ApiServer:
                             self._reply(404, {"error": "unknown session"})
                             return
                     try:
-                        turn = server._turns.start(session_id, prompt)
+                        turn = server._turns.start(
+                            session_id, prompt, mode=str(payload.get("mode") or "build"),
+                            language=str(payload.get("language") or ""),
+                        )
                     except ValueError as exc:
                         self._reply(400, {"error": str(exc)})
                         return
                     except RuntimeError as exc:
                         if "model unavailable" in str(exc).lower():
-                            self._reply(503, {"error": "model_unavailable", "message": "FISH engine is not running. Use /api/stack/start to start the full stack."})
+                            # Say which of the two things is missing: the engine
+                            # library (an install problem) or a selected model
+                            # (a choice the user makes in the Models tab).
+                            fish = getattr(getattr(server, "_model", None), "_fish", None)
+                            native = getattr(fish, "_native", None)
+                            has_library = bool(getattr(native, "library_path", None))
+                            if not has_library:
+                                reason, message = "no_engine", (
+                                    "The FISH engine library was not found (bin/fish.dll or "
+                                    "libfish.so). Build it or run `python install.py --check`.")
+                            else:
+                                reason, message = "no_model", (
+                                    "No model is selected. Choose one in the Models tab.")
+                            self._reply(503, {"error": "model_unavailable", "reason": reason,
+                                              "message": message})
                         else:
                             self._reply(500, {"error": str(exc)})
                         return
@@ -1006,15 +1127,31 @@ class ApiServer:
                     if target is None:
                         self._reply(404, {"error": "that model is not downloaded"})
                         return
-                    selector = getattr(server._model, "select", None)
-                    if selector is None:
-                        self._reply(501, {"error": "this engine cannot switch models"})
+                    if hasattr(manager, "is_compatible") and not manager.is_compatible(model_id):
+                        self._reply(400, {
+                            "error": "FISH cannot run this model's architecture yet. "
+                                     "Pick a Llama-family model (for example Llama 3.2 3B "
+                                     "or DeepSeek R1 Distill Llama 8B)."
+                        })
                         return
-                    if not selector(target):
-                        self._reply(500, {"error": "the model could not be selected"})
+                    # Use the queued model switch mechanism
+                    result = server._turns.request_model_switch(target)
+                    if not result.get("ok"):
+                        self._reply(500, {"error": result.get("error", "model switch failed")})
                         return
-                    server._record("model", f"selected {model_id}")
-                    self._reply(200, {"selected": target.name, "id": model_id})
+                    # Persist the selected model so it loads on next startup
+                    try:
+                        from services.config import save_last_model
+                        # `server.data_root` never existed: the AttributeError
+                        # was swallowed and the choice was never persisted.
+                        save_last_model(server._home, model_id)
+                    except Exception:
+                        pass
+                    self._reply(200, {
+                        "selected": target.name, 
+                        "id": model_id,
+                        "queued": result.get("queued", False)
+                    })
                     return
 
                 # Models API - POST /api/models/download (SSE progress)
@@ -1168,12 +1305,18 @@ class ApiServer:
                     payload = self._body()
                     if payload is None:
                         return
+                    if parts[2] == "search":
+                        # A client echoing the mask back must not overwrite a key.
+                        payload = {k: v for k, v in dict(payload).items() if v != "••••••••"}
                     try:
                         merged = server._settings.write(parts[2], payload)
                     except ValueError as exc:
                         self._reply(400, {"error": str(exc)})
                         return
-                    self._reply(200, {"section": parts[2], "values": merged})
+                    if parts[2] == "search":
+                        apply_search_env(merged)
+                        server._record("settings", "search providers updated")
+                    self._reply(200, {"section": parts[2], "values": mask_secrets(parts[2], merged)})
                     return
 
                 self._reply(404, {"error": "not found"})
@@ -1185,6 +1328,10 @@ class ApiServer:
                     return
                 path = unquote(urlsplit(self.path).path)
                 parts = [part for part in path.split("/") if part]
+                handled = tool_routes.handle_delete(server, path)  # DELETE /api/mcp/servers/{id}
+                if handled is not None:
+                    self._reply(*handled)
+                    return
 
                 if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
                     try:

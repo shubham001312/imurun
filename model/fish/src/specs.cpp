@@ -6,9 +6,11 @@
  * rather than inventing a number.
  */
 #include <fish/specs.h>
+#include <fish/backend.h>
 #include <fish/quant.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -304,16 +306,34 @@ double measure_disk_read_mb_s(const std::string& path) {
 }
 
 double measure_ram_bandwidth_mb_s() {
-    const size_t sz = 32u << 20;
-    std::vector<uint8_t> a(sz, 1);
-    std::vector<uint8_t> b(sz, 0);
+    // What decode is bound by is the *aggregate* read bandwidth all cores can
+    // pull together (one core alone sees a fraction of it), so every thread
+    // streams its own slice at once. The checksum keeps the optimiser from
+    // deleting the loop (an earlier build reported 600 TB/s from exactly that).
+    const int n_threads = std::max(1, std::min(physical_cores() > 0 ? physical_cores() : 4, 32));
+    const size_t per_thread = 32u << 20;
+    std::vector<std::vector<uint64_t>> bufs(static_cast<size_t>(n_threads));
+    for (auto& b : bufs) b.assign(per_thread / sizeof(uint64_t), 0x0101010101010101ull);
+
+    std::atomic<uint64_t> sink{0};
     double best = 0.0;
-    for (int i = 0; i < 3; ++i) {
+    for (int rep = 0; rep < 3; ++rep) {
+        std::vector<std::thread> workers;
         const auto t0 = Clock::now();
-        std::memcpy(b.data(), a.data(), sz);
+        for (int t = 0; t < n_threads; ++t) {
+            workers.emplace_back([&, t] {
+                uint64_t acc = 0;
+                const std::vector<uint64_t>& b = bufs[static_cast<size_t>(t)];
+                for (size_t k = 0; k < b.size(); k += 4)
+                    acc += b[k] ^ b[k + 1] ^ b[k + 2] ^ b[k + 3];
+                sink.fetch_add(acc, std::memory_order_relaxed);
+            });
+        }
+        for (auto& w : workers) w.join();
         const double s = seconds_since(t0);
-        if (s > 0) best = std::max(best, (2.0 * static_cast<double>(sz)) / s / 1e6);
+        if (s > 0) best = std::max(best, (static_cast<double>(per_thread) * n_threads) / s / 1e6);
     }
+    (void)sink.load();
     return best;
 }
 
@@ -344,6 +364,14 @@ double gb(uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0
 
 } // namespace
 
+int detect_physical_cores() { return physical_cores(); }
+
+uint64_t detect_ram_available_bytes() {
+    HardwareSpecs hw;
+    probe_memory(hw);
+    return hw.ram_available_bytes;
+}
+
 // ---------------------------------------------------------------- engine
 
 SpecsEngine& SpecsEngine::instance() {
@@ -371,6 +399,16 @@ void SpecsEngine::refresh(const std::string& probe_path) {
 
     probe_memory(hw);
     probe_gpu(hw);
+    // The compute backend knows the real device and its live budget
+    // (VK_EXT_memory_budget); prefer it over any static probe.
+    if (ComputeBackend* gpu = gpu_backend()) {
+        const uint64_t total = gpu->memory_total();
+        if (total > 0) {
+            hw.gpu_name = std::string(gpu->device_name()) + " (" + gpu->name() + ")";
+            hw.vram_total_bytes = total;
+            hw.vram_free_bytes = gpu->memory_free();
+        }
+    }
 
     if (!probe_path.empty()) hw.disk_read_mb_s = measure_disk_read_mb_s(probe_path);
     hw.ram_bandwidth_mb_s = measure_ram_bandwidth_mb_s();
@@ -474,11 +512,20 @@ ExecutionPlan SpecsEngine::plan(const ModelProfile& m, const PlanRequest& req) c
         }
     }
 
-    // ---- VRAM is reported but not used for compute yet; say so plainly.
+    // ---- VRAM: with a compute backend the top layers run there. The model's
+    // own placement is authoritative; this is the plan-time estimate.
     if (req.allow_vram && hw.vram_free_bytes > 0) {
-        p.vram_bytes = hw.vram_free_bytes / 2;
-        why << " " << gb(hw.vram_free_bytes) << " GB VRAM free on " << hw.gpu_name
-            << " is reserved for the expert cache in a later build; this build computes on the CPU.";
+        p.vram_bytes = hw.vram_free_bytes - hw.vram_free_bytes * 15 / 100;
+        const int gpu_layers = static_cast<int>(std::min<uint64_t>(
+            static_cast<uint64_t>(m.n_layers), p.vram_bytes / per_layer));
+        if (gpu_backend() && gpu_layers > 0) {
+            why << " " << gpu_layers << " of " << m.n_layers << " layers fit the "
+                << gb(p.vram_bytes) << " GB VRAM budget on " << hw.gpu_name
+                << " and run there; the rest on the CPU.";
+        } else {
+            why << " " << gb(hw.vram_free_bytes) << " GB VRAM free on " << hw.gpu_name
+                << " (no compute backend active: FISH_GPU=0 or no Vulkan device).";
+        }
     }
 
     p.arena_bytes = std::max<uint64_t>(256ull << 20, budget / 8);

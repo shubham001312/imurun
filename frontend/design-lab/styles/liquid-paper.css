@@ -25,7 +25,13 @@
   --radius-sm: 14px;
   --font: "Inter", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+  --ambient-opacity: 1;
 }
+
+/* Motion, ambient, glass, density and reduced-motion preferences used to
+   live here with selectors like `[data-motion="none"] body`, which never
+   match (the attribute is ON body), and only while this theme was active.
+   They now live in styles/customise.css and work for every theme. */
 
 body {
   background:
@@ -74,6 +80,69 @@ body::after {
 @media (prefers-reduced-motion: reduce) {
   body { animation: none; }
   body::before { animation: none; }
+}
+
+/* Ambient moving orbs */
+.ambient {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.ambient-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: var(--ambient-opacity);
+  animation: ambient-float 20s ease-in-out infinite alternate;
+}
+.ambient-orb.ambient-a {
+  width: 400px;
+  height: 400px;
+  top: -10%;
+  left: -5%;
+  background: radial-gradient(circle, rgba(251, 191, 36, .35), transparent 70%);
+  animation-delay: 0s;
+  animation-duration: 22s;
+}
+.ambient-orb.ambient-b {
+  width: 350px;
+  height: 350px;
+  top: 60%;
+  right: -8%;
+  background: radial-gradient(circle, rgba(244, 114, 182, .28), transparent 70%);
+  animation-delay: -7s;
+  animation-duration: 26s;
+}
+.ambient-orb.ambient-c {
+  width: 300px;
+  height: 300px;
+  bottom: -12%;
+  left: 30%;
+  background: radial-gradient(circle, rgba(56, 189, 248, .22), transparent 70%);
+  animation-delay: -13s;
+  animation-duration: 30s;
+}
+.ambient-sheen {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(135deg, rgba(251, 191, 36, .04) 0%, transparent 40%),
+    linear-gradient(225deg, rgba(56, 189, 248, .03) 0%, transparent 35%);
+  animation: sheen-drift 40s linear infinite;
+}
+@keyframes ambient-float {
+  0% { transform: translate3d(0, 0, 0) scale(1); }
+  25% { transform: translate3d(3%, -2%, 0) scale(1.05); }
+  50% { transform: translate3d(-2%, 4%, 0) scale(0.98); }
+  75% { transform: translate3d(4%, 1%, 0) scale(1.03); }
+  100% { transform: translate3d(-1%, -3%, 0) scale(1.01); }
+}
+@keyframes sheen-drift {
+  0% { transform: translateX(-10%) rotate(2deg); }
+  50% { transform: translateX(10%) rotate(-2deg); }
+  100% { transform: translateX(-10%) rotate(2deg); }
 }
 
 .shell { position: relative; z-index: 1; }

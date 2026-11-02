@@ -1,0 +1,100 @@
+# Setup / packaging changelog
+
+## 0.3.0 — 2026-11-02: `pip install imurun`, `npx imurun`, CI and release pipeline
+
+### Added
+- **`imurun/` launcher package** (`__init__.py` with `__version__`, `cli.py`, `__main__.py`).
+  The `imurun` console script (`imurun.cli:main`) finds the app root, puts it on
+  `sys.path` and `PYTHONPATH`, and calls `start.main` with the user's arguments.
+  `imurun --version` / `python -m imurun --version`.
+- **`setup.py` build glue.** `build_py` copies `services/`, `model/*.py`, `start.py`,
+  `install.py`, `window.py`, `requirements*.txt`, `frontend/design-lab/`,
+  `docs/connectors/` and the engine library into `imurun/` inside the wheel. This
+  keeps the checkout layout, so `services/**` needed no change. When an engine is
+  bundled, the wheel is tagged `py3-none-<platform>` (`IMURUN_ENGINE_LIB`,
+  `IMURUN_WHEEL_PLAT`, `IMURUN_BUNDLE_ENGINE=0`). Without one it is `py3-none-any`.
+- **`MANIFEST.in`.** The sdist carries the app plus the engine sources
+  (`model/fish/{src,include,shaders,test}`), and excludes binaries, models,
+  `*.local.json`, `*_debug.txt` and `archive/`.
+- **`start.py --get-engine`** / `imurun --get-engine`
+  (`install.download_engine`). It downloads this platform's library from release
+  `v<version>`, verifies it against `SHA256SUMS.txt`, and saves it to `~/.imurun/bin`.
+  `find_engine_library` now also searches there, and `start.py` passes the result on
+  through `FISH_LIBRARY`.
+- **npm launcher** (`package.json`, `npm/imurun.js`; the package name `imurun` and
+  the command `imurun` are the ones the 0.1.x npm package used). It finds Python
+  3.11+, creates `~/.imurun/venv`, pip-installs `imurun==<npm version>` (with
+  `[window]` on Windows/macOS), and runs `python -m imurun`. No dependencies, no
+  telemetry.
+- **Workflows.** `ci.yml` (lint subset, pytest on 3 OSes plus py3.11/3.13 on Linux,
+  engine build, package smoke). `engine.yml` (MinGW/MSYS2, manylinux_2_28 GCC, macOS
+  clang). `workflow.yml` (release: version check → tests → engines → per-OS wheels,
+  each smoke-installed → sdist → GitHub Release with `SHA256SUMS.txt` → PyPI by
+  trusted publishing → npm). `.github/scripts/smoke_install.py` installs a wheel into
+  a fresh venv, runs `imurun --no-open`, requires `/health` 200, the UI page and a
+  loadable engine, and fails if anything is written into site-packages.
+- `docs/setup/RELEASE.md`: the one-time PyPI/npm/GitHub setup, the git state of this
+  folder, and how to cut a release step by step.
+- `install.py --voice` and the `imurun[voice]` extra (CODE-REQUESTS #8).
+- `build` and `twine` in `requirements-dev.txt` and in the `dev` extra.
+
+### Changed
+- `pyproject.toml`. It now uses setuptools ≥ 77 with SPDX `license = "MIT"` and
+  `license-files`, and lists the real package (`imurun`) instead of
+  `services*/model*/response*/server*/providers*/scripts*/test*`. Most of those did
+  not exist, and the ones that did would have installed `services` and `model` as
+  top-level names in site-packages. The console script was `services.server.app:main`
+  and is now `imurun.cli:main`. The broken `imurun-fish = model.fish_native:main` was
+  removed (there is no such function). Project URLs, Python 3.13/3.14 classifiers and
+  the author (ImuTechz) were added. The unused `setuptools-scm` build requirement was
+  dropped. The ruff/mypy/coverage paths now point at directories that exist, and the
+  ruff rules moved under `[tool.ruff.lint]`.
+- **Installed layout (`install.INSTALLED`).** `start.py` never creates `.venv` and
+  ignores `--bootstrap`. A missing package gives a `pip install` hint instead of
+  venv instructions. Model downloads are pinned to `~/.imurun/models` (workaround,
+  CODE-REQUESTS #10). The install log falls back to the temp dir instead of the
+  package directory.
+- **Engine build guidance in `install.py --check`** now asks for MinGW-w64 `g++`
+  (WinLibs) instead of MSVC Build Tools and an "x64 Native Tools" prompt. MSVC cannot
+  build the engine.
+- `.gitignore` rewritten. See "Bugs fixed".
+
+### Bugs fixed
+- **Real sources were git-ignored.** Symptom: `frontend/design-lab/core.js`,
+  `frontend/design-lab/styles/tokens.css` and `tests/test_connectors_secrets.py`
+  were missing from `git status` and would never have been pushed, while
+  `services/connectors/tokens.py` and `model/fish/*/tokenizer.*` survived only
+  because they were already tracked. Cause: catch-all patterns in `.gitignore`
+  (`core.*`, `*token*`, `*secret*`, `*credential*`, `*password*`). Fix: targeted
+  rules (`*.local.json`, `client_secret*.json`, `.env*`, `*_debug.txt`, key files).
+  Checked with `git status --ignored`.
+- **`pip install .` produced a broken command.** Symptom: the wheel had no frontend,
+  no `start.py`/`install.py`/`window.py` and no engine, and the `imurun` script
+  pointed at `services.server.app:main`, which `services` could only import as a
+  top-level package. Cause: `pyproject.toml` `packages.find` plus an entry point
+  written for a checkout. Fix: the `imurun` package, the `setup.py` bundling, and the
+  entry point `imurun.cli:main`.
+
+### Verified on this machine (Windows 11, Python 3.12, Node 26.13 / npm 11.20)
+- `python -m build` → sdist + `py3-none-any` wheel. `python -m build --wheel` →
+  `py3-none-win_amd64` with `imurun/bin/fish.dll`. `twine check` passes all three.
+  None of them contains `*.local.json`, debug dumps, `__pycache__` or models.
+- Fresh venv (scratchpad), platform wheel, run from outside the repo:
+  `imurun --version` → `imurun 0.3.0`. `imurun --no-open --port <free>` →
+  `/health` `{"ok": true}`, `/` serves the UI, the engine is found at
+  `site-packages/imurun/bin/fish.dll` and loads through `model.fish_native` +
+  `ctypes`. No traceback, and no file was added under `site-packages/imurun`.
+- Fresh venv, pure wheel: the server starts and prints the "no FISH engine for this
+  platform" guidance (no traceback). `--get-engine` reports the 404 cleanly (no
+  release exists yet). With a library in `<data root>/bin` it is picked up. The
+  download path and the rejection of a checksum mismatch were tested against a local
+  HTTP server.
+- npm: `npm pack` → 4 files. `npm i -g <tgz>` into a scratch prefix, then
+  `IMURUN_WHEEL=<wheel> imurun --version`: it created the venv with `py -3.12`,
+  installed the wheel + `[window]`, printed `imurun 0.3.0`, and the second start
+  skipped pip (≈1 s). The server started through the Node launcher answered
+  `/health`, and killing the tree left no orphaned Python. A wheel path with spaces
+  works.
+- `python -m pytest -q`: 324 passed, 8 skipped (window/network/voice/tuning opt-ins).
+- CI workflows: YAML parses; the lint commands (ruff subset, `node --check` on all
+  JS) pass locally. **The workflows have not run on GitHub yet.**

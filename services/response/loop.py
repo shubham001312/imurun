@@ -1,28 +1,118 @@
-"""The agent loop: steps, queued prompts at boundaries, kill switch, persona.
+"""The agent loop: model-driven tool calls, steps, queued prompts, kill switch.
 
-Rules are enforced here in code (V25):
-- queued prompts are delivered at a step boundary, never mid-token;
-- before a final answer the loop drains again, so a prompt that arrived
-  during the last generation still reaches the model;
-- the kill switch stops the loop between steps;
-- every delivery and every stop is marked.
+One turn is a sequence of generations ("steps"), at most ``max_steps``
+(default 6). After each generation the visible reply (``<think>`` removed)
+is read for a tool call (``tools/calls.py``):
+
+* a call -> the executor runs it (permissions, approval card, audit,
+  ``tool.call`` / ``tool.result`` events), the result goes back to the model
+  as a ``[tool result: name]`` user message, and the loop continues;
+* an unreadable call -> the model is asked to retry once;
+* an answer -> the turn ends, unless a queued prompt is waiting (delivered
+  at this step boundary, V25) or one of the two correctness checks below
+  asks for one more step.
+
+Correctness checks (each fires at most once per turn):
+
+* an R1-style reply that only thought and never answered gets "answer now";
+* a question about the present (``tools.policy.is_realtime``) answered with
+  no tool result and no admission that live data could not be checked gets a
+  reminder to call a tool or say it could not check
+  (``protocol.realtime_nudge``). This is the guard against stale "current"
+  values from training data.
+
+The last step never runs tools: if tools were used, the model is told the
+budget is spent and to answer from what it has. Every step boundary checks
+the stop flag (Stop button, kill switch, parent agent stopped); so does the
+executor before running a tool and while an approval card is open.
+
+The deterministic pre-fetch (``ToolRunner.observe``) still runs first for
+the obvious cases; its results are injected as a Context block and count as
+tool results for the checks above.
+
+``run_agent`` calls come back here through ``_spawn``: a nested loop with no
+history, its own step budget and depth + 1.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+import json
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol
 
 from ..prompts.queue import PromptQueue
+from ..sessions.transcript import TranscriptStore
+from ..tools.base import ToolResult, failed
+from ..tools.calls import ParsedReply, ToolCall, parse_tool_calls, split_think, strip_think
+from ..tools.executor import MAX_DEPTH, CallContext
+from ..tools.offer import select_tools
+from ..tools.policy import is_realtime
+from ..tools.protocol import (
+    budget_message,
+    realtime_nudge,
+    result_message,
+    retry_message,
+    tool_prompt,
+)
+from . import context as ctxmod
+from . import profile as model_profile
+from .profile import compact_context
+from .style import (DEFAULT_DIRECTIVE, FAKE_RESULT_NOTE, LIVE_DATA_RULE,
+                    looks_like_fake_tool_result, scrub_disclaimers)
+
+if TYPE_CHECKING:  # importing services.server at runtime is circular
+    from ..server.events import EventBroker
+
+DEFAULT_MAX_STEPS = 6
+MAX_CALLS_PER_STEP = 3
+HISTORY_MESSAGES = 6
+LIVE_NUDGE = False  # see _needs_live_nudge
+_FAKE_RESULT_HEADER = re.compile(r"^\s*\[tool result[^\]]*\]\s*", re.IGNORECASE)
+
+SUBAGENT_DIRECTIVE = "\n".join([
+    "You are a helper agent working for the main assistant, not talking to the user.",
+    "Do the task, using tools when they help. Then reply with a short, factual summary of",
+    "what you found or did: key facts, numbers, file paths, command results, and anything",
+    "that failed. No greetings, no questions back.",
+    LIVE_DATA_RULE,
+])
+
+# An answer that already says it could not check live data needs no nudge.
+_ADMITS = re.compile(
+    r"(can(?:no|')t|cannot|unable to|not able to|don't have|do not have|no) "
+    r"(?:\w+ ){0,4}(?:check|access|browse|real[- ]time|live|current|internet|network|look)",
+    re.IGNORECASE,
+)
+_QUESTION = re.compile(r"\?|^\s*(what|who|when|where|which|how|is|are|was|does|do|did|will|can|tell me|give me)\b",
+                       re.IGNORECASE)
 
 
 class ModelClient(Protocol):
     def generate(self, messages: list[dict]) -> str: ...
 
 
+@dataclass
+class PlatformContext:
+    """Live platform state (kept for importers; the loop renders its own line)."""
+    available_tools: list[str]
+    active_connectors: list[str]
+    session_count: int
+    turns_today: int
+    tokens_today: int
+    engine_status: str
+    model_name: str
+    context_limit: int
+    context_used_estimate: int
+
+
 @dataclass(frozen=True)
 class Step:
     index: int
     answer: str
+    kind: str = "answer"  # answer | tool | retry | nudge
+    calls: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -30,10 +120,81 @@ class LoopResult:
     status: str  # done | stopped | max-steps
     steps: tuple[Step, ...]
     messages: tuple[dict, ...]
+    # Messages that belong in the transcript: delivered queued prompts and
+    # the final answer to each. Tool chatter stays out of the transcript.
+    new_messages: tuple[dict, ...] = ()
+    tool_calls: int = 0
+    # Deterministic verification state for the UI badge:
+    #   verified   a live tool result (search, page, clock, weather) fed the answer
+    #   unverified the question was about the present and no live result existed
+    #   n/a        not a live-data question
+    verification: str = "n/a"
+    sources: tuple[dict, ...] = ()
+    # Tool names in call order (a count alone cannot rebuild the UI footer
+    # after a dropped stream).
+    tools_used: tuple[str, ...] = ()
 
     @property
     def answer(self) -> str:
+        for step in reversed(self.steps):
+            if step.kind == "answer":
+                return step.answer
         return self.steps[-1].answer if self.steps else ""
+
+
+def collect_sources(data: object, into: list[dict]) -> None:
+    """Pull source descriptors out of a tool result's data (web_search,
+    wikipedia, web_fetch) into `into`, de-duplicated by URL. These become the
+    source chips and the "verified" badge in the UI."""
+    if not isinstance(data, dict):
+        return
+    seen = {s.get("url") for s in into}
+    items = data.get("sources")
+    if not isinstance(items, list) and data.get("url") and data.get("text") is not None:
+        url = str(data.get("url"))
+        items = [{"title": str(data.get("title") or url)[:120], "url": url, "provider": "web_fetch"}]
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url") or "")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        host = ""
+        try:
+            from urllib.parse import urlparse
+
+            host = urlparse(url).netloc.lower()
+            host = host[4:] if host.startswith("www.") else host
+        except Exception:  # noqa: BLE001
+            pass
+        into.append({
+            "title": str(item.get("title") or host or url)[:120],
+            "url": url,
+            "domain": str(item.get("domain") or host),
+            "provider": str(item.get("provider") or ""),
+            "snippet": str(item.get("snippet") or "")[:300],
+        })
+        if len(into) >= 12:
+            break
+
+
+@dataclass
+class _TurnState:
+    tool_ok: bool = False
+    prefetched: bool = False
+    offline: bool = False
+    retried: bool = False
+    nudged: bool = False
+    empty_retry: bool = False
+    tool_steps: int = 0
+    calls: int = 0
+    sources: list = field(default_factory=list)
+    question: str = ""
+    needs_web: bool = False   # the research planner judged this a live question
+    names: list[str] = field(default_factory=list)
+    cache: dict[str, ToolResult] = field(default_factory=dict)
+    fake_result_retry: bool = False
 
 
 class AgentLoop:
@@ -45,79 +206,514 @@ class AgentLoop:
         audit=None,
         kill=None,
         persona=None,
-        max_steps: int = 20,
+        tools=None,
+        max_steps: int = DEFAULT_MAX_STEPS,
         session_id: str = "default",
+        transcripts: TranscriptStore | None = None,
+        events: EventBroker | None = None,
+        context_limit: int = 4096,
+        server_ref=None,
+        executor=None,
+        raw_model: ModelClient | None = None,
+        skills: list | None = None,
+        turn_id: str = "",
+        depth: int = 0,
+        allowed_tools: frozenset[str] | None = None,
+        directive: str | None = None,
+        language: str = "",
+        use_history: bool = True,
+        prefetch: bool = True,
+        parent_stop=None,
+        compact: bool | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
         if not session_id:
             raise ValueError("session_id is required")
         self._model = model
+        # Side generations (history summaries, sub-agents) use the raw model
+        # so they do not stream into the user's answer bubble.
+        self._raw_model = raw_model or model
         self._queue = queue or PromptQueue()
         self._audit = audit
         self._persona = persona
+        self._tools = tools
+        self._executor = executor
         self._max_steps = max_steps
         self._session_id = session_id
+        self._transcripts = transcripts
+        self._events = events
+        self._context_limit = max(512, int(context_limit or 4096))
+        self._server = server_ref
+        self._skills = list(skills or [])
+        self._turn_id = turn_id
+        self._depth = depth
+        self._allowed = allowed_tools
+        self._directive = directive
+        self._language = str(language or "")
+        self._use_history = use_history
+        self._prefetch = prefetch
+        # None = decide at run() from the model's size (profile.is_compact);
+        # deciding there keeps weight loading off the request thread.
+        self._compact = compact
+        self._parent_stop = parent_stop
         self._stopped = False
         self._kill = kill
         self._kill_id = (
-            kill.register(f"agent-loop:{id(self)}", self.stop)
-            if kill is not None
-            else None
+            kill.register(f"agent-loop:{id(self)}", self.stop) if kill is not None else None
         )
+        self._prior_messages: list[dict] = []
+        self._offered: list = []
+        self._hidden_services: list[str] = []
 
+    def set_prior_messages(self, messages: list[dict]) -> None:
+        """Prior conversation history, loaded by the caller before ``run``."""
+        self._prior_messages = list(messages or [])
+
+    # ------------------------------------------------------------ lifecycle
     def stop(self) -> None:
         self._stopped = True
+
+    def stopped(self) -> bool:
+        if self._stopped:
+            return True
+        if self._parent_stop is not None:
+            try:
+                return bool(self._parent_stop())
+            except Exception:  # noqa: BLE001
+                return False
+        return False
 
     def close(self) -> None:
         """Detach from the kill switch so long-lived servers do not leak stops."""
         if self._kill is None or self._kill_id is None:
             return
-        kill = self._kill
-        stop_id = self._kill_id
+        kill, stop_id = self._kill, self._kill_id
         self._kill_id = None
         kill.unregister(stop_id)
 
+    # ------------------------------------------------------------------ run
     def run(self, prompt: str) -> LoopResult:
         if not prompt or not prompt.strip():
             raise ValueError("a prompt is required")
-        messages: list[dict] = []
-        directive = self._persona.directive() if self._persona is not None else ""
-        if directive:
-            messages.append({"role": "system", "content": directive})
-        messages.append({"role": "user", "content": prompt})
+        state = _TurnState(question=prompt)
+        if self._compact is None:
+            self._compact = model_profile.is_compact(self._raw_model)
+        # A small model cannot drive tools: it copies the protocol's example
+        # call instead of answering (see profile.py). It gets no catalogue.
+        self._offered = [] if self._compact else self._offer(prompt)
+        prefetch_text = self._run_prefetch(prompt, state) if self._prefetch else ""
+        messages = self._initial_messages(prompt, prefetch_text)
+        new_messages: list[dict] = []
         steps: list[Step] = []
+        question = prompt
+        index = 0
+        status = "max-steps"
 
-        for index in range(self._max_steps):
-            if self._stopped:
-                self._mark("G6-killswitch", f"loop:{self._session_id}", "stopped before step")
-                return LoopResult("stopped", tuple(steps), tuple(messages))
+        while index < self._max_steps:
+            if self.stopped():
+                self._mark("G6-killswitch", f"loop:{self._session_id}", f"stopped before step {index + 1}")
+                return self._result("stopped", steps, messages, new_messages, state)
+            last = index == self._max_steps - 1
+            if last and state.tool_steps:
+                messages.append({**budget_message(state.names), "_kind": "note"})
+            messages = ctxmod.fit(
+                messages, self._context_limit,
+                summarize=self._raw_model.generate if self._events is not None else None,
+                publish=self._events.publish if self._events is not None else None,
+                session_id=self._session_id,
+            )
+            raw = self._model.generate(ctxmod.public(messages)) or ""
+            index += 1
+            visible, _thought = split_think(raw)
+            parsed = (
+                parse_tool_calls(visible, self._schemas(), max_calls=MAX_CALLS_PER_STEP)
+                if self._offered else ParsedReply(prefix=visible)
+            )
 
-            self._deliver(messages)
-            answer = self._model.generate([dict(message) for message in messages])
-            messages.append({"role": "assistant", "content": answer})
-            steps.append(Step(index=index, answer=answer))
+            if self.stopped():
+                steps.append(Step(index - 1, raw))
+                self._mark("G6-killswitch", f"loop:{self._session_id}", f"stopped after step {index}")
+                return self._result("stopped", steps, messages, new_messages, state)
 
-            if self._stopped:
-                self._mark("G6-killswitch", f"loop:{self._session_id}", "stopped after step")
-                return LoopResult("stopped", tuple(steps), tuple(messages))
+            if parsed.calls and not last:
+                self._tool_step(index, raw, parsed, messages, steps, state)
+                continue
 
+            if parsed.error and not parsed.calls and not state.retried and not last:
+                state.retried = True
+                steps.append(Step(index - 1, raw, kind="retry"))
+                messages.append({"role": "assistant", "content": visible or "(empty)", "_kind": "tool_call"})
+                messages.append({**retry_message(parsed.error, [t.name for t in self._offered]),
+                                 "_kind": "note"})
+                self._mark("G3-loop", self._session_id, "unreadable tool call; asked to retry")
+                continue
+
+            # The model wrote "[tool result: web_search] ..." itself: that is a
+            # hallucinated result, never an answer. One retry, then whatever it
+            # says next is treated as a plain answer (and scrubbed below).
+            if not parsed.calls and looks_like_fake_tool_result(visible) and not state.fake_result_retry and not last:
+                state.fake_result_retry = True
+                steps.append(Step(index - 1, raw, kind="retry"))
+                messages.append({"role": "assistant", "content": visible, "_kind": "draft"})
+                messages.append({"role": "user", "content": FAKE_RESULT_NOTE, "_kind": "note"})
+                self._mark("G3-loop", self._session_id, "model invented a tool result; asked to retry")
+                continue
+
+            answer_text = parsed.prefix if parsed.calls else visible
+            if not answer_text.strip() and not state.empty_retry and not last:
+                # R1 distills sometimes think until the budget and never answer.
+                state.empty_retry = True
+                steps.append(Step(index - 1, raw, kind="retry"))
+                messages.append({"role": "user", "content": "[note] Give your final answer now, without thinking out loud.",
+                                 "_kind": "note"})
+                continue
+
+            if not last and self._needs_live_nudge(question, answer_text, state):
+                state.nudged = True
+                steps.append(Step(index - 1, raw, kind="nudge"))
+                messages.append({"role": "assistant", "content": answer_text, "_kind": "draft"})
+                can_search = "web_search" in {t.name for t in self._offered}
+                messages.append({**realtime_nudge(state.offline or not can_search), "_kind": "note"})
+                self._mark("G3-loop", self._session_id, "live-data answer without a tool result; nudged")
+                continue
+
+            final_raw = raw
+            if parsed.calls and last:
+                # The budget is spent but the model still wants a tool.
+                final_raw = answer_text or (
+                    "I reached the tool step limit before I could finish. "
+                    "Ask me to continue, or narrow the question."
+                )
+                status = "max-steps"
+            else:
+                status = "done"
+            # Final answer hygiene: drop invented "[tool result]" headers,
+            # bracket notes and knowledge-cutoff sentences from the visible
+            # text; reasoning is kept as the model wrote it.
+            visible_final, thought_final = split_think(final_raw)
+            cleaned = scrub_disclaimers(_FAKE_RESULT_HEADER.sub("", visible_final))
+            if cleaned != visible_final:
+                final_raw = (f"<think>\n{thought_final}\n</think>\n{cleaned}" if thought_final else cleaned)
+                self._mark("G3-loop", self._session_id, "scrubbed disclaimer text from the answer")
+            steps.append(Step(index - 1, final_raw))
+            final = {"role": "assistant", "content": strip_think(final_raw) or final_raw, "_kind": "answer"}
+            messages.append(final)
+            new_messages.append({"role": "assistant", "content": final_raw})
+
+            if self.stopped():
+                return self._result("stopped", steps, messages, new_messages, state)
+            if status == "done" and not last and self._deliver(messages, new_messages):
+                question = messages[-1]["content"]
+                state.nudged = state.retried = state.empty_retry = False
+                continue
             if self._queue.has_pending(self._session_id):
-                self._mark("G1-prompt", self._session_id, "continuing: queued prompt pending")
-                continue
-            if self._deliver(messages):
-                continue
-            return LoopResult("done", tuple(steps), tuple(messages))
+                self._mark("G1-prompt", self._session_id, "queued prompt pending for the next turn")
+            return self._result(status, steps, messages, new_messages, state)
 
-        self._mark("G1-loop", self._session_id, f"max steps {self._max_steps} reached")
-        return LoopResult("max-steps", tuple(steps), tuple(messages))
+        self._mark("G1-loop", self._session_id, f"max steps ({self._max_steps}) reached")
+        return self._result(status, steps, messages, new_messages, state)
 
-    def _deliver(self, messages: list[dict]) -> bool:
+    # ----------------------------------------------------------- tool steps
+    def _tool_step(self, index: int, raw: str, parsed: ParsedReply, messages: list[dict],
+                   steps: list[Step], state: _TurnState) -> None:
+        state.tool_steps += 1
+        steps.append(Step(index - 1, raw, kind="tool", calls=tuple(c.view() for c in parsed.calls)))
+        # Feed back the canonical form of the call, not the raw text: the
+        # model sees the format it should use, and any invented "result"
+        # text it wrote after the call is gone.
+        messages.append({"role": "assistant", "content": _canonical(parsed), "_kind": "tool_call"})
+        limit = ctxmod.result_chars(self._context_limit)
+        for call in parsed.calls:
+            if self.stopped():
+                break
+            result = self._call(call, index, state)
+            state.calls += 1
+            state.names.append(call.name)
+            if result.ok:
+                state.tool_ok = True
+                collect_sources(getattr(result, "data", None), state.sources)
+            elif result.offline:
+                state.offline = True
+            messages.append({**result_message(call.name, result, limit=limit), "_kind": "tool_result"})
+
+    def _call(self, call: ToolCall, index: int, state: _TurnState) -> ToolResult:
+        key = call.key()
+        if key in state.cache:
+            cached = state.cache[key]
+            return ToolResult(ok=cached.ok, content=(
+                "(This exact call was already made in this turn; the result is repeated here. "
+                "Use it instead of calling again.)\n" + (cached.content or "")
+            ), error=cached.error, source=cached.source, offline=cached.offline)
+        if self._executor is None:
+            return failed(call.name, "Tools are not available in this session.")
+        ctx = CallContext(
+            turn_id=self._turn_id, session_id=self._session_id, depth=self._depth, step=index,
+            stop=self.stopped, interactive=True, allowed=self._allowed, spawn=self._spawn,
+            source="model" if self._depth == 0 else f"agent:{self._depth}",
+        )
+        try:
+            result = self._executor.execute(call.name, call.args, ctx).result
+        except Exception as exc:  # noqa: BLE001 - the executor never raises, but be sure
+            result = failed(call.name, f"{type(exc).__name__}: {exc}")
+        state.cache[key] = result
+        return result
+
+    def _spawn(self, task: str, tools: list[str] | None, steps: int) -> ToolResult:
+        """Run a sub-agent for ``run_agent``."""
+        depth = self._depth + 1
+        if depth > MAX_DEPTH:
+            return failed("run_agent", "Sub-agents cannot go deeper here.")
+        parent = {t.name for t in self._offered}
+        wanted = set(tools) if tools else set(parent)
+        allowed = (wanted & parent) if parent else wanted
+        if depth >= MAX_DEPTH:
+            allowed.discard("run_agent")
+        self._publish("agent.start", {"turn_id": self._turn_id, "depth": depth, "task": task[:500],
+                                      "tools": sorted(allowed), "max_steps": steps})
+        started = time.monotonic()
+        sub = AgentLoop(
+            self._raw_model, raw_model=self._raw_model, executor=self._executor,
+            max_steps=max(2, steps), session_id=self._session_id, turn_id=self._turn_id,
+            depth=depth, allowed_tools=frozenset(allowed), directive=SUBAGENT_DIRECTIVE,
+            use_history=False, prefetch=False, context_limit=self._context_limit,
+            events=self._events, audit=self._audit, parent_stop=self.stopped,
+        )
+        try:
+            result = sub.run(task)
+        except Exception as exc:  # noqa: BLE001 - a broken sub-agent is a failed tool
+            self._publish("agent.end", {"turn_id": self._turn_id, "depth": depth, "status": "error",
+                                        "error": f"{type(exc).__name__}: {exc}"})
+            return failed("run_agent", f"The sub-agent failed: {type(exc).__name__}: {exc}")
+        finally:
+            sub.close()
+        summary = strip_think(result.answer).strip() or "(the sub-agent gave no summary)"
+        self._publish("agent.end", {
+            "turn_id": self._turn_id, "depth": depth, "status": result.status,
+            "steps": len(result.steps), "tool_calls": result.tool_calls,
+            "elapsed": round(time.monotonic() - started, 3), "summary": summary[:2000],
+        })
+        ok = result.status in ("done", "max-steps")
+        return ToolResult(
+            ok=ok,
+            content=f"Sub-agent result ({result.status}, {len(result.steps)} steps, "
+                    f"{result.tool_calls} tool calls):\n{summary}",
+            data={"status": result.status, "steps": len(result.steps), "tool_calls": result.tool_calls},
+            error=None if ok else f"sub-agent {result.status}",
+            source="run_agent",
+        )
+
+    # ------------------------------------------------------------- helpers
+    def _offer(self, prompt: str = "") -> list:
+        self._hidden_services = []
+        if self._executor is None or self._max_steps < 2:
+            return []
+        try:
+            offered = list(self._executor.offered(depth=self._depth, allowed=self._allowed))
+        except Exception:  # noqa: BLE001 - no tools is better than no answer
+            self._mark("G3-loop", self._session_id, "could not list tools")
+            return []
+        # Connector tools per service only when the conversation points at the
+        # service (services/tools/offer.py); hidden tools still run when named.
+        try:
+            offered, self._hidden_services = select_tools(offered, prompt, self._prior_messages)
+        except Exception:  # noqa: BLE001 - selection is an optimisation
+            self._hidden_services = []
+        return offered
+
+    def _schemas(self) -> dict[str, dict]:
+        return {t.name: dict(t.parameters or {}) for t in self._offered}
+
+    def _needs_live_nudge(self, question: str, answer: str, state: _TurnState) -> bool:
+        # Retired: asking the model to "admit it could not check" produced
+        # prose like "[note: unable to verify]" inside answers. The server now
+        # reports `verification` on the turn and the UI shows a badge instead.
+        # Kept behind a flag for experiments.
+        if not LIVE_NUDGE:
+            return False
+        if state.nudged or state.tool_ok or state.prefetched:
+            return False
+        if not is_realtime(question) or not _QUESTION.search(question):
+            return False
+        if _ADMITS.search(answer or ""):
+            return False
+        # Without any tool machinery (a bare loop in a test or a script) the
+        # nudge still applies: "no tools" means live data cannot be checked.
+        return self._executor is not None or self._tools is not None
+
+    def _initial_messages(self, prompt: str, prefetch_text: str) -> list[dict]:
+        parts: list[str] = []
+        if self._directive is not None:
+            parts.append(self._directive)
+        else:
+            persona = self._persona.directive() if self._persona is not None else ""
+            if persona:
+                parts.append(persona)
+            parts.append(model_profile.COMPACT_DIRECTIVE if self._compact else DEFAULT_DIRECTIVE)
+        if self._language:
+            # The user spoke this language (voice, docs/agentic/REQUESTS.md #13).
+            from ..voice.languages import answer_directive
+
+            line = answer_directive(self._language)
+            if line:
+                parts.append(line)
+        parts.append(self._platform_line())
+        if self._offered:
+            workspace = ""
+            try:
+                policy = getattr(self._executor, "policy", None)
+                workspace = str(policy.workspace.root) if policy is not None else ""
+            except Exception:  # noqa: BLE001
+                workspace = ""
+            parts.append(tool_prompt(self._offered, max_steps=self._max_steps,
+                                     full=self._context_limit >= 16384, workspace=workspace,
+                                     hidden_services=getattr(self, "_hidden_services", [])))
+        if self._skills:
+            from ..skills.invoke import skills_prompt
+
+            parts.append(skills_prompt(self._skills))
+        if prefetch_text:
+            parts.append(prefetch_text)
+        messages: list[dict] = [{"role": "system", "content": "\n\n".join(p for p in parts if p),
+                                 "_kind": "system"}]
+        if self._use_history and self._prior_messages:
+            for message in self._prior_messages[-HISTORY_MESSAGES:]:
+                role = message.get("role")
+                if role not in ("user", "assistant"):
+                    continue
+                content = str(message.get("content") or "")
+                if role == "assistant":
+                    content = strip_think(content)  # R1: never feed old thoughts back
+                if content.strip():
+                    messages.append({"role": role, "content": content, "_kind": "history"})
+        messages.append({"role": "user", "content": prompt, "_kind": "prompt"})
+        return messages
+
+    def _platform_line(self) -> str:
+        # Today's date from this machine's clock: the cheapest live fact, and
+        # the one small models get wrong most. Date only (no minutes) so the
+        # engine's prefix cache is not invalidated every minute.
+        today = time.strftime("%A, %d %B %Y")
+        name = ""
+        model = getattr(self._server, "_model", None) if self._server is not None else None
+        getter = getattr(model, "selected_name", None)
+        if callable(getter):
+            try:
+                name = str(getter() or "")
+            except Exception:  # noqa: BLE001
+                name = ""
+        if self._compact:
+            # A small model repeats a file name like "Llama-3.2-1B-...gguf"
+            # back to the user; it only needs the date, in the tested wording.
+            return f"Today's date is {time.strftime('%d %b %Y')}."
+        line = f"Today is {today} (local time on this machine)."
+        return line + (f" Model: {name}." if name else "")
+
+    def _run_prefetch(self, prompt: str, state: _TurnState) -> str:
+        """The deterministic fast path. A failure here never stops the turn."""
+        if self._tools is None:
+            return ""
+        try:
+            # The research planner decides with the *raw* model (the publishing
+            # wrapper would stream its routing JSON into the answer bubble) and
+            # sees recent history so follow-ups ("and in Germany?") plan well.
+            extra: dict = {}
+            if getattr(self._tools, "supports_research", False):
+                # IMURUN_LOOP_PLANNER_MODEL=0 withholds the model from the
+                # planner on this path (the regex fallback then decides). The
+                # test suite sets it, because its scripted fake models would
+                # otherwise spend a reply on the routing generation. Distinct
+                # from IMURUN_RESEARCH_PLANNER, the research module's own switch.
+                use_model = os.getenv("IMURUN_LOOP_PLANNER_MODEL", "1").strip() not in ("0", "false", "no")
+                # A small model is a bad router: it answered `web: true` to
+                # "What is the capital of France?". The regex router decides.
+                use_model = use_model and not self._compact
+                extra = {
+                    "history": [m for m in self._prior_messages[-HISTORY_MESSAGES:]
+                                if m.get("role") in ("user", "assistant")],
+                    "model": self._raw_model if use_model else None,
+                    "publish": self._publish,
+                    "turn_id": self._turn_id,
+                }
+            names = list(self._tools.intents(prompt, **extra)) if hasattr(self._tools, "intents") else []
+            if extra and hasattr(self._tools, "plan"):
+                try:
+                    plan = self._tools.plan(prompt, extra["history"], extra["model"])  # cache hit
+                    state.needs_web = bool(getattr(plan, "needs_web", False))
+                except Exception:  # noqa: BLE001 - planning never blocks the turn
+                    state.needs_web = False
+            if not names:
+                return ""
+            searching = "web_search" in names
+            self._publish("tools.start", {"tools": names})
+            if searching:
+                self._publish("web_search.start", {"query": prompt})
+            if hasattr(self._tools, "observe_full"):
+                text, results = self._tools.observe_full(prompt, **extra, stop=self.stopped) if extra \
+                    else self._tools.observe_full(prompt)
+            else:
+                text = self._tools.observe(prompt)
+                results = list(getattr(self._tools, "last_results", []) or [])
+            self._publish("tools.done", {"tools": names, "results": results})
+            if searching:
+                hits = next((r.get("data", {}).get("results", []) for r in results
+                             if r.get("tool") == "web_search"), [])
+                self._publish("web_search.done", {"query": prompt, "results": hits})
+            for item in results:
+                self._publish("tool.result", {
+                    "turn_id": self._turn_id, "session_id": self._session_id, "call_id": "",
+                    "tool": item.get("tool"), "ok": bool(item.get("ok")), "decision": "allow",
+                    "error": item.get("error"), "offline": bool(item.get("offline")),
+                    "latency_ms": item.get("latency_ms", 0), "approval_id": None,
+                    "content": str(item.get("content") or "")[:2000], "depth": self._depth,
+                    "step": 0, "source": "prefetch",
+                })
+                if item.get("ok"):
+                    state.tool_ok = True
+                    collect_sources(item.get("data"), state.sources)
+                if item.get("offline"):
+                    state.offline = True
+                cached = ToolResult(ok=bool(item.get("ok")), content=str(item.get("content") or ""),
+                                    error=item.get("error"), offline=bool(item.get("offline")))
+                state.cache[ToolCall(str(item.get("tool")), dict(item.get("args") or {})).key()] = cached
+            if self._compact:
+                # The full block (tool instructions + every observation + citation
+                # rules) was copied verbatim into the answer by a 1B model.
+                text = compact_context(results)
+            state.prefetched = bool(text)
+            return str(text or "")
+        except Exception:  # noqa: BLE001 - a broken tool must not stop the turn
+            self._mark("G3-loop", self._session_id, "tool pre-fetch failed")
+            return ""
+
+    def _deliver(self, messages: list[dict], new_messages: list[dict]) -> bool:
         delivered = self._queue.drain(self._session_id)
         for item in delivered:
-            messages.append({"role": "user", "content": item.text})
+            messages.append({"role": "user", "content": item.text, "_kind": "prompt"})
+            new_messages.append({"role": "user", "content": item.text})
             self._mark("G1-prompt", str(item.id), "delivered at step boundary")
         return bool(delivered)
+
+    def _result(self, status: str, steps: list[Step], messages: list[dict],
+                new_messages: list[dict], state: _TurnState) -> LoopResult:
+        if state.tool_ok:
+            verification = "verified"
+        elif state.needs_web or is_realtime(state.question):
+            verification = "unverified"
+        else:
+            verification = "n/a"
+        return LoopResult(status, tuple(steps), tuple(ctxmod.public(messages)),
+                          tuple(new_messages), state.calls,
+                          verification=verification, sources=tuple(state.sources),
+                          tools_used=tuple(str(n) for n in getattr(state, "names", [])))
+
+    def _publish(self, kind: str, data: dict) -> None:
+        if self._events is None:
+            return
+        try:
+            self._events.publish(kind, data)
+        except Exception:  # noqa: BLE001 - the UI feed must not break the turn
+            pass
 
     def _mark(self, rule: str, subject: str, why: str) -> None:
         if self._audit is None:
@@ -126,3 +722,13 @@ class AgentLoop:
             self._audit.mark(rule, subject, why)
         except Exception:  # noqa: BLE001 - a broken sink must not stop the run
             pass
+
+
+def _canonical(parsed: ParsedReply) -> str:
+    blocks = []
+    if parsed.prefix:
+        blocks.append(parsed.prefix)
+    for call in parsed.calls:
+        blocks.append("```tool\n" + json.dumps({"name": call.name, "args": call.args},
+                                               ensure_ascii=False) + "\n```")
+    return "\n".join(blocks)

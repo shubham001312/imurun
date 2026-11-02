@@ -1,5 +1,28 @@
 # Design lab - pick a style, then we refine it
 
+> **This folder is now the production IMURUN shell**, served by the Python
+> API. Start with the engineering docs in `docs/frontend/`:
+>
+> - [`docs/frontend/README.md`](../../docs/frontend/README.md): architecture,
+>   files and modules, event flow, state model, theme system, how to add a
+>   panel, keyboard shortcuts, native-window notes
+> - [`docs/frontend/CHANGELOG.md`](../../docs/frontend/CHANGELOG.md): what
+>   changed and why
+> - [`docs/frontend/BUGS-FIXED.md`](../../docs/frontend/BUGS-FIXED.md): every
+>   bug fixed, with cause and location
+> - [`docs/frontend/API-REQUESTS.md`](../../docs/frontend/API-REQUESTS.md):
+>   server changes the frontend needs
+> - [`docs/frontend/VOICE.md`](../../docs/frontend/VOICE.md): dictation, read
+>   aloud, and the planned local speech engine
+>
+> Quick previews: `?demo=responses` shows every reply type and state;
+> `?intro=1` replays the first-launch intro. Theme files are registered in
+> `THEMES` in `theme.js` (not `app.js` any more). Parts of the text below
+> describe the original mock-up ("nothing calls the API"); the shell now
+> calls the real API everywhere except the notification previews and the
+> email approval demo. `add_models_tab.py` is a dead one-off script; do not
+> run it (see the docs).
+
 **Finalised: Liquid Paper, with Manrope as the UI text font.** The lab opens
 on that pair; the other styles and fonts stay available for comparison.
 Liquid Paper keeps its warm serif display face for the brand and dialog
@@ -120,7 +143,8 @@ stays stable and a success notification confirms the change.
 
 1. Copy `styles/obsidian.css` to `styles/<name>.css`.
 2. Change the variables and any extra rules.
-3. Add `{id, file, label, note}` to `THEMES` in `app.js`.
+3. Add `{id, label, note, swatch: [bg, surface, accent], dark}` to `THEMES`
+   in `theme.js`.
 
 ## How to ask for changes
 

@@ -1,0 +1,27 @@
+#version 450
+// FISH layer span — rotary embedding in place, from the precomputed table
+// (cos/sin [n_ctx][half], already scaled by mscale/YaRN on the CPU side).
+// Workgroup = (token, head); normal pairs (2i, 2i+1) or NeoX (i, i+half).
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) buffer Arena { float a[]; };
+layout(std430, binding = 1) readonly buffer Params { float prm[]; };
+
+layout(push_constant) uniform PC {
+    uint off, tok_stride, head_dim, half_rot;
+    uint pos0, neox, cos_off, sin_off;
+} pc;
+
+void main() {
+    const uint t = gl_WorkGroupID.x, h = gl_WorkGroupID.y;
+    const uint base = pc.off + t * pc.tok_stride + h * pc.head_dim;
+    const uint tb = (pc.pos0 + t) * pc.half_rot;
+    for (uint i = gl_LocalInvocationID.x; i < pc.half_rot; i += 64u) {
+        const float c = prm[pc.cos_off + tb + i], s = prm[pc.sin_off + tb + i];
+        const uint i0 = pc.neox != 0u ? base + i : base + 2u * i;
+        const uint i1 = pc.neox != 0u ? base + i + pc.half_rot : base + 2u * i + 1u;
+        const float x0 = a[i0], x1 = a[i1];
+        a[i0] = x0 * c - x1 * s;
+        a[i1] = x0 * s + x1 * c;
+    }
+}

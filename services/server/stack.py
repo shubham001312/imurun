@@ -104,6 +104,10 @@ class StackController:
         }
 
     def _fish_healthy(self) -> bool:
+        # Check native in-process engine first
+        if self._fish_native is not None and getattr(self._fish_native, "health", lambda: False)():
+            return True
+        # Fall back to HTTP health check for docker-based engine
         try:
             with urllib.request.urlopen(self.fish_health_url, timeout=2.0) as response:
                 return 200 <= response.status < 300

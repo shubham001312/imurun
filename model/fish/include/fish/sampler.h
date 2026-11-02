@@ -29,6 +29,16 @@ public:
     int32_t sample(float* logits, int n_vocab, const SampleParams& p,
                    const std::vector<int32_t>& recent);
 
+    // The full sampling distribution the parameters imply (penalty,
+    // temperature, top-k, top-p), as probabilities over the vocabulary with
+    // zeros outside the kept set; greedy gives a one-hot. Speculative decoding
+    // needs the distribution itself, not just one draw. logits are modified.
+    void distribution(float* logits, int n_vocab, const SampleParams& p,
+                      const std::vector<int32_t>& recent, std::vector<float>& probs);
+
+    // Draw from an unnormalised non-negative weight vector; -1 if it sums to 0.
+    int32_t draw(const float* weights, int n);
+
     void reseed(uint64_t seed);
 
 private:

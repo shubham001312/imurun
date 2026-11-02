@@ -1,0 +1,24 @@
+# IMURUN tuning channel: the training stack (optional, ~2-5 GB installed).
+#
+# NEVER install this into the app venv. It goes into its own venv:
+#   python -m services.tuning.setup          (creates ~/.imurun/tuning/venv)
+#
+# The setup command installs torch FIRST from the PyTorch index
+# (https://download.pytorch.org/whl/cu128 when nvidia-smi finds an NVIDIA GPU,
+# .../whl/cpu otherwise; override with --torch-index or IMURUN_TORCH_INDEX),
+# then this file from PyPI, then the optional line at the bottom.
+torch>=2.4
+transformers>=4.46
+peft>=0.13
+accelerate>=1.0
+safetensors>=0.4
+numpy>=1.26
+huggingface_hub>=0.25
+# Needed by llama.cpp's convert_hf_to_gguf.py / convert_lora_to_gguf.py
+sentencepiece>=0.2
+protobuf>=4.25
+
+# optional: bitsandbytes>=0.45
+#   QLoRA (4-bit NF4 base). Has native Windows wheels since 0.43; if it does
+#   not install or cannot run on this GPU, setup records that and the planner
+#   falls back to plain LoRA on a bf16/fp16 base.

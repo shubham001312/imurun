@@ -11,6 +11,7 @@
 #include <fish/gguf.h>
 #include <fish/quant.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -76,6 +77,106 @@ static void test_block_sizes() {
     check(ggml_type_size(GgmlType::Q8_0) == 34,  "Q8_0 = 34 bytes / 32");
     check(ggml_blck_size(GgmlType::Q4_K) == 256, "Q4_K block = 256");
     check(ggml_row_size(GgmlType::Q4_K, 2048) == 1152, "row size 2048 Q4_K = 1152");
+}
+
+// Scalar reference and installed kernel for either activation layout.
+static float scalar_int_dot(GgmlType ty, const void* row, const Q8Act* x32, const Q8ActK* x256, uint64_t n) {
+    const QuantKernels& k = scalar_kernels();
+    switch (ty) {
+        case GgmlType::Q4_K: return k.q4_K_q8k(row, x256, n);
+        case GgmlType::Q5_K: return k.q5_K_q8k(row, x256, n);
+        case GgmlType::Q6_K: return k.q6_K_q8k(row, x256, n);
+        case GgmlType::Q8_0: return k.q8_0_q8(row, x32, n);
+        case GgmlType::Q4_0: return k.q4_0_q8(row, x32, n);
+        default: return 0.0f;
+    }
+}
+
+static bool fast_int_dot(GgmlType ty, const void* row, const Q8Act* x32, const Q8ActK* x256, uint64_t n, float* out) {
+    if (has_q8k_kernel(ty)) return vec_dot_q8k(ty, row, x256, n, out);
+    return vec_dot_q8(ty, row, x32, n, out);
+}
+
+// Two checks on real weight rows:
+//   1. the installed (AVX2) integer kernel must match the scalar integer
+//      reference to float rounding — same inputs, same arithmetic;
+//   2. the integer path must match the f32 path up to the activation
+//      quantisation error, measured against the row's total |w||x| mass so a
+//      dot product that happens to cancel to ~0 is not reported as 100% off.
+static void test_q8_kernels(const GgufFile& f) {
+    std::printf("int8 kernels (%s)\n", quant_kernels().name);
+    const GgmlType types[] = {GgmlType::Q4_K, GgmlType::Q6_K, GgmlType::Q8_0,
+                              GgmlType::Q4_0, GgmlType::Q5_K};
+    for (GgmlType ty : types) {
+        const TensorInfo* t = nullptr;
+        for (const auto& cand : f.tensors()) {
+            if (cand.type == ty && cand.ne.size() >= 2 && cand.ne[0] % 256 == 0) { t = &cand; break; }
+        }
+        if (!t) {
+            std::printf("  (no %s tensor in this model, skipped)\n", ggml_type_name(ty));
+            continue;
+        }
+        const uint64_t n = t->ne[0];
+        std::vector<float> x(n);
+        uint32_t seed = 12345u;
+        for (uint64_t i = 0; i < n; ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            x[i] = (static_cast<float>(seed >> 8) / 16777216.0f - 0.5f) * 4.0f;
+        }
+        std::vector<Q8Act> xq(n / kQ8ActBlock);
+        std::vector<Q8ActK> xqk(n / kQ8ActKBlock);
+        quantize_acts(x.data(), n, xq.data());
+        quantize_acts_k(x.data(), n, xqk.data());
+
+        double max_vec_vs_scalar = 0.0, max_int_vs_f32 = 0.0;
+        const size_t rows = std::min<size_t>(64, t->ne[1]);
+        const size_t row_bytes = ggml_row_size(t->type, n);
+        std::vector<float> wrow(n);
+        for (size_t r = 0; r < rows; ++r) {
+            const void* row = t->data + r * row_bytes;
+            const float ref = vec_dot(ty, row, x.data(), n);
+            const float ref_int = scalar_int_dot(ty, row, xq.data(), xqk.data(), n);
+            float got = 0.0f;
+            const bool ok = fast_int_dot(ty, row, xq.data(), xqk.data(), n, &got);
+            if (!ok) { max_vec_vs_scalar = max_int_vs_f32 = 1e9; break; }
+            dequant_row(ty, row, wrow.data(), n);
+            double mass = 0.0;
+            for (uint64_t i = 0; i < n; ++i) mass += std::fabs(static_cast<double>(wrow[i]) * x[i]);
+            mass = std::max(mass, 1e-6);
+            max_vec_vs_scalar = std::max(max_vec_vs_scalar, std::fabs(static_cast<double>(got) - ref_int) / mass);
+            max_int_vs_f32 = std::max(max_int_vs_f32, std::fabs(static_cast<double>(got) - ref) / mass);
+        }
+        char what[160];
+        std::snprintf(what, sizeof(what), "%s: %s int8 kernel == scalar int8 reference (max %.2e of |w||x|)",
+                      ggml_type_name(ty), quant_kernels().name, max_vec_vs_scalar);
+        check(max_vec_vs_scalar < 1e-4, what);
+        std::snprintf(what, sizeof(what), "%s: int8 path within activation-quant error of f32 (max %.4f of |w||x|)",
+                      ggml_type_name(ty), max_int_vs_f32);
+        check(max_int_vs_f32 < 0.01, what);
+    }
+
+    // Throughput comparison on the attention projection.
+    const TensorInfo* q = f.find("blk.0.attn_q.weight");
+    if (q && (has_q8_kernel(q->type) || has_q8k_kernel(q->type))) {
+        const uint64_t n = q->ne[0];
+        std::vector<float> x(n, 0.01f);
+        std::vector<Q8Act> xq(n / kQ8ActBlock);
+        std::vector<Q8ActK> xqk(n / kQ8ActKBlock);
+        quantize_acts(x.data(), n, xq.data());
+        quantize_acts_k(x.data(), n, xqk.data());
+        const int iters = 4000;
+        float acc = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < iters; ++i) acc += vec_dot(q->type, q->data, x.data(), n);
+        auto t1 = std::chrono::steady_clock::now();
+        for (int i = 0; i < iters; ++i) { float v; fast_int_dot(q->type, q->data, xq.data(), xqk.data(), n, &v); acc += v; }
+        auto t2 = std::chrono::steady_clock::now();
+        const double f32_us = std::chrono::duration<double, std::micro>(t1 - t0).count() / iters;
+        const double i8_us = std::chrono::duration<double, std::micro>(t2 - t1).count() / iters;
+        std::printf("  %s row x%llu: f32 path %.2f us, int8 path %.2f us (%.1fx) [%g]\n",
+                    ggml_type_name(q->type), static_cast<unsigned long long>(n), f32_us, i8_us,
+                    f32_us / std::max(1e-9, i8_us), static_cast<double>(acc));
+    }
 }
 
 int main(int argc, char** argv) {
@@ -182,7 +283,10 @@ int main(int argc, char** argv) {
         check(std::sqrt(var) > 1e-3, "row is not degenerate");
     }
 
-    // Throughput of the scalar kernel on a realistic row.
+    std::printf("\n");
+    test_q8_kernels(*f);
+
+    // Throughput of the f32 kernel on a realistic row.
     if (q) {
         std::vector<float> x(q->ne[0], 0.01f);
         const int iters = 2000;

@@ -1,0 +1,15 @@
+# IMURUN server-side voice (optional): speech-to-text + offline text-to-speech.
+#   python -m pip install -r requirements-voice.txt
+#   python -m services.voice doctor          # what works on this machine
+# Without these the server still starts; /api/voice/* answers 503 with the reason.
+# Installed size ~250 MB (onnxruntime + ctranslate2 + PyAV's bundled FFmpeg);
+# models/voices download on first use to ~/.imurun/voice (whisper small 486 MB,
+# each Piper voice 63-77 MB). All four publish wheels for Windows/macOS/Linux; only
+# Windows 11 x64 + Python 3.12 was verified (2026-11-01). Python 3.14 is untested.
+faster-whisper>=1.1      # STT (CTranslate2, CPU int8); pulls ctranslate2, tokenizers, av, onnxruntime
+av>=12                   # decodes WebM/Opus, OGG, MP3, FLAC, M4A without an ffmpeg executable
+piper-tts>=1.3           # offline neural TTS (ONNX; bundles espeak-ng data for phonemes)
+numpy>=1.24
+
+# Optional, OFF by default, SENDS TEXT TO MICROSOFT when enabled (voice.onlineFallback):
+# edge-tts>=7.0

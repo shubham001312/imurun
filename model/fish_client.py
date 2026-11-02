@@ -1,4 +1,12 @@
-"""FISH model client implementing the ModelClient protocol with async SSE streaming."""
+"""FISH model client implementing the ModelClient protocol with async streaming.
+
+Two backends behind one interface:
+
+* native — ``FishNativeClient`` loads the engine library in-process (default
+  on a desktop). Conversations are tokenised structurally by the engine.
+* http — a ``fish_server`` running as its own service (containers). Messages
+  are posted as JSON and tokens arrive as SSE.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -6,9 +14,8 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncGenerator, Optional
-
-import aiohttp
 
 try:  # run as ``imurun.model.fish_client``
     from ..services.config import FishConfig
@@ -36,32 +43,30 @@ except ImportError:
 
 @dataclass
 class FishParams:
-    """Parameters for FISH generation."""
-    temperature: float = 0.7
-    top_p: float = 0.9
-    max_tokens: int = 2048
-    context_size: int = 4096
+    """Parameters for FISH generation. ``None`` means "use the config value"."""
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    max_tokens: Optional[int] = None
+    top_k: Optional[int] = None
+    repeat_penalty: Optional[float] = None
 
     def to_dict(self) -> dict:
-        return {
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_tokens": self.max_tokens,
-            "context_size": self.context_size,
-        }
+        return {k: v for k, v in self.__dict__.items() if v is not None}
 
 
 class FishModelClient:
-    """Async client for the FISH engine with SSE streaming support."""
+    """Async client for the FISH engine with streaming support."""
 
     def __init__(self, config: Optional[FishConfig] = None):
         self.config = config or FishConfig()
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session = None
         self._session_lock = asyncio.Lock()
         self._native = None
         if FishNativeClient is not None:
             candidate = FishNativeClient(self.config)
-            if candidate.configured:
+            if candidate.library_path is not None:
+                # The library is what makes this machine a native host; the
+                # model file is chosen later (Models tab) and may be absent now.
                 self._native = candidate
 
     @property
@@ -69,8 +74,13 @@ class FishModelClient:
         """Which path is serving: "native" or "http"."""
         return "native" if self._native is not None else "http"
 
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create the aiohttp session."""
+    # ----------------------------------------------------------------- http
+
+    async def _get_session(self):
+        """Get or create the aiohttp session (imported lazily: the native
+        path does not need aiohttp at all)."""
+        import aiohttp
+
         async with self._session_lock:
             if self._session is None or self._session.closed:
                 timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
@@ -87,15 +97,15 @@ class FishModelClient:
                 self._session = None
 
     async def health(self) -> bool:
-        """Check if the FISH engine is healthy."""
+        """Check if the FISH engine can serve."""
         if self._native is not None:
             return self._native.health()
         try:
             session = await self._get_session()
             async with session.get(self.config.health_url) as response:
                 return response.status == 200
-        except Exception as e:
-            logger.warning(f"FISH health check failed: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("FISH health check failed: %s", e)
             return False
 
     async def stats(self) -> dict:
@@ -108,180 +118,192 @@ class FishModelClient:
                 if response.status == 200:
                     return await response.json()
                 return {"error": f"HTTP {response.status}"}
-        except Exception as e:
-            logger.warning(f"FISH stats request failed: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("FISH stats request failed: %s", e)
             return {"error": str(e)}
 
-    async def generate(
-        self,
-        prompt: str,
-        params: Optional[FishParams] = None,
-    ) -> AsyncGenerator[str, None]:
-        """Generate tokens via SSE stream from FISH engine.
-
-        Yields:
-            Individual token strings as they arrive from the stream.
-        """
-        if params is None:
-            params = FishParams(
-                temperature=self.config.temperature,
-                top_p=self.config.top_p,
-                max_tokens=self.config.max_tokens,
-                context_size=self.config.context_size,
-            )
-
-        if self._native is not None:
-            # Raw prompt: the caller already rendered it (see chat_prompt).
-            loop = asyncio.get_running_loop()
-            queue: asyncio.Queue = asyncio.Queue()
-            done = object()
-
-            def _cb(text, _token_id, _user):
-                if text:
-                    loop.call_soon_threadsafe(
-                        queue.put_nowait, text.decode("utf-8", "replace")
-                    )
-
-            from .fish_native import FISH_TOKEN_CB as _CB  # type: ignore
-            callback = _CB(_cb)
-
-            def _work():
-                try:
-                    self._native._generate(prompt, params, callback)
-                except BaseException as exc:  # noqa: BLE001
-                    loop.call_soon_threadsafe(queue.put_nowait, exc)
-                finally:
-                    loop.call_soon_threadsafe(queue.put_nowait, done)
-
-            task = loop.run_in_executor(None, _work)
-            try:
-                while True:
-                    item = await queue.get()
-                    if item is done:
-                        break
-                    if isinstance(item, BaseException):
-                        raise item
-                    yield item
-            finally:
-                if not task.done():
-                    self._native.cancel()
-                await task
-            return
-
-        payload = {
-            "prompt": prompt,
-            "params": params.to_dict(),
+    def _request_params(self, params: Optional[FishParams]) -> dict:
+        out = {
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "max_tokens": self.config.max_tokens,
+            "top_k": 40,
+            "repeat_penalty": 1.1,
         }
+        if params is not None:
+            out.update(params.to_dict())
+        return out
 
+    async def _http_stream(self, payload: dict) -> AsyncGenerator[str, None]:
         session = await self._get_session()
+        # ensure_ascii=False keeps non-Latin text readable for the engine's
+        # small JSON reader (it decodes \uXXXX too, but plain UTF-8 is cheaper).
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
             async with session.post(
                 self.config.stream_url,
-                json=payload,
-                headers={"Accept": "text/event-stream"},
+                data=body,
+                headers={"Accept": "text/event-stream", "Content-Type": "application/json"},
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise RuntimeError(f"FISH engine error {response.status}: {error_text}")
 
-                async for line in response.content:
-                    line = line.decode("utf-8").strip()
-                    if not line:
+                async for raw in response.content:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line or not line.startswith("data: "):
                         continue
-                    if line.startswith("data: "):
-                        data = line[6:]  # Remove "data: " prefix
-                        if data == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(data)
-                            token = chunk.get("token", "")
-                            if token:
-                                yield token
-                        except json.JSONDecodeError:
-                            logger.debug(f"Failed to parse SSE data: {data}")
-                            continue
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+                    try:
+                        token = json.loads(data).get("token", "")
+                    except json.JSONDecodeError:
+                        logger.debug("Failed to parse SSE data: %s", data)
+                        continue
+                    if token:
+                        yield token
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"FISH generation failed: {e}")
+            logger.error("FISH generation failed: %s", e)
             raise RuntimeError(f"FISH generation failed: {e}") from e
 
-    async def generate_full(self, prompt: str, params: Optional[FishParams] = None) -> str:
-        """Generate full response (collects all tokens).
+    # ------------------------------------------------------------- generate
 
-        This is a convenience method for synchronous compatibility.
-        """
-        tokens = []
-        async for token in self.generate(prompt, params):
-            tokens.append(token)
-        return "".join(tokens)
-
-    async def generate_stream(
-        self,
-        messages: list[dict],
-        params: Optional[FishParams] = None,
-    ) -> AsyncGenerator[str, None]:
-        """Generate tokens via SSE stream from FISH engine, accepting messages format.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content' keys.
-            params: Optional generation parameters.
-
-        Yields:
-            Individual token strings as they arrive from the stream.
-        """
-        # Convert messages to a single prompt string
-        prompt = self._messages_to_prompt(messages)
-        async for token in self.generate(prompt, params):
+    async def generate(self, prompt: str, params: Optional[FishParams] = None) -> AsyncGenerator[str, None]:
+        """Stream tokens for a raw prompt (already rendered by the caller)."""
+        if self._native is not None:
+            async for token in self._native.generate_prompt_stream(prompt, params):
+                yield token
+            return
+        async for token in self._http_stream({"prompt": prompt, "params": self._request_params(params)}):
             yield token
 
-    def _messages_to_prompt(self, messages: list[dict]) -> str:
-        """Render the conversation.
+    async def generate_full(self, prompt: str, params: Optional[FishParams] = None) -> str:
+        tokens = [token async for token in self.generate(prompt, params)]
+        return "".join(tokens)
 
-        With the native engine the model's own chat template is used (Llama 3
-        headers, ChatML, Phi-3, ...). The flat "User:/Assistant:" form is only a
-        fallback for an HTTP engine that does not expose a template.
+    async def generate_stream(self, messages: list[dict], params: Optional[FishParams] = None) -> AsyncGenerator[str, None]:
+        """Stream tokens for a conversation.
+
+        The native engine applies the chat template itself; the HTTP engine
+        receives the messages and does the same on its side.
         """
+        if self._native is not None:
+            async for token in self._native.generate_stream(messages, params):
+                yield token
+            return
+        payload = {
+            "messages": [{"role": str(m.get("role", "user")), "content": str(m.get("content", ""))} for m in messages],
+            "params": self._request_params(params),
+        }
+        async for token in self._http_stream(payload):
+            yield token
+
+    async def generate_messages_full(self, messages: list[dict], params: Optional[FishParams] = None) -> str:
+        tokens = [token async for token in self.generate_stream(messages, params)]
+        return "".join(tokens)
+
+    def _messages_to_prompt(self, messages: list[dict]) -> str:
+        """Render the conversation as text (for display / legacy callers)."""
         if self._native is not None:
             try:
                 return self._native.chat_prompt(messages)
             except Exception as e:  # noqa: BLE001 - fall back, never fail
-                logger.warning(f"chat template failed, using plain roles: {e}")
+                logger.warning("chat template failed, using plain roles: %s", e)
         parts = []
         for msg in messages:
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            if role == "system":
-                parts.append(f"System: {content}")
-            elif role == "user":
-                parts.append(f"User: {content}")
-            elif role == "assistant":
-                parts.append(f"Assistant: {content}")
-            else:
-                parts.append(f"{role}: {content}")
+            label = {"system": "System", "user": "User", "assistant": "Assistant"}.get(role, role)
+            parts.append(f"{label}: {content}")
         return "\n\n".join(parts) + "\n\nAssistant:"
 
 
 class SyncFishModelClient:
-    """Synchronous adapter for FishModelClient to implement ModelClient protocol.
+    """Synchronous adapter for FishModelClient implementing ModelClient.
 
-    This wraps the async client and runs the event loop to provide a synchronous
-    generate() method compatible with the existing AgentLoop.
+    The agent loop calls ``generate(messages)`` from a worker thread; this
+    class runs the async client to completion for it. Streaming callers use
+    ``generate_stream`` directly.
     """
 
     def __init__(self, config: Optional[FishConfig] = None):
         self._async_client = FishModelClient(config)
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._health_at = 0.0
         self._health_ok = False
 
     @property
-    def available(self) -> bool:
-        """True only when the engine answers its health endpoint.
+    def config(self):
+        return self._async_client.config
 
-        The probe is cached briefly so status polling does not hammer the
-        engine, and it never raises: an unreachable engine is unavailable.
+    @property
+    def _native(self):
+        return getattr(self._async_client, "_native", None)
+
+    @property
+    def configured(self) -> bool:
+        """True when an engine is configured, even if its weights are unloaded.
+
+        Availability is about "can this machine serve a model", not "are the
+        weights resident right now"; the native client loads on demand.
         """
+        native = self._native
+        if native is not None:
+            return bool(getattr(native, "configured", False))
+        return bool(getattr(self._async_client.config, "server_url", ""))
+
+    @property
+    def loaded(self) -> bool:
+        """True when the native engine has the weights resident."""
+        return bool(getattr(self._native, "available", False))
+
+    @property
+    def last_used(self) -> float:
+        return float(getattr(self._native, "last_used", 0.0) or 0.0)
+
+    def unload_if_idle(self, timeout_seconds: float) -> bool:
+        """Unload resident weights after inactivity; the next turn reloads them."""
+        fn = getattr(self._native, "unload_if_idle", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn(timeout_seconds))
+        except Exception:  # noqa: BLE001 - keep-alive must never break a turn
+            return False
+
+    def select(self, path: Path | str) -> bool:
+        """Switch the active model on the FISH backend."""
+        fn = getattr(self._native, "select", None)
+        if not callable(fn):
+            return False
+        try:
+            return bool(fn(path))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def cancel(self) -> None:
+        """Stop the generation in flight, if any."""
+        fn = getattr(self._native, "cancel", None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def context_limit(self) -> int:
+        fn = getattr(self._native, "context_limit", None)
+        if callable(fn):
+            try:
+                return int(fn())
+            except Exception:  # noqa: BLE001
+                pass
+        return int(getattr(self.config, "context_size", 0) or 4096)
+
+    @property
+    def available(self) -> bool:
+        """True when the engine can answer. Never loads weights as a side effect."""
         return self.health()
 
     def health(self, ttl: float = 5.0) -> bool:
@@ -289,10 +311,8 @@ class SyncFishModelClient:
         if now - self._health_at < ttl:
             return self._health_ok
         ok = False
-        native = getattr(self._async_client, "_native", None)
-        if native is not None:
-            # In-process engine: no socket involved.
-            ok = native.health()
+        if self._native is not None:
+            ok = self._native.health()
         else:
             url = self._async_client.config.health_url
             try:
@@ -306,81 +326,64 @@ class SyncFishModelClient:
         self._health_ok = ok
         return ok
 
-    def _get_loop(self) -> asyncio.AbstractEventLoop:
-        """Get or create an event loop for synchronous calls."""
-        if self._loop is None or self._loop.is_closed():
-            try:
-                self._loop = asyncio.get_running_loop()
-            except RuntimeError:
-                self._loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self._loop)
-        return self._loop
+    def _run(self, coro):
+        """Run a coroutine to completion from synchronous code, whether or not
+        an event loop is already running in this thread."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
 
     def generate(self, messages: list[dict]) -> str:
-        """Synchronous generate method for ModelClient protocol.
-
-        Converts messages to a prompt and returns the full response.
-        """
-        # Convert messages to a single prompt string
-        prompt = self._messages_to_prompt(messages)
-
-        # Run the async generation in the event loop
-        loop = self._get_loop()
-        if loop.is_running():
-            # If loop is already running (e.g., in async context), we need a different approach
-            # Create a new thread with its own loop
-            import concurrent.futures
-
-            def run_in_new_loop():
-                new_loop = asyncio.new_event_loop()
-                try:
-                    return new_loop.run_until_complete(
-                        self._async_client.generate_full(prompt)
-                    )
-                finally:
-                    new_loop.close()
-
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_new_loop)
-                return future.result()
-        else:
-            return loop.run_until_complete(self._async_client.generate_full(prompt))
+        """Synchronous generate for the ModelClient protocol."""
+        return self._run(self._async_client.generate_messages_full(messages))
 
     async def ahealth(self) -> bool:
-        """Async health check."""
         return await self._async_client.health()
 
     async def astats(self) -> dict:
-        """Async stats."""
         return await self._async_client.stats()
 
-    async def generate_stream(
-        self,
-        messages: list[dict],
-        params: Optional[FishParams] = None,
-    ) -> AsyncGenerator[str, None]:
-        """Async streaming generation for messages format.
+    def stats(self) -> dict:
+        """Last-generation counters from the native engine.
 
-        Delegates to the async client's generate_stream method.
+        The HTTP path has no cheap synchronous probe, so it returns an empty
+        dict and the caller falls back to counting streamed tokens.
         """
+        if self._native is None:
+            return {}
+        try:
+            return dict(self._native.stats() or {})
+        except Exception:  # noqa: BLE001 - counters must not break a turn
+            return {}
+
+    def model_info(self) -> dict:
+        fn = getattr(self._native, "model_info", None)
+        if not callable(fn):
+            return {}
+        try:
+            return dict(fn() or {})
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def selected_name(self) -> str:
+        """The model file the native engine serves, or an empty string."""
+        path = getattr(self._native, "model_path", None)
+        return Path(path).name if path else ""
+
+    async def generate_stream(self, messages: list[dict], params: Optional[FishParams] = None) -> AsyncGenerator[str, None]:
         async for token in self._async_client.generate_stream(messages, params):
             yield token
 
     def _messages_to_prompt(self, messages: list[dict]) -> str:
-        """Delegate to the async client so the model's chat template applies."""
         return self._async_client._messages_to_prompt(messages)
 
     def close(self) -> None:
-        """Close the async client."""
-        import concurrent.futures
-
-        def close_in_new_loop():
-            new_loop = asyncio.new_event_loop()
-            try:
-                new_loop.run_until_complete(self._async_client.close())
-            finally:
-                new_loop.close()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(close_in_new_loop)
-            future.result(timeout=10)
+        try:
+            self._run(self._async_client.close())
+        except Exception:  # noqa: BLE001 - closing must never raise
+            pass

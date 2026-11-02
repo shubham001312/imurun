@@ -106,6 +106,10 @@ private:
 std::string hardware_json(const HardwareSpecs& hw);
 std::string plan_json(const ExecutionPlan& plan);
 
+// Cheap topology probe (no benchmarks). 0 when unknown.
+int detect_physical_cores();
+uint64_t detect_ram_available_bytes();
+
 // ---------------------------------------------------------------------------
 // Arena — a hard-capped bump allocator.
 //

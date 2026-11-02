@@ -1,0 +1,24 @@
+#version 450
+// FISH layer span — dst[t][i] += src[t][i] (residual) or += bias[i].
+// src lives in the arena (src_params = 0) or in the params buffer
+// (src_params = 1, src_stride = 0 for a bias broadcast over tokens).
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Arena { float a[]; };
+layout(std430, binding = 1) readonly buffer Params { float prm[]; };
+
+layout(push_constant) uniform PC {
+    uint n, n_tok;
+    uint dst_off, dst_stride;
+    uint src_off, src_stride;
+    uint src_params;
+} pc;
+
+void main() {
+    const uint g = gl_GlobalInvocationID.x;
+    if (g >= pc.n * pc.n_tok) return;
+    const uint t = g / pc.n, i = g % pc.n;
+    const uint si = pc.src_off + t * pc.src_stride + i;
+    const float s = pc.src_params != 0u ? prm[si] : a[si];
+    a[pc.dst_off + t * pc.dst_stride + i] += s;
+}

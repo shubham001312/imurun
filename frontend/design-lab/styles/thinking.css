@@ -1,0 +1,180 @@
+/* The thinking box: live status and the model's reasoning trace.
+ *
+ * Collapsed, it is one quiet pill above the answer: the brand mark (it
+ * spins while the model works, see brand.css), a status label with a soft
+ * shimmer while live, a steady timer, and a one-line preview of the newest
+ * reasoning that fades in from the left. Opened, the full trace sits in a
+ * calm card with a capped height that keeps itself scrolled to the newest
+ * line. Open/close and fold-away are height animations driven by chat.js
+ * (animateDetails / collapseAway); nothing here snaps.
+ *
+ * Models that do not expose reasoning never get an invented trace: the pill
+ * only carries status and folds away when the answer starts.
+ */
+
+/* While the engine works the answer bubble stays out of the way. */
+.msg.is-thinking .bubble { display: none; }
+
+.msg .thinking {
+  margin: 0 0 8px;
+  max-width: 780px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* ------------------------------------------------------------- the pill */
+
+.msg .thinking > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px 12px 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  font: 500 var(--text-sm, 12.5px)/1.3 var(--font);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color var(--dur-base, .2s), background var(--dur-base, .2s), color var(--dur-base, .2s);
+}
+.msg .thinking > summary::-webkit-details-marker { display: none; }
+.msg .thinking > summary::marker { content: ""; }
+.msg .thinking > summary:hover { border-color: var(--line-strong); color: var(--text); }
+.msg .thinking[open] > summary { border-color: var(--accent-line); color: var(--text); }
+.msg .thinking.is-live > summary { border-color: color-mix(in srgb, var(--accent) 22%, var(--line)); }
+
+/* Nothing to expand until reasoning arrives. */
+.msg .thinking:not(.has-trace) > summary { cursor: default; }
+.msg .thinking:not(.has-trace) > summary::after { display: none; }
+
+/* chevron */
+.msg .thinking > summary::after {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin: 0 0 2px 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  opacity: .7;
+  transition: transform .24s var(--ease-std, ease);
+}
+.msg .thinking[open] > summary::after { transform: rotate(-135deg) translate(-2px, -2px); }
+
+.msg .thinking-label {
+  flex: none;
+  font: inherit;
+  white-space: nowrap;
+}
+
+/* Live label: a slow light sweep across the text, the "working" signal. */
+.msg .thinking.is-live .thinking-label {
+  background: linear-gradient(90deg, var(--muted) 0%, var(--muted) 35%, var(--text) 50%, var(--muted) 65%, var(--muted) 100%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: label-shimmer 2.2s linear infinite;
+}
+.msg .thinking-label.is-swapping { animation: label-swap .24s var(--ease-out, ease-out); }
+.msg .thinking.is-live .thinking-label.is-swapping {
+  animation: label-swap .24s var(--ease-out, ease-out), label-shimmer 2.2s linear infinite;
+}
+@keyframes label-shimmer { from { background-position: 100% 0; } to { background-position: -150% 0; } }
+@keyframes label-swap { from { opacity: .25; transform: translateY(2px); } to { opacity: 1; transform: none; } }
+
+/* Timer: fixed-width digits so the pill never jitters as it counts. */
+.msg .thinking-time {
+  flex: none;
+  min-width: 3.4em;
+  font: 500 11px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-soft, var(--muted));
+  opacity: .85;
+}
+.msg .thinking-time:empty { display: none; }
+
+/* One-line preview of the newest reasoning: the tail stays visible (the
+ * flex end alignment) and the head fades out under a mask. */
+.msg .thinking-preview {
+  display: flex;
+  justify-content: flex-end;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 44ch;
+  overflow: hidden;
+  white-space: nowrap;
+  font: italic 400 var(--text-xs, 11.5px)/1.4 var(--font);
+  color: var(--muted);
+  opacity: .85;
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 32px);
+  mask-image: linear-gradient(90deg, transparent 0, #000 32px);
+  transition: opacity .2s;
+}
+.msg .thinking-preview:empty,
+.msg .thinking[open] .thinking-preview { display: none; }
+
+/* -------------------------------------------------------------- the trace */
+
+.msg .thinking-body {
+  margin: 6px 0 0;
+  padding: 10px 14px;
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+  font: 12.5px/1.65 var(--font);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  /* the oldest lines fade under the top edge while the trace scrolls */
+  -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 14px);
+  mask-image: linear-gradient(180deg, transparent 0, #000 14px);
+}
+
+.msg .thinking-body p,
+.msg .thinking-body .thinking-text,
+.msg .thinking-body .thinking-empty {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  animation: none;
+}
+.msg .thinking-body p::before { display: none; }
+.msg .thinking-body .thinking-empty { font-style: italic; opacity: .85; }
+
+/* ------------------------------------------------- legacy orb (fallback) */
+
+.thinking-orb { position: relative; width: 18px; height: 18px; flex: none; transform-style: preserve-3d; }
+.thinking-orb::before {
+  content: ""; position: absolute; top: 50%; left: 50%;
+  width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 10px var(--accent);
+  animation: thinking-core 1.9s ease-in-out infinite;
+}
+.thinking-orb i { position: absolute; inset: 0; border: 1.5px solid var(--accent-line); border-radius: 50%; animation: thinking-ring 2.4s linear infinite; }
+.thinking-orb i:nth-child(2) { transform: rotateX(66deg) rotateZ(60deg); animation-duration: 1.7s; animation-direction: reverse; }
+.thinking-orb i:nth-child(3) { transform: rotateX(66deg) rotateZ(120deg); animation-duration: 3.1s; }
+@keyframes thinking-ring { to { transform: rotate(360deg); } }
+@keyframes thinking-core { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.25); opacity: .75; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .msg .thinking.is-live .thinking-label { animation: none; color: var(--muted); background: none; }
+  .msg .thinking > summary::after { transition: none; }
+}
+body[data-reduced-motion="1"] .msg .thinking.is-live .thinking-label { animation: none; color: var(--muted); background: none; }

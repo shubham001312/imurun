@@ -12,7 +12,9 @@
 #include <utility>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
@@ -106,9 +108,29 @@ bool parse_value(Reader& r, MetaValue& out, int depth) {
                     out.iarr.push_back(static_cast<int32_t>(r.u32()));
                 break;
             }
-            if (count > (r.n - std::min(r.off, r.n)) / 1 && count > 0) {
-                // Cheap sanity: each element is at least one byte.
-                if (count > r.n - std::min(r.off, r.n)) return false;
+            if (et == MT_FLOAT32) {
+                out.farr.reserve(static_cast<size_t>(count));
+                for (uint64_t i = 0; i < count && r.ok; ++i)
+                    out.farr.push_back(r.f32());
+                break;
+            }
+            if (et == MT_FLOAT64) {
+                out.farr.reserve(static_cast<size_t>(count));
+                for (uint64_t i = 0; i < count && r.ok; ++i)
+                    out.farr.push_back(r.f64());
+                break;
+            }
+            // Sanity check: ensure enough bytes remain for the array elements.
+            // Element size depends on the element type.
+            size_t elem_size = 1;
+            if (et == MT_UINT8 || et == MT_INT8) elem_size = 1;
+            else if (et == MT_UINT16 || et == MT_INT16) elem_size = 2;
+            else if (et == MT_UINT32 || et == MT_INT32 || et == MT_FLOAT32) elem_size = 4;
+            else if (et == MT_UINT64 || et == MT_INT64 || et == MT_FLOAT64) elem_size = 8;
+            // STRING and ARRAY are variable-size; skip precise check for them.
+            if (et != MT_STRING && et != MT_ARRAY) {
+                size_t remaining = (r.off <= r.n) ? (r.n - r.off) : 0;
+                if (count > 0 && count * elem_size > remaining) return false;
             }
             out.arr.reserve(static_cast<size_t>(count));
             for (uint64_t i = 0; i < count && r.ok; ++i) {

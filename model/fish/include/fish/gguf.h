@@ -50,6 +50,7 @@ struct MetaValue {
     std::vector<MetaValue>   arr;    // ARRAY of mixed values
     std::vector<std::string> sarr;   // ARRAY of STRING
     std::vector<int32_t>     iarr;   // ARRAY of INT32 / UINT32
+    std::vector<float>       farr;   // ARRAY of FLOAT32 / FLOAT64
 
     uint64_t    as_u64(uint64_t def = 0) const;
     int64_t     as_i64(int64_t def = 0) const;

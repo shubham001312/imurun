@@ -1,0 +1,243 @@
+# IMURUN: release. Triggered by pushing a tag v<version> (e.g. v0.3.0).
+#
+#   check     tag == pyproject.toml version == package.json version
+#   test      pytest on Linux, Windows, macOS
+#   engine    FISH library per OS (engine.yml)
+#   wheels    one wheel per OS with its engine bundled, each smoke-installed
+#             on its own OS:  py3-none-win_amd64, py3-none-manylinux_2_28_x86_64,
+#             py3-none-macosx_11_0_arm64
+#   sdist     source distribution + a pure py3-none-any wheel (no engine; pip
+#             picks it on other platforms, and `imurun --get-engine` or a
+#             source build supplies the library)
+#   release   GitHub Release with the engine libraries, SHA256SUMS.txt and
+#             every distribution attached
+#   pypi      PyPI, by trusted publishing (OIDC; no token stored anywhere)
+#   npm       the npm launcher (package.json + npm/imurun.js), after PyPI so
+#             `npx imurun` can install the matching imurun==<version> at once
+#
+# The file name (workflow.yml) and the environment name (pypi) are what the
+# PyPI trusted publisher for the `imurun` project was registered with in
+# 0.1.x; renaming either breaks publishing until PyPI is updated to match.
+# One-time setup: docs/setup/RELEASE.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build, test and check everything, but publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: v
+        name: Versions agree with the tag
+        run: |
+          python - <<'EOF'
+          import json, os, tomllib
+          py = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          js = json.load(open("package.json"))["version"]
+          ref = os.environ.get("GITHUB_REF_NAME", "")
+          tag = ref[1:] if os.environ.get("GITHUB_REF_TYPE") == "tag" else py
+          print(f"tag={tag} pyproject={py} package.json={js}")
+          if not (py == js == tag):
+              raise SystemExit(f"version mismatch: tag {tag}, pyproject {py}, package.json {js}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"version={py}\n")
+          EOF
+
+  test:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: pytest (window tests are opt-in and stay skipped)
+        env:
+          IMURUN_NO_BROWSER: "1"
+          BROWSER: "none"
+        run: python -m pytest -q
+
+  engine:
+    needs: check
+    uses: ./.github/workflows/engine.yml
+
+  wheels:
+    name: wheel (${{ matrix.platform }})
+    needs: [check, engine]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+            asset: fish-windows-x64.dll
+            tag: win_amd64
+          - platform: linux-x64
+            os: ubuntu-latest
+            asset: libfish-linux-x64.so
+            tag: manylinux_2_28_x86_64
+          - platform: macos-arm64
+            os: macos-14
+            asset: libfish-macos-arm64.dylib
+            tag: macosx_11_0_arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-${{ matrix.platform }}
+          path: engine/
+      - name: Build the wheel with the engine bundled
+        shell: bash
+        env:
+          IMURUN_ENGINE_LIB: engine/${{ matrix.asset }}
+          IMURUN_WHEEL_PLAT: ${{ matrix.tag }}
+        run: |
+          python -m pip install build twine
+          python -m build --wheel --outdir dist/
+          twine check dist/*
+          ls -la dist/
+      - name: Smoke-install on ${{ matrix.os }}
+        shell: bash
+        run: python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-${{ matrix.tag }}.whl" --expect-engine
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + pure wheel
+        env:
+          IMURUN_BUNDLE_ENGINE: "0"
+        run: |
+          python -m pip install build twine
+          python -m build --outdir dist/
+          twine check dist/*
+      - name: Smoke-install the pure wheel
+        run: python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-any.whl"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [check, test, wheels, sdist]
+    if: ${{ github.ref_type == 'tag' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          path: assets/
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist/
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists - replacing its assets"
+            gh release upload "$GITHUB_REF_NAME" assets/* dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --title "IMURUN $GITHUB_REF_NAME" --generate-notes \
+              assets/* dist/*
+          fi
+
+  pypi:
+    needs: [check, release]
+    if: ${{ github.ref_type == 'tag' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/imurun/${{ needs.check.outputs.version }}/
+    permissions:
+      id-token: write   # trusted publishing: PyPI verifies this workflow by OIDC
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist/
+          merge-multiple: true
+      - run: ls -la dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true   # a re-run after a partial upload finishes the job
+
+  npm:
+    needs: [check, pypi]
+    if: ${{ github.ref_type == 'tag' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/imurun
+    permissions:
+      contents: read
+      id-token: write   # npm provenance (and npm trusted publishing, if configured)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - name: Check the package
+        run: |
+          node --check npm/imurun.js
+          npm pack --dry-run
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          if npm view "imurun@$VERSION" version >/dev/null 2>&1; then
+            echo "imurun@$VERSION is already on npm - nothing to do"; exit 0
+          fi
+          # Works with an NPM_TOKEN secret, or without one when a trusted
+          # publisher for this repository + workflow.yml is configured on
+          # npmjs.com (npm >= 11.5 exchanges the OIDC credential itself).
+          npm install -g "npm@>=11.5"
+          npm publish --access public --provenance

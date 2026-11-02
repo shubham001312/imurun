@@ -1,0 +1,136 @@
+/* The ImuTechz Aperture (aperture.js), the wordmark and the landing intro.
+ *
+ * The mark's motion is driven in JS (aperture.js, the website's Mark.jsx);
+ * this file only places it. The intro rules are the website's
+ * (WebSite/frontend/app/styles/home.css, .intro ... .has-intro, and the
+ * html:has(.intro) nav rule of app/globals.css) with the selectors mapped
+ * to this app: .hero3d-copy -> .home-hero, .hero3d-stage -> .home-actions,
+ * header.site-head -> .topbar, --color-canvas -> --intro-canvas (cream),
+ * --ink-rgb kept. Durations, delays, easings and keyframes are unchanged.
+ */
+
+/* ---- the Aperture (Mark.jsx / globals.css .mark) ---- */
+.mark { display: inline-block; overflow: visible; vertical-align: middle; flex: none; }
+.mark-tile { border-radius: 22%; }
+.imu-mark { display: block; color: var(--logo-ray, var(--text)); }
+
+.brand .logo { display: inline-grid; place-items: center; width: 26px; height: 26px; font-size: 0; }
+.shell.sidebar-collapsed .brand .logo { width: 30px; height: 30px; }
+.home-logo { font-size: 0; }
+.home-logo .imu-mark { width: 40px; height: 40px; }
+
+/* ---- the lockup (Shell.jsx Wordmark, globals.css .wordmark/.wmr/.wms) ---- */
+.imu-wordmark {
+  display: inline-flex; align-items: baseline;
+  font-family: var(--font); font-weight: 700; letter-spacing: -0.03em; line-height: 1;
+  white-space: nowrap;
+}
+.imu-wordmark .wm-red { color: var(--logo-accent); }
+.imu-wordmark .wm-ink { color: var(--logo-word-ink); }
+.imu-wordmark .wm-steel { color: var(--logo-word-steel); }
+
+/* Home: "IMURUN  by ImuTechz" */
+.home-by { display: inline-flex; align-items: baseline; gap: 6px; margin-left: 12px; padding-left: 12px; border-left: 1px solid var(--line-strong); }
+.home-by-k { font: 500 10.5px/1 var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--muted-soft, var(--muted)); }
+.home-by .imu-wordmark { font-size: 17px; }
+
+/* ---- the thinking indicator and the start-up card: the website's loader
+   (Skeletons.jsx: <Mark size={18} live />), breathing on the shared clock ---- */
+.thinking-orb.is-mark { width: 18px; height: 18px; display: inline-grid; place-items: center; }
+.thinking-orb.is-mark::before { display: none; }
+.thinking-orb.is-mark .imu-mark { width: 18px; height: 18px; color: var(--muted); }
+.msg:not(.is-thinking) .thinking-orb.is-mark { opacity: .75; }
+.boot-mark { width: 84px; height: 84px; margin: 4px auto 0; }
+.boot-mark .imu-mark { width: 100%; height: 100%; }
+
+/* ---- the intro curtain (Intro.jsx + home.css) ----
+   0.0-1.1 s  the mark whooshes in: blurred speck -> overshoot -> settle
+   0.45 s     one ripple expands behind it, a second a beat later
+   1.3-2.0 s  the whole curtain drops upward and the app is revealed */
+:root { --intro-canvas: #f3ede2; --ink-rgb: 28, 25, 20; }
+.intro {
+  position: fixed; inset: 0; z-index: 1200;   /* website: 70; here above the boot card (900) */
+  display: grid; place-items: center;
+  background: var(--intro-canvas);
+  will-change: transform;
+  pointer-events: none;
+}
+/* before the scripts run the curtain is plain cream; `.intro-go` starts the clock */
+.intro.intro-go { animation: intro-up 0.72s cubic-bezier(0.8, 0, 0.2, 1) 1.3s both; }
+.intro::after {
+  /* the curtain's bottom edge: a soft shadow line so the lift reads as a sheet, not a cut */
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 48px;
+  background: linear-gradient(to bottom, rgba(var(--ink-rgb), 0.14), rgba(var(--ink-rgb), 0));
+  transform: translateY(100%); opacity: 0;
+}
+.intro.intro-go::after { animation: intro-edge 0.72s ease 1.3s both; }
+.intro-in { position: relative; display: grid; place-items: center; width: min(90vw, 420px); aspect-ratio: 1; }
+.intro-mark {
+  position: relative; z-index: 1; color: #1c1915;   /* website: var(--color-fg) on the cream curtain */
+  --imu-accent: #d9481e;
+  width: clamp(160px, 24vw, 250px); height: auto;
+  opacity: 0; transform: scale(0.14); filter: blur(16px);
+}
+.intro-go .intro-mark { animation: intro-zoom 1.05s cubic-bezier(0.22, 1.2, 0.3, 1) 0.1s both; }
+.intro-ring {
+  position: absolute; width: clamp(160px, 24vw, 250px); aspect-ratio: 1; border-radius: 50%;
+  border: 1.5px solid rgba(var(--ink-rgb), 0.35);
+  opacity: 0; transform: scale(0.45);
+}
+.intro-go .intro-ring { animation: intro-ripple 1.1s cubic-bezier(0.2, 0.8, 0.2, 1) 0.45s both; }
+.intro-ring-2 { border-color: #d9481e; }
+.intro-go .intro-ring-2 { animation-delay: 0.62s; }
+@keyframes intro-zoom {
+  0% { opacity: 0; transform: scale(0.14); filter: blur(16px); }
+  55% { opacity: 1; filter: blur(0); }
+  78% { transform: scale(1.1); }
+  100% { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+@keyframes intro-ripple {
+  0% { opacity: 0; transform: scale(0.45); }
+  20% { opacity: 0.7; }
+  100% { opacity: 0; transform: scale(2.4); }
+}
+@keyframes intro-up { to { transform: translateY(-104%); } }
+@keyframes intro-edge { 0% { opacity: 0; } 15% { opacity: 1; } 100% { opacity: 1; } }
+@keyframes intro-fade { to { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .intro, .intro.intro-go { animation: intro-fade 0.3s ease both; }
+  .intro::after, .intro.intro-go::after { display: none; animation: none; }
+  .intro-mark, .intro-go .intro-mark { opacity: 1; transform: none; filter: none; animation: none; }
+  .intro-ring { display: none; }
+}
+/* the same for the in-app "Reduce motion" switch (customise.css would
+   otherwise freeze the curtain on screen until it is removed) */
+body[data-reduced-motion="1"] .intro, body[data-reduced-motion="1"] .intro.intro-go { animation: intro-fade 0.3s ease both !important; }
+body[data-reduced-motion="1"] .intro::after { display: none; }
+body[data-reduced-motion="1"] .intro-mark { opacity: 1; transform: none; filter: none; animation: none !important; }
+body[data-reduced-motion="1"] .intro-ring { display: none; }
+/* customise.css shortens every animation to 1 ms under reduced motion; the
+   curtain keeps the website's 0.3 s fade */
+@media (prefers-reduced-motion: reduce) { .intro.intro-go { animation-duration: 0.3s !important; } }
+body[data-reduced-motion="1"] .intro.intro-go { animation-duration: 0.3s !important; }
+
+/* the home content rises in behind the lifting curtain */
+.has-intro .home-hero > * { opacity: 0; animation: hero-rise 0.75s var(--ease-out-soft, cubic-bezier(0.2, 0.8, 0.2, 1)) both; animation-delay: calc(1.55s + var(--n, 0) * 0.09s); }
+.has-intro .home-hero > :nth-child(1) { --n: 0; }
+.has-intro .home-hero > :nth-child(2) { --n: 1; }
+.has-intro .home-hero > :nth-child(3) { --n: 2; }
+.has-intro .home-hero > :nth-child(4) { --n: 3; }
+.has-intro .home-hero > :nth-child(5) { --n: 4; }
+.has-intro .home-actions { opacity: 0; animation: hero-fade 0.9s ease 1.6s both; }
+@keyframes hero-rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+@keyframes hero-fade { to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .has-intro .home-hero > *, .has-intro .home-actions { animation: none; opacity: 1; } }
+body[data-reduced-motion="1"] .has-intro .home-hero > *, html.has-intro body[data-reduced-motion="1"] .home-actions { animation: none; opacity: 1; }
+
+/* while the curtain is up the top bar waits above the viewport, then drops
+   into place (globals.css header.site-head / nav-drop) */
+html:has(.intro) .topbar { transform: translateY(-140%); opacity: 0; pointer-events: none; transition: none; }
+.topbar { animation: nav-drop 0.55s cubic-bezier(0.22, 1, 0.36, 1) backwards; }
+html:has(.intro) .topbar { animation: none; }
+@keyframes nav-drop { from { transform: translateY(-140%); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .topbar { animation: none; } }
+
+/* ---- file mode (brand.js BRAND.mark = 'file') ---- */
+.imu-mark--file { object-fit: contain; user-select: none; }

@@ -1,0 +1,108 @@
+# IMURUN: continuous integration on every push and pull request.
+#
+#   lint     ruff (correctness subset), py_compile, node --check on all JS,
+#            version consistency (pyproject.toml == package.json)
+#   test     pytest on Linux, Windows, macOS (window/network/voice/tuning
+#            tests skip themselves unless their opt-in variable is set)
+#   engine   builds the FISH library on all three OSes (engine.yml)
+#   package  builds sdist + pure wheel and smoke-installs the wheel
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]   # tags run the release workflow (workflow.yml)
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: ruff (syntax errors, undefined names)
+        run: |
+          python -m pip install "ruff>=0.5"
+          ruff check --select E9,F63,F7,F82 --output-format=github .
+      - name: py_compile
+        run: python -m compileall -q start.py install.py window.py setup.py imurun services model/*.py
+      - name: node --check
+        run: |
+          node --check npm/imurun.js
+          find frontend/design-lab brand/vanilla -name '*.js' -print0 | xargs -0 -n1 node --check
+      - name: Versions agree
+        run: |
+          python - <<'EOF'
+          import json, tomllib
+          py = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          js = json.load(open("package.json"))["version"]
+          print("pyproject", py, "package.json", js)
+          raise SystemExit(0 if py == js else f"version mismatch: pyproject {py} != package.json {js}")
+          EOF
+
+  test:
+    name: test (${{ matrix.os }}, py${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12"]
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install
+        run: python -m pip install -r requirements-dev.txt
+      - name: pytest
+        env:
+          # Never pop a browser or a window on the runner.
+          IMURUN_NO_BROWSER: "1"
+          BROWSER: "none"
+        run: python -m pytest -q
+
+  engine:
+    uses: ./.github/workflows/engine.yml
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + pure wheel
+        env:
+          IMURUN_BUNDLE_ENGINE: "0"
+        run: |
+          python -m pip install build twine
+          python -m build --outdir dist/
+          twine check dist/*
+      - name: Smoke-install the wheel
+        run: python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-any.whl"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm pack (dry run)
+        run: npm pack --dry-run

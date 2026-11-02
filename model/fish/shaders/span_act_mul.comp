@@ -1,0 +1,25 @@
+#version 450
+// FISH layer span — o[t][i] = act(g[t][i]) * u[t][i], act = SiLU or GELU
+// (tanh approximation, as ops.cpp). Strides cover both the separate gate/up
+// layout and Phi-3's fused gate|up rows; o may alias g.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Arena { float a[]; };
+
+layout(push_constant) uniform PC {
+    uint n, n_tok;
+    uint g_off, g_stride, u_off, u_stride, o_off, o_stride;
+    uint gelu;
+} pc;
+
+void main() {
+    const uint gi = gl_GlobalInvocationID.x;
+    if (gi >= pc.n * pc.n_tok) return;
+    const uint t = gi / pc.n, i = gi % pc.n;
+    const float v = a[pc.g_off + t * pc.g_stride + i];
+    float act;
+    // tanh argument clamped: some drivers build tanh from exp and overflow to NaN
+    if (pc.gelu != 0u) act = 0.5 * v * (1.0 + tanh(clamp(0.7978845608028654 * (v + 0.044715 * v * v * v), -15.0, 15.0)));
+    else act = v / (1.0 + exp(-v));
+    a[pc.o_off + t * pc.o_stride + i] = act * a[pc.u_off + t * pc.u_stride + i];
+}

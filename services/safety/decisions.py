@@ -75,6 +75,22 @@ DANGEROUS_COMMANDS = (
     re.compile(r"\b(shutdown|stop-computer|restart-computer)\b", re.IGNORECASE),
     re.compile(r"\bset-executionpolicy\s+(unrestricted|bypass)", re.IGNORECASE),
     re.compile(r":\(\)\s*\{.*\};\s*:"),
+    # Added with the agentic tools (the model can now propose commands):
+    # wiping a home directory, piping a download into a shell, destroying
+    # shadow copies, opening the whole disk to everyone, adding users.
+    re.compile(r"\brm\s+-[a-z]*r[a-z]*\s+(~|\$home|/home\b|/users\b|/root\b)", re.IGNORECASE),
+    re.compile(r"\b(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z|da)?sh\b", re.IGNORECASE),
+    re.compile(r"\b(iwr|irm|invoke-webrequest|invoke-restmethod)\b.*\|\s*(iex|invoke-expression)\b", re.IGNORECASE),
+    re.compile(r"\bremove-item\b.*-recurse.*(\$env:userprofile|\$home|~[\\/]?\s*$)", re.IGNORECASE),
+    re.compile(r"\b(vssadmin|wbadmin)\b.*\bdelete\b", re.IGNORECASE),
+    re.compile(r"\bwmic\b.*shadowcopy.*delete", re.IGNORECASE),
+    re.compile(r"\bcipher\s+/w", re.IGNORECASE),
+    re.compile(r"\bchmod\s+-r\s+0?777\s+/(\s|$)", re.IGNORECASE),
+    re.compile(r"\bchown\s+-r\b.*\s/(\s|$)", re.IGNORECASE),
+    re.compile(r">\s*/dev/(sd|nvme|hd|disk)", re.IGNORECASE),
+    re.compile(r"\bnet\s+user\b.*\s/add\b", re.IGNORECASE),
+    re.compile(r"\bicacls\b.*\beveryone:\(?f", re.IGNORECASE),
+    re.compile(r"\btakeown\b.*\s[a-z]:\\?\s*(/r|$)", re.IGNORECASE),
 )
 
 
