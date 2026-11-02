@@ -16,6 +16,9 @@ endif()
 option(FISH_BUILD_SERVER "Build the standalone HTTP server" ON)
 option(FISH_BUILD_TESTS  "Build the C++ acceptance tests" ON)
 
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # ---------------------------------------------------------------------------
 # Core engine sources.
 #
@@ -173,6 +176,7 @@ endif()
 add_library(fish SHARED ${FISH_CORE})
 target_include_directories(fish PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_definitions(fish PRIVATE FISH_HAVE_X86_KERNELS=${FISH_X86})
+target_link_libraries(fish PUBLIC Threads::Threads)
 if(WIN32)
     # MinGW would otherwise emit libfish.dll; the product loads fish.dll.
     set_target_properties(fish PROPERTIES PREFIX "")
@@ -246,6 +250,7 @@ if(FISH_BUILD_TESTS)
             target_include_directories(fish_test_${name} PRIVATE include src)
             target_compile_definitions(fish_test_${name} PRIVATE FISH_HAVE_X86_KERNELS=${FISH_X86}
                                        FISH_HAVE_VULKAN=$<BOOL:${FISH_VK_ENABLED}>)
+            target_link_libraries(fish_test_${name} PRIVATE Threads::Threads)
             if(MINGW)
                 target_link_options(fish_test_${name} PRIVATE -static)
             elseif(FISH_VK_ENABLED)
