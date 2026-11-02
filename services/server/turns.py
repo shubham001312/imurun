@@ -67,6 +67,7 @@ class Turn:
     mode: str = "build"
     language: str = ""   # ISO 639-1 the user spoke (voice), "" = unknown/English
     queue_wait: float = 0.0
+    first_token_seconds: float = 0.0   # turn start -> first visible token (what the user waits for)
     prompt_tokens: int = 0
     generated_tokens: int = 0
     # Engine counters for the last generation of this turn (empty when the
@@ -84,6 +85,7 @@ class Turn:
         return {
             "id": self.id,
             "session_id": self.session_id,
+            "first_token_seconds": self.first_token_seconds,
             "language": self.language,
             "state": self.state,
             "started_at": self.started_at,
@@ -420,6 +422,8 @@ class TurnRunner:
                                 answer_parts.append(token)
                                 shown = guard.feed(token) if guard is not None else token
                                 if shown:
+                                    if not turn.first_token_seconds:
+                                        turn.first_token_seconds = round(max(0.0, time.time() - turn.started_at), 3)
                                     publish("token", {"turn_id": turn.id, "step": index, "token": shown})
                             if guard is not None:
                                 tail = guard.flush()
@@ -457,6 +461,8 @@ class TurnRunner:
                         )
                         if key in stats
                     }
+                    if turn.first_token_seconds:
+                        turn.stats["first_token_seconds"] = turn.first_token_seconds
                 else:
                     turn.generated_tokens += generated
 

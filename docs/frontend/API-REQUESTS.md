@@ -412,3 +412,52 @@ The original request follows.
    language, speak replies aloud, input device (`enumerateDevices`), speed.
    **"Online voices (sends text to Microsoft)"** for `onlineFallback` must be
    off by default and say exactly that.
+
+### 34. Dictation "Flow" layer (voice owner, 2026-11-03; P1 for 34.1-34.3)
+
+Server side is done and tested (`docs/voice/README.md` "Dictation"); the shell
+needs these to use it:
+
+1. **Show the cleaned text, keep the raw one.** `POST /api/voice/transcribe`
+   now returns `text` (cleaned: fillers removed, self-corrections resolved,
+   spoken punctuation, numbers) **and** `text_raw` (what Whisper wrote), plus
+   `cleanup: {applied, changes[], model: {used, reason, ms}}`. Put `text` in
+   the composer; a small "raw" toggle (or long-press) swaps in `text_raw`.
+   `?cleanup=0` turns the pass off per request; the setting is `voice.cleanup`.
+2. **Send the conversation as context.** Add a multipart field `context`
+   (or `?context=` URL-encoded) with a JSON list of the last 3-6 message
+   texts (`["...", "..."]` or `[{role, content}]`). Names in it (Rahul,
+   Qwen2.5, DeepSeek) bias recognition. Max 8 messages, 4000 chars each.
+3. **Streaming partials.** Record with `MediaRecorder.start(1500)` and post
+   each `dataavailable` blob, in order, to
+   `POST /api/voice/stream?id=<uuid>&seq=<0,1,2..>` (`Content-Type` of the
+   recorder; same id for the whole utterance; `&context=` on the first one).
+   Show `reply.partial.text` (also pushed as SSE `voice.partial`
+   `{id, seq, text, text_raw, stable, language, endpoint, audio_s}`) in grey
+   while recording; on stop, post the last blob with `&final=1` - the reply
+   (and SSE `voice.final`) is the full transcription and **replaces** the
+   partials. `endpoint: true` = 1.2 s of trailing silence (hands-free mode
+   may stop recording). `POST /api/voice/stream/cancel?id=` on Escape.
+   409 = chunk out of order (restart the stream). Partials only feel live
+   when the worker runs on the GPU (`status.gpu.cuda`, reply `device`); on
+   CPU each pass takes 4-6 s, so show them only if `device == "cuda"`.
+4. **Vocabulary editor** (Settings > Voice > "Words I use"): list/add/remove
+   via `GET /api/voice/vocabulary` and `POST /api/voice/vocabulary
+   {add: [...], remove: [...]}` (or `{vocabulary: [...]}` to replace). Show
+   `product_terms` (built in, read-only) and `prompt_preview`. Toggle
+   `voice.contextBiasing`.
+5. **"Fix this" button** on a dictated message (or on the composer right
+   after dictation): user selects the wrong words, types the right ones,
+   `POST /api/voice/correction {heard: "five 3", fixed: "Phi-3"}`. The server
+   replaces `heard` in future transcripts and adds `fixed` to the vocabulary
+   (it biases the recogniser too). List/remove corrections in the
+   vocabulary editor (`corrections[]`, `POST /api/voice/correction {remove: heard}`).
+6. **Settings additions** (`voice` section): `device` (Auto / GPU / CPU),
+   `sttModelGpu` (model when the GPU has room, default `large-v3-turbo`),
+   `sttModel` is now labelled "CPU model", `gpuIdleSeconds` (release VRAM
+   after idle, default 120), `cleanup`, `cleanupModel` ("Polish with the
+   loaded model, max 1 s - only when a model is loaded and idle", off by
+   default), `streamEndpointSeconds`. The first-run picker should no longer
+   overwrite `sttModel` on machines where `status.gpu.cuda` is true (GPU
+   users get `sttModelGpu`). `GET /api/voice/status` has `gpu: {cuda, reason,
+   free_mb, total_mb}` and `worker.on_gpu`.

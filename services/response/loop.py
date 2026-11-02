@@ -68,6 +68,9 @@ if TYPE_CHECKING:  # importing services.server at runtime is circular
 DEFAULT_MAX_STEPS = 6
 MAX_CALLS_PER_STEP = 3
 HISTORY_MESSAGES = 6
+# Below this prefill rate (tokens/s, last generation) the research planner
+# routes by heuristic instead of spending a generation (time to first token).
+PLANNER_MIN_PREFILL_TPS = 400.0
 LIVE_NUDGE = False  # see _needs_live_nudge
 _FAKE_RESULT_HEADER = re.compile(r"^\s*\[tool result[^\]]*\]\s*", re.IGNORECASE)
 
@@ -504,6 +507,21 @@ class AgentLoop:
         )
 
     # ------------------------------------------------------------- helpers
+    def _prefill_fast(self) -> bool:
+        """True when the loaded model's last measured prefill rate makes a
+        routing generation cheap (>= PLANNER_MIN_PREFILL_TPS tokens/s)."""
+        getter = getattr(self._raw_model, "stats", None)
+        if not callable(getter):
+            return False
+        try:
+            stats = getter() or {}
+            if hasattr(stats, "__await__"):  # an async client: unknown, be cheap
+                return False
+            rate = float(stats.get("prefill_tokens_per_second") or 0.0)
+        except Exception:  # noqa: BLE001 - unknown speed: route by heuristic
+            return False
+        return rate >= PLANNER_MIN_PREFILL_TPS
+
     def _offer(self, prompt: str = "") -> list:
         self._hidden_services = []
         if self._executor is None or self._max_steps < 2:
@@ -572,8 +590,12 @@ class AgentLoop:
             from ..skills.invoke import skills_prompt
 
             parts.append(skills_prompt(self._skills))
-        if prefetch_text:
-            parts.append(prefetch_text)
+        # The pre-fetched Context block changes every turn, so it must not sit
+        # in the system message: the engine caches the KV of the longest
+        # shared prefix, and a changing prefix cost a full prefill per turn
+        # (measured: 1,930 prompt tokens, 0 cached, 15 s before the first
+        # token on the 1B). It rides with the user prompt instead, after the
+        # stable system text and history.
         messages: list[dict] = [{"role": "system", "content": "\n\n".join(p for p in parts if p),
                                  "_kind": "system"}]
         if self._use_history and self._prior_messages:
@@ -586,7 +608,8 @@ class AgentLoop:
                     content = strip_think(content)  # R1: never feed old thoughts back
                 if content.strip():
                     messages.append({"role": role, "content": content, "_kind": "history"})
-        messages.append({"role": "user", "content": prompt, "_kind": "prompt"})
+        user_text = f"{prefetch_text}\n\n{prompt}" if prefetch_text else prompt
+        messages.append({"role": "user", "content": user_text, "_kind": "prompt"})
         return messages
 
     def _platform_line(self) -> str:
@@ -628,6 +651,13 @@ class AgentLoop:
                 # A small model is a bad router: it answered `web: true` to
                 # "What is the capital of France?". The regex router decides.
                 use_model = use_model and not self._compact
+                # The routing generation is a second prefill of a few hundred
+                # tokens plus ~60 generated ones, and it evicts the engine's KV
+                # prefix cache for the real prompt. On a model that prefills
+                # slowly (the 8B on this card: ~23 tok/s) that alone cost tens
+                # of seconds before the first token. Only a fast-prefilling
+                # model may route; unknown speed (first turn) routes by heuristic.
+                use_model = use_model and self._prefill_fast()
                 extra = {
                     "history": [m for m in self._prior_messages[-HISTORY_MESSAGES:]
                                 if m.get("role") in ("user", "assistant")],

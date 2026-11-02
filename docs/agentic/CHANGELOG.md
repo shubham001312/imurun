@@ -1,5 +1,31 @@
 # Agentic layer — changelog
 
+## 2026-11-03 — time to first token
+
+Symptom (owner, 8B): "the response is fast once it starts, but the first token
+takes 17, 30, even 60 seconds". Measured on the 1B with the full prompt: 1,930
+prompt tokens, 0 cached, 15 s prefill before the first token; the 8B prefills
+at ~23 tok/s with 19/32 layers on the GPU, so the same prompt is a minute.
+Three causes on the server side, all fixed here (engine prefill speed itself
+is the engine owner's current task, `docs/engine/REQUESTS.md`):
+
+- **The research planner's routing generation** was a second prefill of a few
+  hundred tokens plus ~60 generated tokens *and* it evicted the engine's KV
+  prefix cache for the real prompt (turn 2 showed `cached=0`). The model
+  planner now runs only when the last measured prefill rate is at least
+  `PLANNER_MIN_PREFILL_TPS` (400 tok/s, `AgentLoop._prefill_fast`); slower
+  or unknown → the heuristic + conceptual pre-filter route.
+- **The pre-fetched Context block sat inside the system message**, so any turn
+  that fetched something changed the prefix and paid a full prefill. It now
+  rides with the user prompt, after the stable system text and history
+  (`_initial_messages`), so the shared prefix stays cached.
+- `Turn.first_token_seconds` (turn start → first visible token) is on the turn
+  view and in `stats` so the UI and the benchmarks can show the number the
+  user actually waits for.
+- Still open: the system prompt is ~1,000 tokens even without persona or skills
+  (house style 328, tool catalogue 427 + 283 of tool instructions); a shorter
+  catalogue for slow-prefill models is a follow-up. Tests: `tests/test_ttft.py`.
+
 ## 2026-11-02 — reply language, dictated prompts
 
 - `POST /api/turns` accepts `language` (ISO 639-1 from `/api/voice/transcribe`);

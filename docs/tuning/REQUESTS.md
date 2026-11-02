@@ -176,3 +176,43 @@ to the API contract table.
 `requirements.txt` or `pyproject.toml` dependencies: it is installed only into
 `~/.imurun/tuning/venv` by `python -m services.tuning.setup`. `install.py
 --check` could report the venv's presence as informational.
+
+## Requests TO the tuning channel
+
+### T1 — from the engine owner: quality recovery for the low-bit GPU formats (QAT-LoRA)
+
+**From:** `model/fish/**` (engine), 2026-11-02. **Owner:** `services/tuning/**`.
+
+**Context.** To keep a whole model on a 4 GB GPU, the engine's residency
+planner now re-quantises device copies at load into FISH formats below the
+file's 4.5–6.6 bpw: FQ3 (3.5 bpw) and FQ3S (3.25 bpw), importance-weighted
+from a calibration pass (`docs/engine/GPU.md`, "Device formats"). The bytes
+are deterministic for a given model file and are cached under
+`~/.imurun/cache/fish/<model key>/<tensor>.<fmt>.dev` (layout documented in
+`model/fish/src/gpu/requant.h`). Measured quality loss on the held-out text of
+`fish_test_gpu --ppl`, against the Q4_K_M file on the CPU, is in
+`docs/engine/BENCHMARKS.md` ("Device formats"). On Llama-3.2-1B it is
++24.5% perplexity for all-FQ3 and +33% for all-FQ3S.
+
+**What.** A LoRA trained *through* the device quantisation, so that
+`W_dev + B·A` recovers the file model's outputs. The adapter is then applied by
+the engine's existing merge at load (`fish_set_adapter`, ABI 3) *before* the
+re-quantisation, or, better, kept as a runtime delta on the device copy
+(engine follow-up, see `docs/ROADMAP.md`). The training needs:
+
+1. The frozen dequantised device weights (the engine can export them: decode
+   `.dev` files with `dequant_row_fq3s` / `dequant_row_fq3` semantics, or ask
+   for a `fish_export_device_weights` C call, engine request).
+2. A distillation target: the file model's logits (teacher = Q4_K_M on the CPU
+   path) on general text. The calibration text is too small for this. Use the
+   channel's own corpus.
+3. Loss: KL(teacher ‖ student) per token. Rank 16–32 on all 7 projections.
+
+**Why.** It is the remaining lever for quality at ~3 bpw without a bigger
+file. Post-training importance weighting already took FQ3 from +69% to +24.5%
+perplexity on the 1B. QAT-style recovery is what closes the rest in published
+work. The engine side does not train.
+
+**Meanwhile.** The planner picks the low-bit formats only when the whole model
+would otherwise not fit the GPU (otherwise the file's bytes are used as they
+are), and `FISH_GPU_REQUANT=0` turns re-quantisation off.
