@@ -1,5 +1,12 @@
 # Engine changelog
 
+## 2026-11-02 — Linux link fix
+
+- `CMakeLists.txt`: `libfish.so` now links `Threads::Threads` (non-MinGW builds).
+  GitHub CI's manylinux_2_28 (glibc 2.28, GCC toolset 14) failed to link
+  `fish_server` with `undefined reference to pthread_create`; glibc < 2.34 keeps
+  pthreads in a separate library. No effect on the Windows static build.
+
 ## 2026-11-02 — LoRA adapters merged at load (ABI 3, request E1)
 
 Design: `ARCHITECTURE.md` → "LoRA adapters".

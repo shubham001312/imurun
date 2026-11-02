@@ -1,5 +1,15 @@
 # Agentic layer — bugs fixed
 
+## 2026-11-02 — macOS: the user's temp dir was "a system location"
+
+Symptom: 16 failures in GitHub CI on macOS only - every file/shell tool test
+got `Permission denied ... /private/var/folders/.../T/pytest-.../ws/a.txt is a
+system location`. Cause: macOS resolves the per-user temp dir to
+`/private/var/folders/...`, and `/private/var` is on `SYSTEM_PREFIXES`
+(`services/safety/decisions.py`). Fix: `TEMP_PREFIXES` (the process temp dir
+plus `/tmp`, `/var/tmp`, `/var/folders` and their `/private` forms) is checked
+first and is never a system location. Test: `test_temp_dirs_are_not_system_locations`.
+
 Symptom → cause → fix → where (line numbers as of 2026-10-31).
 
 1. **"Inappropriate answers about real-time data."**

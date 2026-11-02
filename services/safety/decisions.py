@@ -147,8 +147,29 @@ def _inside(path: str, root: str) -> bool:
     return candidate == base or candidate.startswith(base + os.sep)
 
 
+def _temp_prefixes() -> tuple[str, ...]:
+    """Scratch locations that sit under a system prefix but are the user's own:
+    the process temp dir (macOS: ``/private/var/folders/<..>/T``, which
+    ``/private/var`` would otherwise swallow - the CI runner hit exactly that),
+    plus the usual temp roots. A workspace there must stay writable."""
+    import tempfile
+
+    found = []
+    try:
+        found.append(os.path.realpath(tempfile.gettempdir()))
+    except Exception:  # noqa: BLE001 - no temp dir is not an error here
+        pass
+    found += ["/tmp", "/var/tmp", "/var/folders", "/private/tmp", "/private/var/tmp", "/private/var/folders"]
+    return tuple(dict.fromkeys(found))
+
+
+TEMP_PREFIXES = _temp_prefixes()
+
+
 def _system_path(path: str) -> bool:
     candidate = _norm(path)
+    if any(_inside(candidate, prefix) for prefix in TEMP_PREFIXES):
+        return False
     return any(candidate == _norm(prefix) or candidate.startswith(_norm(prefix) + os.sep) for prefix in SYSTEM_PREFIXES)
 
 

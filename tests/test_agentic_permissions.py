@@ -162,3 +162,19 @@ def test_bad_arguments_and_unknown_tool(env):
     executor = ToolExecutor(registry, policy=policy)
     assert "missing required" in executor.execute("file_read", {}, CallContext()).result.content
     assert "There is no tool" in executor.execute("nope", {}, CallContext()).result.content
+
+
+def test_temp_dirs_are_not_system_locations(monkeypatch):
+    """macOS puts the user's temp dir under /private/var; the CI runner's pytest
+    workspace was refused as "a system location" (16 failures on macOS)."""
+    from services.safety import decisions
+
+    monkeypatch.setattr(decisions, "SYSTEM_PREFIXES", ("/etc", "/usr", "/private/etc", "/private/var", "/var"))
+    monkeypatch.setattr(decisions, "TEMP_PREFIXES", ("/private/var/folders", "/var/folders", "/tmp", "/private/tmp"))
+    monkeypatch.setattr(decisions, "_norm", lambda p: p.rstrip("/"))
+    monkeypatch.setattr(decisions.os, "sep", "/")
+    assert not decisions._system_path("/private/var/folders/n6/hn37/T/pytest-0/ws/a.txt")
+    assert not decisions._system_path("/tmp/ws/notes.txt")
+    assert decisions._system_path("/private/var/db/x")
+    assert decisions._system_path("/private/etc/hosts")
+    assert decisions._system_path("/usr/bin/python")

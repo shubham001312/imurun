@@ -75,7 +75,10 @@ def test_server_starts_without_opening_anything():
     port = _free_port()
     proc = _spawn(["--no-open", "--port", str(port)], {"IMURUN_DATA_ROOT": str(ROOT / ".pytest-imurun-home")})
     try:
-        assert _wait_health(port), "server never answered /health"
+        if not _wait_health(port):
+            out, err = _stop(proc)
+            pytest.fail(f"server never answered /health (exit {proc.returncode})" + chr(10)
+                        + "--- stdout ---" + chr(10) + out + chr(10) + "--- stderr ---" + chr(10) + err)
         assert proc.poll() is None, "server exited early"
     finally:
         out, err = _stop(proc)

@@ -33,6 +33,7 @@ set(FISH_CORE
     src/ops.cpp
     src/threadpool.cpp
     src/model.cpp
+    src/calib.cpp
     src/tokenizer.cpp
     src/sampler.cpp
     src/specs.cpp
@@ -208,6 +209,11 @@ else()
         target_link_options(fish PRIVATE -static)
         target_link_options(fish PRIVATE $<$<CONFIG:Release>:-s>)
     else()
+        # The thread pool uses std::thread; glibc < 2.34 (manylinux_2_28) keeps
+        # pthread_create in libpthread, so link it explicitly (CI: undefined
+        # reference to `pthread_create` when linking fish_server against libfish.so).
+        find_package(Threads REQUIRED)
+        target_link_libraries(fish PUBLIC Threads::Threads)
         if(FISH_VK_ENABLED)
             target_link_libraries(fish PRIVATE ${CMAKE_DL_LIBS})   # dlopen of libvulkan
         endif()
