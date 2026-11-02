@@ -33,7 +33,6 @@ set(FISH_CORE
     src/ops.cpp
     src/threadpool.cpp
     src/model.cpp
-    src/calib.cpp
     src/tokenizer.cpp
     src/sampler.cpp
     src/specs.cpp

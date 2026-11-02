@@ -338,6 +338,17 @@ def get_engine():
 
 def main(argv=None):
     args = parse_args(argv)
+    # IMURUN_STARTUP_TRACE=<seconds>: dump every thread's stack to stderr if
+    # start-up has not finished by then (CI diagnostics for a hanging server;
+    # the launcher test sets it so a failure shows where the server stuck).
+    trace_after = os.environ.get("IMURUN_STARTUP_TRACE")
+    if trace_after:
+        try:
+            import faulthandler
+
+            faulthandler.dump_traceback_later(float(trace_after), repeat=False, exit=False)
+        except (ValueError, RuntimeError):
+            pass
     if args.get_engine:
         sys.exit(get_engine())
 

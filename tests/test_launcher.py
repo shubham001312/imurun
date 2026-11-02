@@ -73,7 +73,8 @@ def _stop(proc: subprocess.Popen) -> tuple[str, str]:
 
 def test_server_starts_without_opening_anything():
     port = _free_port()
-    proc = _spawn(["--no-open", "--port", str(port)], {"IMURUN_DATA_ROOT": str(ROOT / ".pytest-imurun-home")})
+    proc = _spawn(["--no-open", "--port", str(port)],
+                  {"IMURUN_DATA_ROOT": str(ROOT / ".pytest-imurun-home"), "IMURUN_STARTUP_TRACE": "18"})
     try:
         if not _wait_health(port):
             out, err = _stop(proc)
