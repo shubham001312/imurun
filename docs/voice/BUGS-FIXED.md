@@ -35,3 +35,38 @@ Format: symptom -> cause -> fix (file:line).
    `services/voice/engines.py:88`. A first version ran a separate
    `detect_language` pass on every request (+3 s); now the second decode
    happens only when needed.
+7. **Every FLEURS clip (and any IEEE-float WAV) failed with 415 "not a
+   readable WAV file (unknown format: 3)".** Cause: `wav_info` / `decode_16k`
+   used the stdlib `wave` module, which only reads integer PCM; float32 WAV
+   is what FLEURS ships and what Web Audio recorders that skip the int16 step
+   write, and WAVE_FORMAT_EXTENSIBLE headers failed too. Fix: our own RIFF
+   chunk parser (PCM 8/16/24/32-bit, float 32/64, extensible, streaming
+   headers with size 0) - `services/voice/audio.py:81`.
+8. **The GPU path failed with "Library cublas64_12.dll is not found or cannot
+   be loaded"** although `nvidia-cublas-cu12` was installed and
+   `os.add_dll_directory` pointed at it. Cause: CTranslate2 loads cuBLAS
+   lazily with the plain Windows search order, which ignores
+   `AddDllDirectory`. Fix: prepend `site-packages/nvidia/*/bin` to `PATH`
+   before the first CUDA call - `services/voice/gpu.py:75`.
+9. **3 s of room noise came back as "You" / "I'll see you next time."**
+   (whisper `small` and `large-v3-turbo`, VAD off; with VAD on, some loud
+   noise clips still passed VAD). Cause: Whisper's training-data
+   hallucinations on non-speech. Fix: Silero VAD with explicit parameters,
+   a digital-silence short cut, and a filter that drops known subtitle
+   phrases when the model was unsure or VAD kept < 1 s of speech -
+   `services/voice/engines.py:244`, `:279`.
+10. **A streamed WebM cut mid-cluster failed to decode** (every partial
+    before the last chunk). Cause: PyAV raises on the truncated last
+    cluster. Fix: keep the frames decoded before the error -
+    `services/voice/audio.py` `_decode_pyav`.
+11. **Whisper could take the GPU below the resource governor's VRAM headroom.**
+   Cause: `gpu.fits` used a fixed 300 MB headroom and the voice worker never
+   saw the governor's budget. Fix: `routes._govern` passes
+   `governor.budget().vram_headroom` (`services/voice/routes.py:50`) ->
+   `service._vram_headroom_mb` -> worker header `vram_headroom_mb` ->
+   `WhisperSTT._choose` / `gpu.fits` use the larger value
+   (`services/voice/engines.py:137`, `services/voice/gpu.py:131`).
+12. **Docs and comments cited `docs/voice/BENCHMARKS.md`, which never existed.**
+   Cause: previous agent was killed before writing it. Fix: references removed
+   or reworded as "not measured" (`cleanup.py:22`, `engines.py:36`, `gpu.py:28`,
+   `vocabulary.py:13`, CHANGELOG).

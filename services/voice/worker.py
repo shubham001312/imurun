@@ -15,8 +15,10 @@ payload length), a UTF-8 JSON header, then the payload bytes. One request in
 flight at a time (the client holds a lock). Requests::
 
     {"op": "ping"}
-    {"op": "transcribe", "model_dir", "threads", "language", "beam_size", "vad",
-     "content_type"} + audio bytes
+    {"op": "probe"}                       CUDA usable? free/total VRAM (NVML)
+    {"op": "transcribe", "model_dir", "cpu_model_dir", "threads", "language", "beam_size",
+     "vad", "content_type", "device", "compute_type", "prompt", "offset"} + audio bytes
+    {"op": "release_gpu"}                 drop a CUDA model (frees its VRAM)
     {"op": "speak", "model", "config", "threads", "speaker", "rate"} + UTF-8 text
     {"op": "unload"}
 
@@ -114,17 +116,33 @@ def main() -> int:
         op = header.get("op")
         try:
             if op == "ping":
+                cuda = {}
+                if hasattr(stt, "probe") and engines.has_module("ctranslate2"):
+                    try:
+                        cuda = stt.probe()
+                    except Exception as exc:  # noqa: BLE001 - never fail the handshake
+                        cuda = {"cuda": False, "reason": f"{type(exc).__name__}: {exc}"}
                 write_frame(channel_out, {"ok": True, "pid": os.getpid(), "priority": priority, "fake": fake,
                                           "whisper": fake or engines.has_module("faster_whisper"),
-                                          "piper": fake or engines.has_module("piper")})
+                                          "piper": fake or engines.has_module("piper"), "cuda": cuda})
+            elif op == "probe":
+                write_frame(channel_out, {"ok": True, **stt.probe()})
+            elif op == "release_gpu":
+                write_frame(channel_out, {"ok": True, "released": stt.release_gpu()})
             elif op == "transcribe":
                 result = stt.transcribe(payload, str(header.get("content_type") or ""),
                                         model_dir=str(header.get("model_dir") or ""),
+                                        cpu_model_dir=str(header.get("cpu_model_dir") or ""),
                                         threads=int(header.get("threads") or 2),
                                         language=str(header.get("language") or ""),
                                         beam_size=int(header.get("beam_size") or 1),
                                         vad=bool(header.get("vad", True)),
-                                        candidates=list(header.get("candidates") or []))
+                                        candidates=list(header.get("candidates") or []),
+                                        device=str(header.get("device") or "cpu"),
+                                        compute_type=str(header.get("compute_type") or "auto"),
+                                        prompt=str(header.get("prompt") or ""),
+                                        offset=float(header.get("offset") or 0.0),
+                                        vram_headroom_mb=int(header.get("vram_headroom_mb") or 0))
                 write_frame(channel_out, {"ok": True, **result})
             elif op == "speak":
                 audio, meta = tts.speak(payload.decode("utf-8"), model=str(header.get("model") or ""),
@@ -157,10 +175,19 @@ class WorkerClient:
     """Spawns the worker on demand, serialises requests, unloads when idle."""
 
     def __init__(self, *, cwd: Path, threads: int = 2, idle_seconds: float = 600.0,
-                 python: str | None = None, env: dict | None = None) -> None:
+                 python: str | None = None, env: dict | None = None, gpu_idle_seconds: float = 120.0) -> None:
         self._cwd = Path(cwd)
         self.threads = max(1, int(threads))
+        # Set by the server (services/voice/routes.get_service) to the resource
+        # governor's voice grant / release; None = always ``threads``.
+        self.thread_grant = None
+        self.thread_release = None
         self.idle_seconds = float(idle_seconds)
+        # A model on the GPU is dropped sooner than the process (VRAM is the
+        # FISH engine's first): the worker and its CPU voices stay.
+        self.gpu_idle_seconds = float(gpu_idle_seconds)
+        self.on_gpu = False
+        self.gpu_releases = 0
         self._python = python or sys.executable
         self._env = dict(env or {})
         self._lock = threading.Lock()
@@ -240,14 +267,35 @@ class WorkerClient:
             if not self.running:
                 self._spawn()
             header = dict(header)
+            granted = False
+            if "threads" not in header and self.thread_grant is not None:
+                # Shared CPU budget (services/resources): while a chat reply
+                # runs, voice gets the leftover - at least one thread.
+                try:
+                    header["threads"] = max(1, min(self.threads, int(self.thread_grant(self.threads))))
+                    granted = True
+                except Exception:  # noqa: BLE001 - the governor is advisory here
+                    pass
             header.setdefault("threads", self.threads)
-            reply, data = self._exchange(header, payload, timeout)
+            try:
+                reply, data = self._exchange(header, payload, timeout)
+            finally:
+                if granted and self.thread_release is not None:
+                    try:
+                        self.thread_release()
+                    except Exception:  # noqa: BLE001
+                        pass
             self._last_used = time.monotonic()
+            if header.get("op") == "transcribe" and reply.get("ok"):
+                self.on_gpu = reply.get("device") == "cuda"
+            elif header.get("op") == "release_gpu":
+                self.on_gpu = False
         if not reply.get("ok"):
             raise WorkerError(str(reply.get("error") or "voice worker error"), str(reply.get("kind") or "engine"))
         return reply, data
 
     def _kill(self) -> None:
+        self.on_gpu = False
         proc, self._proc = self._proc, None
         if proc is None:
             return
@@ -272,7 +320,21 @@ class WorkerClient:
     def _reap(self) -> None:
         while not self._closed:
             time.sleep(5.0)
-            if self.idle_seconds <= 0 or not self.running:
+            if not self.running:
+                continue
+            idle = time.monotonic() - self._last_used
+            if self.on_gpu and 0 < self.gpu_idle_seconds < idle and self._lock.acquire(blocking=False):
+                try:
+                    if self.running and self.on_gpu:
+                        LOG.info("voice model idle on the GPU for %.0fs: releasing VRAM", idle)
+                        self._exchange({"op": "release_gpu"}, b"", timeout=30.0)
+                        self.on_gpu = False
+                        self.gpu_releases += 1
+                except WorkerError:
+                    pass
+                finally:
+                    self._lock.release()
+            if self.idle_seconds <= 0:
                 continue
             if time.monotonic() - self._last_used > self.idle_seconds and self._lock.acquire(blocking=False):
                 try:
@@ -285,7 +347,8 @@ class WorkerClient:
     def status(self) -> dict:
         return {"running": self.running, "pid": self._proc.pid if self.running and self._proc else None,
                 "threads": self.threads, "idle_unload_s": self.idle_seconds, "starts": self.started,
-                "priority": self.info.get("priority", "")}
+                "priority": self.info.get("priority", ""), "on_gpu": self.on_gpu,
+                "gpu_idle_release_s": self.gpu_idle_seconds, "gpu_releases": self.gpu_releases}
 
 
 if __name__ == "__main__":

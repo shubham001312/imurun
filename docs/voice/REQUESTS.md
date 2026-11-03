@@ -43,7 +43,6 @@ threads field explains the 2 vs 4 trade-off. One request:
 
 ## Not built (yet)
 
-- Streaming dictation (`POST /api/voice/stream`, partials over SSE).
 - MMS-TTS (torch, separate venv) for languages Piper lacks (ta, gu, pa, kn).
 - Server-side voice activity detection for hands-free mode (Whisper's VAD
   filter is on, but the shell decides when recording stops).

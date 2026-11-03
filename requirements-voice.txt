@@ -13,3 +13,13 @@ numpy>=1.24
 
 # Optional, OFF by default, SENDS TEXT TO MICROSOFT when enabled (voice.onlineFallback):
 # edge-tts>=7.0
+
+# Optional GPU speech-to-text (NVIDIA, CUDA 12). CTranslate2 4.x (pulled by
+# faster-whisper 1.2) runs Whisper on CUDA 12 + cuDNN 9; the driver must support
+# CUDA 12 (any 525+ driver). Without these the worker uses the CPU automatically.
+#   Windows: the ctranslate2 wheel already ships cudnn64_9.dll; only cuBLAS is missing.
+#   Linux:   both are needed.
+# Verified 2026-11-03 on Windows 11, RTX 3050 Laptop 4 GB, driver 610.62:
+# nvidia-cublas-cu12 12.9.2.10 (+ nvidia-cuda-nvrtc-cu12, pulled in): 915 MB installed.
+# nvidia-cublas-cu12>=12.4,<13
+# nvidia-cudnn-cu12>=9.1,<10        # Linux only

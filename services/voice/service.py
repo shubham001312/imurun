@@ -20,16 +20,32 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import cleanup as cleanup_mod
 from . import download, online
 from .audio import AudioError, ffmpeg_path, sniff, wav_info
 from .catalogue import DEFAULT_VOICE, Catalogue
 from .languages import CORE, LANGUAGES, WHISPER_LANGUAGES, name, native_name, normalize, voice_language
 from .paths import VoicePaths
 from .system import SystemTTS
+from .stream import StreamManager
 from .text import MAX_TEXT, speakable
+from .vocabulary import build_prompt
 from .worker import WorkerClient, WorkerError
 
 LOG = logging.getLogger("imurun.voice")
+
+
+def stream_commit_after() -> float:
+    from . import stream
+
+    return stream.COMMIT_AFTER_S
+
+
+def stream_commit_guard() -> float:
+    from . import stream
+
+    return stream.COMMIT_GUARD_S
+
 
 STT_MODELS = ("tiny", "base", "small", "medium", "large-v3", "large-v3-turbo")
 MAX_AUDIO_BYTES = 32 * 1024 * 1024
@@ -41,9 +57,19 @@ DEFAULTS = {
     "lang": "", "voiceURI": "", "rate": 1, "sounds": True,
     "engine": "auto",               # shell: auto (server when available) | server | browser
     "sttEngine": "faster-whisper",  # faster-whisper | off
-    "sttModel": "small",            # tiny | base | small | medium | large-v3 | large-v3-turbo
+    "sttModel": "small",            # the CPU model: tiny | base | small | medium | large-v3 | large-v3-turbo
+    "sttModelGpu": "large-v3-turbo",  # the model when the GPU has room ("" = same as sttModel)
     "sttModelByLanguage": {},       # per language override: {"bn": "large-v3-turbo"} (REQUESTS F1)
     "sttBeamSize": 5,               # 1 = greedy: faster, but looped on Bengali in tests
+    "device": "auto",               # auto (CUDA when it fits, else CPU) | cuda | cpu
+    "gpuIdleSeconds": 120,          # drop the GPU model after this idle time (VRAM back to FISH); 0 = keep
+    "vocabulary": [],               # the user's words for context biasing ("Phi-3", "Rahul", ...)
+    "corrections": [],              # [{"heard": "five 3", "fixed": "Phi-3"}] from the "fix this" button
+    "contextBiasing": True,         # glossary prompt: corrections + vocabulary + conversation + product names
+    "cleanup": True,                # deterministic dictation clean-up (fillers, self-corrections, punctuation)
+    "cleanupModel": False,          # optional FISH pass over the cleaned text (only when loaded and idle)
+    "cleanupModelMs": 1000,         # its budget
+    "streamEndpointSeconds": 1.2,   # trailing silence that marks the end of a streamed utterance
     "ttsEngine": "auto",            # auto | piper | system | online
     "voices": {},                   # per language: {"hi": "piper:hi_IN-rohan-medium", ...}
     "autoDetectLanguage": True,
@@ -117,8 +143,11 @@ class VoiceService:
         cfg = self.config()
         self.worker = worker or WorkerClient(cwd=self.paths.tmp, threads=int(cfg["threads"]),
                                              idle_seconds=float(cfg["idleUnloadMinutes"]) * 60.0, python=python)
+        self.vram_headroom: Callable[[], int] | None = None   # bytes; set by routes._govern
         self._jobs: dict[str, download.Job] = {}
         self._jobs_lock = threading.Lock()
+        self._model_getter: Callable[[], object] | None = None   # the FISH model, for the clean-up pass
+        self.streams = StreamManager(self._stream_pass, self._emit)
 
     # ------------------------------------------------------------ config
 
@@ -138,6 +167,24 @@ class VoiceService:
             values["threads"] = 2
         if values.get("sttModel") not in STT_MODELS:
             values["sttModel"] = "small"
+        if values.get("sttModelGpu") not in STT_MODELS:
+            values["sttModelGpu"] = values["sttModel"]
+        if str(values.get("device") or "auto").lower() not in ("auto", "cuda", "cpu"):
+            values["device"] = "auto"
+        values["device"] = str(values.get("device") or "auto").lower()
+        values["vocabulary"] = [str(v).strip()[:60] for v in (values.get("vocabulary") or [])
+                                if isinstance(v, (str, int, float)) and str(v).strip()][:500] \
+            if isinstance(values.get("vocabulary"), list) else []
+        values["corrections"] = [{"heard": str(c.get("heard") or "")[:120], "fixed": str(c.get("fixed") or "")[:120]}
+                                 for c in (values.get("corrections") or []) if isinstance(c, dict)
+                                 and str(c.get("heard") or "").strip() and str(c.get("fixed") or "").strip()][-200:] \
+            if isinstance(values.get("corrections"), list) else []
+        for key, low, high, fallback in (("gpuIdleSeconds", 0, 86400, 120), ("cleanupModelMs", 100, 10000, 1000),
+                                         ("streamEndpointSeconds", 0.3, 10.0, 1.2)):
+            try:
+                values[key] = max(low, min(high, float(values.get(key))))
+            except (TypeError, ValueError):
+                values[key] = fallback
         by_lang = values.get("sttModelByLanguage")
         values["sttModelByLanguage"] = {
             normalize(k): str(v) for k, v in (by_lang.items() if isinstance(by_lang, dict) else ())
@@ -157,6 +204,8 @@ class VoiceService:
                 worker.idle_seconds = float(values.get("idleUnloadMinutes") or 0) * 60.0
             except (TypeError, ValueError):
                 pass
+            if hasattr(worker, "gpu_idle_seconds"):
+                worker.gpu_idle_seconds = float(values["gpuIdleSeconds"])
         return values
 
     def _emit(self, event: str, data: dict) -> None:
@@ -241,10 +290,15 @@ class VoiceService:
             "tts": {"available": tts_available, "engine": self._tts_engine_label(cfg, piper_reason),
                     "engines": tts_engines, "voices": voices, "format": "audio/wav"},
             "worker": self.worker.status() if hasattr(self.worker, "status") else {},
+            "gpu": self.gpu_info(),
+            "streams": self.streams.views(),
             "jobs": self.jobs(),
             "settings": {k: cfg[k] for k in ("replyInSameLanguage", "speakReplies", "autoDetectLanguage",
-                                              "onlineFallback", "ttsEngine", "sttModel", "sttModelByLanguage", "threads",
-                                              "idleUnloadMinutes", "inputDevice", "engine")},
+                                              "onlineFallback", "ttsEngine", "sttModel", "sttModelGpu",
+                                              "sttModelByLanguage", "threads", "device", "gpuIdleSeconds",
+                                              "idleUnloadMinutes", "inputDevice", "engine", "cleanup",
+                                              "cleanupModel", "contextBiasing")},
+            "vocabulary": {"words": len(cfg["vocabulary"]), "corrections": len(cfg["corrections"])},
             "paths": {"root": str(self.paths.root)},
         }
 
@@ -338,11 +392,57 @@ class VoiceService:
 
     # ------------------------------------------------------------ STT
 
-    def transcribe(self, audio: bytes, content_type: str = "", lang: str = "") -> dict:
-        cfg = self.config()
-        reason = self.stt_reason(cfg)
-        if reason:
-            raise VoiceUnavailable("stt_unavailable", reason)
+    def gpu_info(self) -> dict:
+        """What the worker reported about CUDA when it started ({} before)."""
+        info = getattr(self.worker, "info", None)
+        cuda = info.get("cuda") if isinstance(info, dict) else None
+        return dict(cuda) if isinstance(cuda, dict) else {}
+
+    def _plan(self, cfg: dict, language: str) -> dict:
+        """Which model(s) and device to ask the worker for.
+
+        GPU possible (worker reported CUDA, or not known yet): ``sttModelGpu``
+        (default large-v3-turbo) with ``sttModel`` as the CPU fallback the
+        worker switches to when the card is full. CPU only: ``sttModel``. A
+        forced language with an ``sttModelByLanguage`` entry uses that model
+        on either device. A missing GPU model is downloaded (when the worker
+        confirmed CUDA) while the CPU model serves - on the GPU if it fits.
+        """
+        by_lang = cfg.get("sttModelByLanguage") or {}
+        special = by_lang.get(language) if language else ""
+        cpu_model = special or cfg["sttModel"]
+        gpu_model = special or cfg.get("sttModelGpu") or cpu_model
+        preference = cfg.get("device") or "auto"
+        cuda = self.gpu_info().get("cuda")          # True / False / None (worker not started yet)
+        if preference == "cpu" or cuda is False:
+            return {"model": cpu_model, "cpu_model": "", "device": "cpu", "pending": None}
+        device = "cuda" if preference == "cuda" else "auto"
+        if gpu_model == cpu_model:
+            return {"model": cpu_model, "cpu_model": "", "device": device, "pending": None}
+        if self.whisper_installed(gpu_model):
+            return {"model": gpu_model, "cpu_model": cpu_model if self.whisper_installed(cpu_model) else "",
+                    "device": device, "pending": None}
+        pending = None
+        if cuda is True and cfg.get("autoInstall"):
+            job = self.install("whisper", gpu_model)
+            pending = {"model": gpu_model, "error": "model_downloading", "job": job.view(),
+                       "message": f"the GPU speech model '{gpu_model}' is downloading; '{cpu_model}' is used meanwhile"}
+        return {"model": cpu_model, "cpu_model": "", "device": device, "pending": pending}
+
+    def _vram_headroom_mb(self) -> int:
+        """The resource governor's VRAM headroom for this request (0 = no governor)."""
+        try:
+            return int((self.vram_headroom() if self.vram_headroom else 0) // (1024 * 1024))
+        except Exception:  # noqa: BLE001 - advisory
+            return 0
+
+    def prompt_for(self, cfg: dict, language: str, context=None) -> str:
+        if not cfg.get("contextBiasing", True):
+            return ""
+        return build_prompt(language=language, vocabulary=cfg.get("vocabulary"), context=context or [],
+                            corrections=cfg.get("corrections"))
+
+    def _validate_audio(self, audio: bytes, content_type: str, *, limit_seconds: bool = True) -> None:
         if not audio:
             raise VoiceInputError("empty audio body")
         if len(audio) > MAX_AUDIO_BYTES:
@@ -353,39 +453,56 @@ class VoiceService:
         if kind != "wav" and not self.formats()[kind]:
             raise VoiceUnavailable("decoder_unavailable",
                                    f"{kind} audio needs PyAV (pip install av) or ffmpeg on PATH; WAV works without either")
-        if kind == "wav":
+        if kind == "wav" and limit_seconds:
             try:
                 if wav_info(audio).duration > MAX_AUDIO_SECONDS:
                     raise VoiceInputError(f"audio longer than {MAX_AUDIO_SECONDS} s", 413)
             except AudioError as exc:
                 raise VoiceInputError(str(exc)) from exc
+
+    def transcribe(self, audio: bytes, content_type: str = "", lang: str = "", *, context=None,
+                   cleanup: bool | None = None, polish: bool | None = None, offset: float = 0.0,
+                   language_lock: str = "") -> dict:
+        cfg = self.config()
+        reason = self.stt_reason(cfg)
+        if reason:
+            raise VoiceUnavailable("stt_unavailable", reason)
+        self._validate_audio(audio, content_type)
         hint = normalize(lang) or normalize(cfg.get("lang"))
-        auto = bool(cfg.get("autoDetectLanguage"))
-        language = "" if auto else hint
+        auto = bool(cfg.get("autoDetectLanguage")) and not language_lock
+        language = language_lock or ("" if auto else hint)
         by_lang = cfg.get("sttModelByLanguage") or {}
-        # A forced language with its own model goes straight to that model;
-        # under auto-detection the default model runs first and a second
-        # pass with the language's model follows (REQUESTS F1).
-        size = by_lang.get(language) or cfg["sttModel"] if language else cfg["sttModel"]
+        plan = self._plan(cfg, language)
+        size = plan["model"]
         self._ensure_whisper(size, cfg)
         candidates = [normalize(x) for x in cfg.get("languages") or [] if normalize(x) in WHISPER_LANGUAGES]
         if auto and hint and hint in WHISPER_LANGUAGES and hint not in candidates:
             candidates.append(hint)
+        prompt = self.prompt_for(cfg, language, context)
+        beam = int(cfg.get("sttBeamSize") or 5)
         started = time.perf_counter()
-        try:
-            reply, _ = self.worker.request({
-                "op": "transcribe", "model_dir": str(self.paths.whisper_dir(size)), "language": language,
-                "beam_size": int(cfg.get("sttBeamSize") or 5), "vad": True, "content_type": content_type,
-                "candidates": candidates if auto else [],
-            }, audio)
-        except WorkerError as exc:
-            if exc.kind == "audio":
-                raise VoiceInputError(str(exc), 415) from exc
-            raise VoiceUnavailable("stt_failed", str(exc)) from exc
-        reply.pop("ok", None)
+
+        def request(model: str, cpu_model: str, device: str, forced: str, cands: list) -> dict:
+            try:
+                reply_, _ = self.worker.request({
+                    "op": "transcribe", "model_dir": str(self.paths.whisper_dir(model)),
+                    "cpu_model_dir": str(self.paths.whisper_dir(cpu_model)) if cpu_model else "",
+                    "language": forced, "beam_size": beam, "vad": True, "content_type": content_type,
+                    "candidates": cands, "device": device, "prompt": prompt, "offset": float(offset or 0.0),
+                    "vram_headroom_mb": self._vram_headroom_mb(),
+                }, audio)
+            except WorkerError as exc:
+                if exc.kind == "audio":
+                    raise VoiceInputError(str(exc), 415) from exc
+                raise VoiceUnavailable("stt_failed", str(exc)) from exc
+            reply_.pop("ok", None)
+            return reply_
+
+        reply = request(size, plan["cpu_model"], plan["device"], language, candidates if auto else [])
+        used = reply.get("model") or size
         code = normalize(reply.get("language"))
         wanted = by_lang.get(code) if auto else ""
-        if wanted and wanted != size:
+        if wanted and wanted != used:
             # The detected language has its own (usually larger) model: run it
             # with the language fixed. A missing model is reported, not fatal.
             try:
@@ -394,26 +511,190 @@ class VoiceService:
                 reply["model_pending"] = {"model": wanted, "error": exc.error, "message": str(exc)}
             else:
                 try:
-                    second, _ = self.worker.request({
-                        "op": "transcribe", "model_dir": str(self.paths.whisper_dir(wanted)), "language": code,
-                        "beam_size": int(cfg.get("sttBeamSize") or 5), "vad": True, "content_type": content_type,
-                        "candidates": [],
-                    }, audio)
-                except WorkerError as exc:
+                    second = request(wanted, "", plan["device"] if plan["device"] != "cpu" else "cpu", code, [])
+                except VoiceUnavailable as exc:
                     reply["model_pending"] = {"model": wanted, "error": "stt_failed", "message": str(exc)}
                 else:
-                    second.pop("ok", None)
                     reply = second
-                    size = wanted
-        reply["model"] = size
+                    used = reply.get("model") or wanted
+        if plan.get("pending") and "model_pending" not in reply:
+            reply["model_pending"] = plan["pending"]
+        reply["model"] = used
         reply["language"] = code
         reply["lang"] = code                      # the shell's field name (VOICE.md)
         reply["language_name"] = name(code)
         reply["duration_seconds"] = reply.get("duration", 0.0)
-        reply["engine"] = f"faster-whisper-{size}"
-        reply["elapsed"] = round(time.perf_counter() - started, 3)
+        reply["engine"] = f"faster-whisper-{used}"
+        reply["prompted"] = bool(prompt)
         reply["answer_language"] = code if cfg.get("replyInSameLanguage") else ""
+        self._finish_text(reply, cfg, cleanup=cleanup, polish=polish)
+        reply["elapsed"] = round(time.perf_counter() - started, 3)
         return reply
+
+    def _finish_text(self, reply: dict, cfg: dict, *, cleanup: bool | None, polish: bool | None) -> None:
+        """``text`` = cleaned dictation, ``text_raw`` = what Whisper wrote."""
+        raw = str(reply.get("text") or "")
+        reply["text_raw"] = raw
+        do_clean = cfg.get("cleanup", True) if cleanup is None else bool(cleanup)
+        info = {"applied": False, "changes": [], "model": {"used": False, "reason": "off"}}
+        text = raw
+        if do_clean and raw:
+            result = cleanup_mod.clean(raw, reply.get("language") or "en", corrections=cfg.get("corrections"))
+            text = result.text
+            info.update(applied=True, changes=result.changes)
+        do_polish = cfg.get("cleanupModel", False) if polish is None else bool(polish)
+        if do_polish and text and do_clean:
+            from .polish import polish as run_polish
+
+            model = None
+            try:
+                model = self._model_getter() if self._model_getter else None
+            except Exception:  # noqa: BLE001
+                model = None
+            outcome = run_polish(model, text, reply.get("language") or "en",
+                                 budget_ms=int(cfg.get("cleanupModelMs") or 1000),
+                                 vocabulary=[*(c["fixed"] for c in cfg.get("corrections") or []),
+                                             *(cfg.get("vocabulary") or [])])
+            info["model"] = {k: outcome[k] for k in ("used", "reason", "ms")}
+            if outcome["used"]:
+                text = outcome["text"]
+        reply["text"] = text
+        reply["cleanup"] = info
+
+    # ------------------------------------------------------------ streaming
+
+    def stream_chunk(self, sid: str, seq: int, chunk: bytes, content_type: str = "", lang: str = "", *,
+                     final: bool = False, context=None) -> dict:
+        cfg = self.config()
+        reason = self.stt_reason(cfg)
+        if reason:
+            raise VoiceUnavailable("stt_unavailable", reason)
+        sid = "".join(ch for ch in str(sid or "") if ch.isalnum() or ch in "-_")[:64]
+        if not sid:
+            raise VoiceInputError("stream id required (?id=...)")
+        session = self.streams.get(sid)
+        if session is None:
+            if not chunk:
+                raise VoiceInputError("the first chunk of a stream must carry audio")
+            if not sniff(chunk, content_type):
+                raise VoiceInputError("unrecognised audio format (send WebM/Opus, OGG or WAV chunks)", 415)
+            session = self.streams.open(sid, content_type, lang, context)
+        if chunk:
+            try:
+                self.streams.add(session, int(seq), chunk)
+            except ValueError as exc:
+                raise VoiceInputError(str(exc), 409) from exc
+            except OverflowError as exc:
+                raise VoiceInputError(str(exc), 413) from exc
+        if final:
+            result = self.streams.finish(session)
+            self._emit("voice.final", {"id": sid, "text": result.get("text", ""),
+                                       "text_raw": result.get("text_raw", ""), "language": result.get("language", "")})
+            return {**result, "id": sid, "final": True}
+        if (session.partial or {}).get("device") != "cpu":
+            # On the CPU a pass takes 4-6 s: after the first one shows that,
+            # no more partials - they would only delay the final pass.
+            self.streams.kick(session)
+        partial = dict(session.partial or {})
+        return {"id": sid, "seq": session.seq, "accepted": True, "final": False, "partial": partial or None}
+
+    def _stream_pass(self, session, final: bool) -> dict:
+        cfg = self.config()
+        with session.lock:
+            data = bytes(session.data)
+            offset = session.committed_offset
+            locked = session.language
+        reply = self.transcribe(data, session.content_type, session.lang, context=session.context,
+                                cleanup=True, polish=None if final else False, offset=offset,
+                                language_lock=locked)
+        session.passes += 1
+        segments = reply.get("segments") or []
+        duration = float(reply.get("duration") or 0.0)
+        if not locked and duration >= 2.0 and reply.get("text"):
+            session.language = normalize(reply.get("language"))
+        stable = session.stable_text()
+        if final:
+            raw = " ".join(t for t in (stable, reply.get("text_raw", "")) if t).strip()
+            reply["text_raw"] = raw
+            result = cleanup_mod.clean(raw, reply.get("language") or "en", corrections=cfg.get("corrections")) \
+                if cfg.get("cleanup", True) else None
+            if result is not None:
+                reply["text"] = result.text
+                reply.setdefault("cleanup", {})["changes"] = result.changes
+            else:
+                reply["text"] = raw
+            reply["stream"] = {"passes": session.passes, "committed_s": round(session.committed_offset, 2)}
+            return reply
+        if duration > stream_commit_after() and len(segments) > 1:
+            cut = duration - stream_commit_guard()
+            done = [seg for seg in segments if seg["end"] <= cut]
+            if done:
+                with session.lock:
+                    session.committed_text.append(" ".join(seg["text"] for seg in done).strip())
+                    session.committed_offset = offset + float(done[-1]["end"])
+                stable = session.stable_text()
+        last_end = float(segments[-1]["end"]) if segments else 0.0
+        endpoint = bool(segments) and (duration - last_end) >= float(cfg.get("streamEndpointSeconds") or 1.2)
+        tail = reply.get("text_raw", "")
+        if segments and stable and session.committed_offset > offset:
+            tail = " ".join(seg["text"] for seg in segments if offset + seg["end"] > session.committed_offset)
+        live = " ".join(t for t in (stable, tail) if t).strip()
+        cleaned = cleanup_mod.clean(live, reply.get("language") or "en", corrections=cfg.get("corrections")).text \
+            if cfg.get("cleanup", True) else live
+        return {"id": session.id, "seq": session.seq, "text": cleaned, "text_raw": live, "stable": stable,
+                "language": reply.get("language", ""), "endpoint": endpoint, "audio_s": round(offset + duration, 2),
+                "elapsed": reply.get("elapsed"), "device": reply.get("device", ""), "model": reply.get("model", ""),
+                "partial": True}
+
+    # ------------------------------------------------------------ vocabulary
+
+    def vocabulary(self) -> dict:
+        cfg = self.config()
+        from .vocabulary import PRODUCT_TERMS
+
+        return {"vocabulary": cfg["vocabulary"], "corrections": cfg["corrections"],
+                "product_terms": list(PRODUCT_TERMS), "context_biasing": bool(cfg.get("contextBiasing", True)),
+                "prompt_preview": self.prompt_for(cfg, "")}
+
+    def _write(self, values: dict) -> None:
+        if self._settings is None:
+            raise VoiceUnavailable("settings_unavailable", "no settings store")
+        self._settings.write("voice", values)
+
+    def update_vocabulary(self, add=None, remove=None, replace=None) -> dict:
+        cfg = self.config()
+        words = list(cfg["vocabulary"]) if replace is None else []
+        for item in (replace or []) + list(add or []):
+            term = " ".join(str(item or "").split())[:60]
+            if term and term.casefold() not in {w.casefold() for w in words}:
+                words.append(term)
+        drop = {str(x).casefold() for x in (remove or [])}
+        words = [w for w in words if w.casefold() not in drop][:500]
+        self._write({"vocabulary": words})
+        return self.vocabulary()
+
+    def add_correction(self, heard: str, fixed: str) -> dict:
+        heard, fixed = " ".join(str(heard or "").split())[:120], " ".join(str(fixed or "").split())[:120]
+        if not heard or not fixed:
+            raise VoiceInputError("send {heard, fixed}: what was transcribed and what it should be")
+        if heard.casefold() == fixed.casefold():
+            raise VoiceInputError("heard and fixed are the same")
+        cfg = self.config()
+        items = [c for c in cfg["corrections"] if c["heard"].casefold() != heard.casefold()]
+        items.append({"heard": heard, "fixed": fixed})
+        words = list(cfg["vocabulary"])
+        # The fixed spelling also biases recognition next time (the prompt).
+        for term in [fixed] if len(fixed.split()) <= 4 else []:
+            if term.casefold() not in {w.casefold() for w in words}:
+                words.append(term)
+        self._write({"corrections": items[-200:], "vocabulary": words[:500]})
+        return self.vocabulary()
+
+    def remove_correction(self, heard: str) -> dict:
+        cfg = self.config()
+        items = [c for c in cfg["corrections"] if c["heard"].casefold() != str(heard or "").casefold()]
+        self._write({"corrections": items})
+        return self.vocabulary()
 
     def _ensure_whisper(self, size: str, cfg: dict) -> None:
         if self.whisper_installed(size):

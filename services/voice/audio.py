@@ -66,18 +66,49 @@ class WavInfo:
     channels: int
     width: int
     frames: int
+    fmt: int = 1          # 1 = PCM integer, 3 = IEEE float
+    data_offset: int = 0
+    data_size: int = 0
 
     @property
     def duration(self) -> float:
         return self.frames / self.rate if self.rate else 0.0
 
 
+WAVE_FORMAT_PCM, WAVE_FORMAT_FLOAT, WAVE_FORMAT_EXTENSIBLE = 1, 3, 0xFFFE
+
+
 def wav_info(data: bytes) -> WavInfo:
-    try:
-        with wave.open(io.BytesIO(data), "rb") as src:
-            return WavInfo(src.getframerate(), src.getnchannels(), src.getsampwidth(), src.getnframes())
-    except (wave.Error, EOFError, struct.error) as exc:
-        raise AudioError(f"not a readable WAV file ({exc})") from exc
+    """Parse the RIFF header ourselves: the stdlib ``wave`` module rejects
+    IEEE-float WAV (format 3, what FLEURS and many Web Audio recorders write)
+    and WAVE_FORMAT_EXTENSIBLE (BUGS-FIXED #7)."""
+    if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise AudioError("not a readable WAV file (no RIFF/WAVE header)")
+    pos, fmt = 12, None
+    while pos + 8 <= len(data):
+        cid, size = data[pos:pos + 4], struct.unpack_from("<I", data, pos + 4)[0]
+        body = pos + 8
+        if cid == b"fmt " and size >= 16:
+            tag, channels, rate, _byte_rate, _align, bits = struct.unpack_from("<HHIIHH", data, body)
+            if tag == WAVE_FORMAT_EXTENSIBLE and size >= 40:
+                tag = struct.unpack_from("<H", data, body + 24)[0]   # first two bytes of the SubFormat GUID
+            fmt = (tag, channels, rate, bits)
+        elif cid == b"data":
+            if fmt is None:
+                raise AudioError("not a readable WAV file (data before fmt chunk)")
+            tag, channels, rate, bits = fmt
+            if tag not in (WAVE_FORMAT_PCM, WAVE_FORMAT_FLOAT):
+                raise AudioError(f"not a readable WAV file (unsupported format {tag})")
+            if channels < 1 or rate < 1 or bits not in (8, 16, 24, 32, 64):
+                raise AudioError("not a readable WAV file (bad fmt chunk)")
+            width = bits // 8
+            # A streaming recorder may leave size 0 / 0xFFFFFFFF: use what is there.
+            available = len(data) - body
+            size = available if size in (0, 0xFFFFFFFF) or size > available else size
+            frames = size // (width * channels)
+            return WavInfo(rate, channels, width, frames, tag, body, frames * width * channels)
+        pos = body + size + (size & 1)
+    raise AudioError("not a readable WAV file (no data chunk)")
 
 
 def ffmpeg_path() -> str:
@@ -144,12 +175,19 @@ def decode_16k(data: bytes, content_type: str = ""):
     kind = sniff(data, content_type)
     if kind == "wav":
         info = wav_info(data)
-        with wave.open(io.BytesIO(data), "rb") as src:
-            raw = src.readframes(info.frames)
-        if info.width == 2:
+        raw = data[info.data_offset:info.data_offset + info.data_size]
+        if info.fmt == WAVE_FORMAT_FLOAT and info.width in (4, 8):
+            samples = np.frombuffer(raw, dtype="<f4" if info.width == 4 else "<f8").astype(np.float32)
+            samples = np.nan_to_num(np.clip(samples, -1.0, 1.0))
+        elif info.width == 2:
             samples = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
         elif info.width == 4:
             samples = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2147483648.0
+        elif info.width == 3:
+            b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3).astype(np.int32)
+            ints = (b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16))
+            ints = np.where(ints & 0x800000, ints - 0x1000000, ints)
+            samples = ints.astype(np.float32) / 8388608.0
         elif info.width == 1:
             samples = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
         else:
@@ -187,9 +225,15 @@ def _decode_pyav(data: bytes):
     out = []
     with av.open(io.BytesIO(data)) as container:
         resampler = av.AudioResampler(format="s16", layout="mono", rate=TARGET_RATE)
-        for frame in container.decode(audio=0):
-            for item in resampler.resample(frame):
-                out.append(item.to_ndarray().reshape(-1))
+        try:
+            for frame in container.decode(audio=0):
+                for item in resampler.resample(frame):
+                    out.append(item.to_ndarray().reshape(-1))
+        except Exception:  # noqa: BLE001
+            # A streamed WebM is cut mid-cluster until the next chunk arrives:
+            # keep what decoded (the next pass re-decodes the whole stream).
+            if not out:
+                raise
         for item in resampler.resample(None):  # flush the resampler's tail
             out.append(item.to_ndarray().reshape(-1))
     if not out:

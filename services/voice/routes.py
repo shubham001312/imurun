@@ -8,7 +8,17 @@ binary (WAV/MP3) responses with engine headers.
 GET  /api/voice/status                 engines, model/voice install state, worker, jobs
 GET  /api/voice/voices[?refresh=1]     per-language matrix {language -> voices[]}
 GET  /api/voice/jobs                   download jobs
-POST /api/voice/transcribe[?lang=hi]   body: audio (WAV/WebM/OGG/MP3/FLAC/M4A) or multipart
+POST /api/voice/transcribe[?lang=hi&cleanup=0|1&polish=0|1&context=...]
+                                       body: audio (WAV/WebM/OGG/MP3/FLAC/M4A) or multipart
+                                       (fields: audio file, lang, context = JSON list of the
+                                       last messages or plain text) -> {text, text_raw, cleanup, ...}
+POST /api/voice/stream?id=S&seq=N[&final=1&lang=..]  body: the next audio chunk (MediaRecorder
+                                       timeslice); partials -> SSE voice.partial + the reply;
+                                       final=1 -> the full transcription (+ SSE voice.final)
+POST /api/voice/stream/cancel?id=S     drop a stream session
+GET  /api/voice/vocabulary             {vocabulary, corrections, product_terms, prompt_preview}
+POST /api/voice/vocabulary             {add: [...], remove: [...]} or {vocabulary: [...]} (replace)
+POST /api/voice/correction             {heard, fixed} (the "fix this" button) | {remove: heard}
 POST /api/voice/speak                  {text, language|lang, voice|voice_id, rate, raw} -> audio
 POST /api/voice/voices/install         {engine: whisper|piper, name}
 POST /api/voice/unload                 stop the worker now (frees the model RAM)
@@ -30,6 +40,24 @@ PREFIX = "/api/voice/"
 MAX_JSON = 256 * 1024
 
 
+def _govern(server: Any, service) -> None:
+    """Voice threads come out of the shared CPU budget (docs/resources/README.md)
+    and the worker's CPU counts as IMURUN's own load, not the user's."""
+    governor = getattr(server, "_governor", None)
+    worker = getattr(service, "worker", None)
+    if governor is None or worker is None or not hasattr(worker, "thread_grant"):
+        return
+    service.vram_headroom = lambda: governor.budget().vram_headroom
+    worker.thread_grant = governor.voice_threads
+    worker.thread_release = governor.release_voice
+
+    def pids():
+        proc = getattr(worker, "_proc", None)
+        return [proc.pid] if proc is not None and proc.poll() is None else []
+
+    governor.add_pids(pids)
+
+
 def get_service(server: Any):
     service = getattr(server, "_voice", None)
     if service is not None:
@@ -44,6 +72,10 @@ def get_service(server: Any):
                                    settings=getattr(server, "_settings", None),
                                    publish=getattr(events, "publish", None))
             server._voice = service
+            _govern(server, service)
+    if getattr(service, "_model_getter", None) is None and hasattr(service, "_model_getter"):
+        # The clean-up model pass uses the FISH model only if it is loaded.
+        service._model_getter = lambda: getattr(server, "_model", None)
     return service
 
 
@@ -77,6 +109,7 @@ def dispatch(server: Any, handler: Any, path: str) -> None:
                 return
             content_type = handler.headers.get("Content-Type", "")
             lang = (query.get("lang") or query.get("language") or [""])[0]
+            context = _context((query.get("context") or [""])[0])
             if content_type.lower().startswith("multipart/form-data"):
                 from .audio import AudioError, parse_multipart
 
@@ -85,7 +118,44 @@ def dispatch(server: Any, handler: Any, path: str) -> None:
                 except AudioError as exc:
                     raise VoiceInputError(str(exc)) from exc
                 lang = lang or fields.get("lang") or fields.get("language") or ""
-            handler._reply(200, service.transcribe(body, content_type, lang))
+                context = context or _context(fields.get("context") or "")
+            handler._reply(200, service.transcribe(body, content_type, lang, context=context,
+                                                   cleanup=_flag(query, "cleanup"), polish=_flag(query, "polish")))
+        elif method == "POST" and route == "stream":
+            body = _read(handler, MAX_AUDIO_BYTES)
+            if body is None:
+                return
+            sid = (query.get("id") or [""])[0]
+            try:
+                seq = int((query.get("seq") or ["0"])[0])
+            except ValueError as exc:
+                raise VoiceInputError("seq must be an integer") from exc
+            lang = (query.get("lang") or query.get("language") or [""])[0]
+            handler._reply(200, service.stream_chunk(sid, seq, body, handler.headers.get("Content-Type", ""), lang,
+                                                     final=bool(_flag(query, "final")),
+                                                     context=_context((query.get("context") or [""])[0])))
+        elif method == "POST" and route == "stream/cancel":
+            _read(handler, MAX_JSON)
+            handler._reply(200, {"ok": service.streams.cancel((query.get("id") or [""])[0])})
+        elif method == "GET" and route == "vocabulary":
+            handler._reply(200, service.vocabulary())
+        elif method == "POST" and route == "vocabulary":
+            payload = _json(handler)
+            if payload is None:
+                return
+            replace = payload.get("vocabulary") if isinstance(payload.get("vocabulary"), list) else None
+            add = payload.get("add") if isinstance(payload.get("add"), list) else []
+            remove = payload.get("remove") if isinstance(payload.get("remove"), list) else []
+            handler._reply(200, service.update_vocabulary(add=add, remove=remove, replace=replace))
+        elif method == "POST" and route == "correction":
+            payload = _json(handler)
+            if payload is None:
+                return
+            if payload.get("remove"):
+                handler._reply(200, service.remove_correction(str(payload["remove"])))
+            else:
+                handler._reply(200, service.add_correction(str(payload.get("heard") or ""),
+                                                           str(payload.get("fixed") or "")))
         elif method == "POST" and route == "speak":
             payload = _json(handler)
             if payload is None:
@@ -120,6 +190,38 @@ def dispatch(server: Any, handler: Any, path: str) -> None:
         LOG.exception("voice route %s failed", path)
         handler._reply(503, {"error": "voice_error", "reason": f"{type(exc).__name__}: {exc}",
                              "message": "the voice layer failed; see the server log"})
+
+
+def _flag(query: dict, key: str) -> bool | None:
+    value = (query.get(key) or [""])[0].lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return None
+
+
+def _context(raw: str) -> list:
+    """The caller's recent messages: a JSON list of strings / {content}, or plain text."""
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    if raw[:1] in "[{":
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            data = [data]
+        if isinstance(data, list):
+            out = []
+            for item in data[-8:]:
+                if isinstance(item, dict):
+                    item = item.get("content") or item.get("text") or ""
+                if isinstance(item, str) and item.strip():
+                    out.append(item[:4000])
+            return out
+    return [raw[:4000]]
 
 
 def _read(handler: Any, limit: int) -> bytes | None:

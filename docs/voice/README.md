@@ -65,6 +65,32 @@ Not tested: macOS `say`, Linux `espeak-ng` (code paths written, no machine),
 the online `edge-tts` engine against the real service (only with a fake),
 real microphone audio, noisy rooms, code-switched speech (Hinglish).
 
+## Dictation pipeline (what `POST /api/voice/transcribe` and `/stream` run)
+
+audio -> `audio.decode_16k` -> Whisper (`engines.WhisperSTT`, VAD, glossary
+prompt from `vocabulary.build_prompt`) -> `cleanup.clean` (fillers, stutters,
+self-corrections, spoken punctuation, English numbers, user corrections) ->
+optional `polish` (the loaded FISH model, off by default, only when idle, cut
+at `cleanupModelMs`). The reply has `text` (final), `text_raw` (Whisper's) and
+`cleanup` (`applied`, `changes`, `model`). Query: `cleanup=0|1`, `polish=0|1`,
+`context=...`.
+
+- `POST /api/voice/stream?id=S&seq=N[&final=1&lang=..]` takes MediaRecorder
+  chunks; partials arrive as SSE `voice.partial`, the end as `voice.final`
+  (also in the final POST reply). `POST /api/voice/stream/cancel?id=S`.
+- `GET/POST /api/voice/vocabulary`, `POST /api/voice/correction`.
+- No STT engine installed: 503 `stt_unavailable` with the install hint in
+  `reason` (tested), never a traceback.
+- GPU: CUDA only when CTranslate2 sees a device, cuBLAS 12 loads and free VRAM
+  >= model need + max(300 MB, the resource governor's VRAM headroom).
+- `python -m services.voice.eval` is a developer harness (WER/CER on a
+  dataset directory you supply); the server does not use it.
+
+Not measured: WER of cleanup/prompting on real speech sets, streaming latency
+on real microphone audio. Settings `cleanup`, `cleanupModel`, `cleanupModelMs`,
+`vocabulary`, `corrections`, `contextBiasing`, `sttModelGpu`, `device`,
+`gpuIdleSeconds`, `streamEndpointSeconds` are defined in `service.DEFAULTS`.
+
 ## Capability matrix
 
 | Language | STT | TTS offline (Piper) | TTS system voice | TTS online (opt-in) | Tested |

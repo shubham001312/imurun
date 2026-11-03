@@ -370,8 +370,9 @@ def test_speech_model_per_language(api, monkeypatch):
     code, body, _ = call(server, "POST", "/api/voice/transcribe?lang=bn", _tone(), "audio/wav")
     assert code == 200 and body["model"] == "large-v3-turbo" and body["engine"] == "faster-whisper-large-v3-turbo"
     assert len(worker.calls) == 1 and worker.calls[0][0]["model_dir"].endswith("large-v3-turbo")
-    # Auto-detect: default model first, then a second pass with the language fixed.
-    server._settings.write("voice", {"autoDetectLanguage": True})
+    # Auto-detect on a CPU-only machine: default model first, then a second
+    # pass with the language fixed. (On a GPU, large-v3-turbo is the default.)
+    server._settings.write("voice", {"autoDetectLanguage": True, "device": "cpu"})
     worker.calls.clear()
     worker.detect = "bn"
     code, body, _ = call(server, "POST", "/api/voice/transcribe", _tone(), "audio/wav")
