@@ -37,7 +37,7 @@ FISH_TOKEN_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_v
 
 # The ABI this module was written against. Older libraries still load; the
 # newer fields are simply reported as zero.
-EXPECTED_ABI = 3
+EXPECTED_ABI = 4
 
 
 class FishStats(ctypes.Structure):
@@ -68,6 +68,12 @@ class FishStats(ctypes.Structure):
         ("draft_accepted", ctypes.c_int),
         ("draft_active", ctypes.c_int),
         ("gpu_mix", ctypes.c_char * 160),
+        # ABI 4
+        ("placement", ctypes.c_char * 320),
+        ("load_profile", ctypes.c_char * 400),
+        ("vram_total", ctypes.c_ulonglong),
+        ("vram_free", ctypes.c_ulonglong),
+        ("vram_headroom", ctypes.c_ulonglong),
     ]
 
 
@@ -202,6 +208,10 @@ class FishNativeClient:
         cfg_adapter = getattr(config, "adapter_path", None)
         self._adapter_path: Optional[Path] = Path(cfg_adapter) if cfg_adapter else None
         self._adapter_scale = float(getattr(config, "adapter_scale", 1.0) or 1.0)
+        # Resource governor (services/resources): engine knobs for each load
+        # and the thread target of each generation. None = engine defaults.
+        self.resource_hook = None
+        self._threads_applied: Optional[int] = None
 
     # ------------------------------------------------------------------ state
 
@@ -300,6 +310,9 @@ class FishNativeClient:
                                                    ctypes.POINTER(ctypes.c_char_p),
                                                    ctypes.POINTER(ctypes.c_char_p), ctypes.c_int]
             lib.fish_count_chat_tokens.restype = ctypes.c_int
+        if hasattr(lib, "fish_set_threads"):  # requested: docs/engine/REQUESTS.md R1
+            lib.fish_set_threads.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.fish_set_threads.restype = ctypes.c_int
         if hasattr(lib, "fish_generate_chat"):
             lib.fish_generate_chat.argtypes = [ctypes.c_void_p,
                                                ctypes.POINTER(ctypes.c_char_p),
@@ -327,6 +340,7 @@ class FishNativeClient:
                 lib = self._lib or ctypes.CDLL(str(self._library_path))
                 if self._lib is None:
                     self._bind(lib)
+                self._apply_load_budget()
                 ctx = lib.fish_create()
                 if not ctx:
                     self._error = "fish_create failed"
@@ -355,6 +369,7 @@ class FishNativeClient:
                 self._last_used = time.time()
                 self._default_repeat = self._repeat_default_for_loaded()
                 self._attach_draft()
+                self._note_engine_threads()
                 logger.info(
                     "FISH %s (abi %d) loaded %s with %s kernels",
                     lib.fish_version().decode(), self._abi,
@@ -369,6 +384,71 @@ class FishNativeClient:
                 self._error = f"FISH initialisation failed: {exc}"
                 logger.warning(self._error, exc_info=True)
                 return False
+
+    # Engine knobs read at load: FISH_THREADS (thread-pool size, fixed for the
+    # process once the pool exists), FISH_RAM_BUDGET_MB (layer placement),
+    # FISH_VRAM_HEADROOM_MB (VRAM kept free). Explicit FishConfig values win
+    # over the governor; a value exported in the shell before start wins over both.
+    _CONFIG_KNOBS = (("threads", "FISH_THREADS"), ("ram_budget_mb", "FISH_RAM_BUDGET_MB"),
+                     ("vram_headroom_mb", "FISH_VRAM_HEADROOM_MB"))
+    _SHELL_KNOBS = frozenset(k for _a, k in _CONFIG_KNOBS if os.environ.get(k))
+
+    def _apply_load_budget(self) -> None:
+        env: dict = {}
+        hook = self.resource_hook
+        if hook is not None:
+            try:
+                env.update(hook.load_env() or {})
+            except Exception:  # noqa: BLE001 - a broken governor keeps engine defaults
+                logger.debug("resource governor load_env failed", exc_info=True)
+        for attr, key in self._CONFIG_KNOBS:
+            try:
+                value = int(getattr(self.config, attr, 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                env[key] = str(value)
+        for key, value in env.items():
+            if key not in self._SHELL_KNOBS:
+                os.environ[key] = str(value)
+
+    def _note_engine_threads(self) -> None:
+        hook = self.resource_hook
+        if hook is None or not hasattr(hook, "note_engine"):
+            return
+        try:
+            s = FishStats()
+            self._lib.fish_get_stats(self._ctx, ctypes.byref(s))
+            hook.note_engine(pool_threads=int(s.n_threads) or None,
+                             can_retarget=hasattr(self._lib, "fish_set_threads"))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _begin_generation(self) -> None:
+        """Caller holds ``_gen_lock``. Apply the governor's thread target when
+        the engine can change it per generation (docs/engine/REQUESTS.md R1)."""
+        hook = self.resource_hook
+        if hook is None:
+            return
+        try:
+            n = int(hook.before_generate())
+        except Exception:  # noqa: BLE001
+            return
+        if n > 0 and hasattr(self._lib, "fish_set_threads") and n != self._threads_applied:
+            try:
+                if self._lib.fish_set_threads(self._ctx, n) == 0:
+                    self._threads_applied = n
+                    hook.note_engine(applied=n)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _end_generation(self) -> None:
+        hook = self.resource_hook
+        if hook is not None:
+            try:
+                hook.after_generate()
+            except Exception:  # noqa: BLE001
+                pass
 
     # Below this many parameters the repeat penalty defaults to off. Measured
     # on Llama-3.2-1B Q4_K_M (2026-11-01, 4 runs x 5 sums, temp 0.35): penalty
@@ -659,6 +739,13 @@ class FishNativeClient:
                 "gpu_bytes": s.gpu_bytes,
                 "gpu": (s.gpu_name or b"").decode("utf-8", "replace"),
                 "mix": (s.gpu_mix or b"").decode("utf-8", "replace"),
+                # ABI 4: the residency planner's decision (or why it did not
+                # run), per-phase load seconds and live VRAM (any vendor).
+                "planner": (s.placement or b"").decode("utf-8", "replace"),
+                "load_profile": (s.load_profile or b"").decode("utf-8", "replace"),
+                "vram_total_bytes": s.vram_total,
+                "vram_free_bytes": s.vram_free,
+                "vram_headroom_bytes": s.vram_headroom,
             },
             "speculative": {
                 "active": bool(s.draft_active),
@@ -740,11 +827,15 @@ class FishNativeClient:
             if not self.load():
                 raise RuntimeError(self._error or "FISH not loaded")
             self._last_used = time.time()
-            rc = self._lib.fish_generate(
-                self._ctx, prompt.encode("utf-8"), 0,
-                p["max_tokens"], p["temperature"], p["top_k"], p["top_p"],
-                p["repeat_penalty"], callback, None,
-            )
+            self._begin_generation()
+            try:
+                rc = self._lib.fish_generate(
+                    self._ctx, prompt.encode("utf-8"), 0,
+                    p["max_tokens"], p["temperature"], p["top_k"], p["top_p"],
+                    p["repeat_penalty"], callback, None,
+                )
+            finally:
+                self._end_generation()
             self._last_used = time.time()
             if rc < 0:
                 self._raise_last_error("generation failed")
@@ -759,20 +850,24 @@ class FishNativeClient:
             if not self.load():
                 raise RuntimeError(self._error or "FISH not loaded")
             self._last_used = time.time()
-            if hasattr(self._lib, "fish_generate_chat"):
-                roles, contents, n = self._message_arrays(messages)
-                rc = self._lib.fish_generate_chat(
-                    self._ctx, roles, contents, n,
-                    p["max_tokens"], p["temperature"], p["top_k"], p["top_p"],
-                    p["repeat_penalty"], callback, None,
-                )
-            else:  # older engine: render text, template already carries BOS
-                prompt = self.chat_prompt(messages)
-                rc = self._lib.fish_generate(
-                    self._ctx, prompt.encode("utf-8"), 0,
-                    p["max_tokens"], p["temperature"], p["top_k"], p["top_p"],
-                    p["repeat_penalty"], callback, None,
-                )
+            self._begin_generation()
+            try:
+                if hasattr(self._lib, "fish_generate_chat"):
+                    roles, contents, n = self._message_arrays(messages)
+                    rc = self._lib.fish_generate_chat(
+                        self._ctx, roles, contents, n,
+                        p["max_tokens"], p["temperature"], p["top_k"], p["top_p"],
+                        p["repeat_penalty"], callback, None,
+                    )
+                else:  # older engine: render text, template already carries BOS
+                    prompt = self.chat_prompt(messages)
+                    rc = self._lib.fish_generate(
+                        self._ctx, prompt.encode("utf-8"), 0,
+                        p["max_tokens"], p["temperature"], p["top_k"], p["top_p"],
+                        p["repeat_penalty"], callback, None,
+                    )
+            finally:
+                self._end_generation()
             self._last_used = time.time()
             if rc < 0:
                 self._raise_last_error("generation failed")
