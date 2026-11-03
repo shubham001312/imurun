@@ -168,13 +168,18 @@ used as a checkout. The macOS and Linux branches (Vulkan paths, `python3.x` look
     start.py install.py window.py requirements*.txt
     services/**  model/*.py  frontend/design-lab/**  docs/connectors/**
     bin/fish.dll | libfish.so | libfish.dylib    (platform wheels only)
-~/.imurun/                                  (or IMURUN_DATA_ROOT)
-    install-state.json  settings/  secrets/  sessions/  runtime/api.json
-    models/             model downloads for an installed copy
-    bin/                engine from --get-engine
-    logs/install.log    pip and build output
-    venv/               only for the npm launcher
-    voice/  tuning/     voice models; tuning venv and runs
+~/.imurun/                                  (or IMURUN_DATA_ROOT) - created by install.py,
+    install-state.json                      re-checked on every start (ensure_home_layout)
+    settings/   secrets/*  sessions/*  runtime/*   (* = 0700 on POSIX)
+    models/  models/.cache/                 model downloads for an installed copy
+    bin/                                    engine from --get-engine
+    cache/fish/                             engine importance + re-quantised bytes
+    logs/install.log                        pip and build output
+    skills/  tools/  workspace/  feedback/  agent skills, tool state, files, tuning signals
+    voice/                                  speech models and voices
+    tuning/{base,built,datasets,runs}/      tuning venv (tuning/venv), inputs, outputs
+    tmp/
+    venv/                                   only for the npm launcher
 ```
 
 ## Quick start

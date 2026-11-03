@@ -701,6 +701,62 @@ def data_root() -> Path:
     return Path(env).expanduser() if env else Path.home() / ".imurun"
 
 
+# The user data folder. Every subfolder the app writes into is created up front
+# (idempotent: existing folders are left alone) so a fresh machine never fails
+# on a missing directory and a user can see the layout before any data lands.
+# Private folders (secrets, runtime, sessions) get mode 0700 on POSIX; on
+# Windows the profile folder is already private to the user.
+HOME_DIRS: tuple[tuple[str, bool], ...] = (
+    ("models", False),        # downloaded GGUF files (+ models/.cache)
+    ("models/.cache", False),
+    ("bin", False),           # downloaded engine library (--get-engine)
+    ("sessions", True),       # chats; each session's memory lives in its JSON
+    ("settings", False),      # settings sections (JSON per section)
+    ("secrets", True),        # connector tokens, OAuth client secrets
+    ("runtime", True),        # api.json: port + token of the running server
+    ("cache", False),
+    ("cache/fish", False),    # engine importance + re-quantised bytes cache
+    ("logs", False),
+    ("skills", False),
+    ("tools", False),
+    ("workspace", False),     # files the agent may touch
+    ("feedback", False),      # thumbs/teach signals for tuning
+    ("voice", False),         # speech models and voices
+    ("tuning", False),
+    ("tuning/base", False),
+    ("tuning/built", False),
+    ("tuning/datasets", False),
+    ("tuning/runs", False),
+    ("tmp", False),
+)
+
+
+def ensure_home_layout(root: Path | None = None) -> dict:
+    """Create the data folder tree under ``root`` (default ``data_root()``).
+
+    Returns ``{"root", "created": [...], "present": [...], "failed": {name: error}}``.
+    Cheap enough for every start (a stat per folder when everything exists).
+    """
+    base = Path(root) if root is not None else data_root()
+    out: dict = {"root": str(base), "created": [], "present": [], "failed": {}}
+    for name, private in HOME_DIRS:
+        path = base / name
+        try:
+            if path.is_dir():
+                out["present"].append(name)
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+                out["created"].append(name)
+            if private and os.name != "nt":
+                try:
+                    os.chmod(path, 0o700)
+                except OSError as exc:
+                    out["failed"][name] = f"chmod: {exc}"
+        except OSError as exc:
+            out["failed"][name] = str(exc)
+    return out
+
+
 def user_engine_dir() -> Path:
     """Where ``download_engine`` puts the library (outside site-packages)."""
     return data_root() / "bin"
@@ -1225,6 +1281,9 @@ def quick_check() -> list[str]:
     miss = missing_modules()
     if miss:
         reasons.append("missing Python packages: " + ", ".join(miss))
+    home = ensure_home_layout()
+    if home["failed"]:
+        reasons.append("data folder incomplete: " + ", ".join(f"{k} ({v})" for k, v in home["failed"].items()))
     if not frontend_index().is_file():
         reasons.append(f"frontend assets missing ({frontend_index()})")
     st = env_state()
@@ -1295,6 +1354,12 @@ def run_setup(*, python: str, window: bool, voice: bool, tuning: bool, force: bo
     prev = {} if force else env_state()
     version_changed = prev.get("imurun") != app_version()
     total = 6 if tuning else 5
+    home = ensure_home_layout()
+    if home["failed"]:
+        ui.fail("Data folder: could not create " + ", ".join(f"{k} ({v})" for k, v in home["failed"].items()))
+        return 1
+    ui.ok(f"Data folder {home['root']}: " + (f"created {len(home['created'])} folder(s)"
+          if home["created"] else "complete") + f", {len(home['present']) + len(home['created'])} in place")
     ui.step(1, total, "Python packages")
     if force or missing_modules():
         try:
@@ -1359,6 +1424,7 @@ def run_setup(*, python: str, window: bool, voice: bool, tuning: bool, force: bo
         "tuning": tuning_state,
         "engine": engine,
         "gpu": gpu,
+        "home": {"root": home["root"], "folders": len(home["present"]) + len(home["created"])},
     }
     path = write_env_state(entry)
     if path:
@@ -1392,6 +1458,11 @@ def doctor(port: int = 8732) -> int:
     report_gpu(gpu_report())
     root = data_root()
     ui.ok(f"home dir {ui.c(str(root), 'grey')}")
+    home = ensure_home_layout(root)
+    (ui.ok if not home["failed"] else ui.fail)(
+        f"data folder {ui.c(str(root), 'grey')}: {len(home['present']) + len(home['created'])} folders"
+        + (f", created {len(home['created'])} now" if home["created"] else "")
+        + (", FAILED: " + ", ".join(home["failed"]) if home["failed"] else ""))
     models = root / "models" if INSTALLED else ROOT / "models"
     count = len(list(models.glob("*.gguf"))) if models.is_dir() else 0
     ui.ok(f"models dir {ui.c(str(models), 'grey')} ({count} .gguf)")

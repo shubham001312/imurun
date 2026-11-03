@@ -1,5 +1,16 @@
 # Setup / packaging changelog
 
+## 2026-11-03 — data folder created up front
+
+- `install.py`: `HOME_DIRS` + `ensure_home_layout()` create the whole `~/.imurun` tree
+  (models, sessions, settings, secrets, runtime, cache/fish, logs, skills, tools, workspace,
+  feedback, voice, tuning/{base,built,datasets,runs}, tmp) idempotently - existing folders
+  are left alone, private ones get 0700 on POSIX. Runs as the first thing in setup, on every
+  start inside `quick_check()` (self-heals a deleted folder; only a folder that cannot be
+  created is a reason to stop), and `imurun doctor` reports the count. Recorded as `home` in
+  `install-state.json`. Owner ask: "it should properly create the folder where all the memory
+  and the other parts are stored, and cross-check whether it is already there."
+
 ## 0.3.0 (unreleased) — 2026-11-03: one command installs and runs everything
 
 ### Added
