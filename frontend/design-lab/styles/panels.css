@@ -128,3 +128,19 @@
   .palette-kind { display: none; }
   .shortcut-row { grid-template-columns: 1fr; gap: 4px; }
 }
+
+/* Hardware card + topbar chip (hardware.js). */
+.hardware-root { margin-bottom: 12px; }
+.hw-row { display: grid; gap: 6px; padding: 8px 0; }
+.hw-row .muted { font-size: 11px; }
+.hw-preset { display: grid; gap: 6px; padding-top: 10px; }
+.hw-seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.hw-chip {
+  display: inline-flex; align-items: center; padding: 4px 9px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2);
+  color: var(--muted); font: 11px/1 var(--mono); letter-spacing: .04em; cursor: pointer; white-space: nowrap;
+}
+.hw-chip[hidden] { display: none; }
+.hw-chip.is-gpu { color: var(--success); background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 24%, transparent); }
+.hw-chip.is-yield { color: var(--danger); border-color: var(--danger-line); }
+@media (max-width: 640px) { .hw-chip { display: none; } }

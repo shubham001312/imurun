@@ -399,6 +399,26 @@ delegated listener on the container, bound once; escape all server text with
 ...})` saying what happened and what to do; never show a number the server
 did not give without saying it is an estimate.
 
+## Hardware card
+
+`hardware.js` (loaded after `feedback.js`) owns `#hardware-root`, the first
+block of Settings > Resource manager (markup in `mockup.js`), and the topbar
+chip `#hw-chip` (click opens that tab).
+
+Data flow: `GET /api/resources` (the `governor` key, a bare governor view is
+also accepted) on load; the `resources` SSE event (routed by `app.js` as bus
+`server:resources`) after that; polling every 10 s only while the card is
+visible. tok/s comes from bus `turn.stats` (engine-sourced only). Fields read
+(all optional): `preset`, `dynamic`, `state` (`normal`/`yielding`), `reason`,
+`budget.{threads,physical_cores,headroom_cores,ram_budget,ram_total,vram_budget,vram_total}`,
+`machine.{gpu,vramTotal,physicalCores,ramTotal}`,
+`imurun.engine.{gpuLayers,ramLayers,diskLayers,gpuBytes,mix,threads,gpu}`.
+Preset buttons and the dynamic toggle call `__imurun_settings.set/save('resources')`
+(PUT `/api/settings/resources {headroom, dynamic}`; presets gentle / balanced /
+performance; `custom` is shown but only selectable from the settings file).
+There is no process-priority toggle: the server contract has none (see
+API-REQUESTS #34).
+
 ## Accessibility
 
 - Skip link, landmarks (`nav`, `main`, labelled regions), `aria-current` on

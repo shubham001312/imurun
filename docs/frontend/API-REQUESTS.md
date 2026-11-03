@@ -461,3 +461,15 @@ needs these to use it:
    overwrite `sttModel` on machines where `status.gpu.cuda` is true (GPU
    users get `sttModelGpu`). `GET /api/voice/status` has `gpu: {cuda, reason,
    free_mb, total_mb}` and `worker.on_gpu`.
+
+34. **Hardware card (2026-11-03)** - wanted from `/api/resources` governor view:
+    (a) `imurun.engine.gpu`: the GPU string from the model stats
+    `placement.gpu` (e.g. "NVIDIA GeForce RTX 3050 Laptop GPU (vulkan)"), so
+    the card names the device the engine really uses, also for non-NVIDIA
+    cards where `machine.gpu` is empty; (b) `imurun.engine.tokensPerSecond`
+    and `prefillTokensPerSecond` of the last turn, so the chip is right after
+    a reload before any turn; (c) `imurun.engine.totalLayers` (today the UI
+    sums gpu+ram+disk layers); (d) a `resources.lowerPriority` boolean setting
+    ("lower process priority while generating") if the owner wants that
+    toggle; the card has no such control until it exists; (e) the `resources`
+    SSE event should also fire when a model load/unload changes placement.

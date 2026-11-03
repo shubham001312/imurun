@@ -29,6 +29,7 @@
     'connector',
     'session',
     'usage',
+    'resources',
     'error',
     'compaction.start',
     'compaction.progress',

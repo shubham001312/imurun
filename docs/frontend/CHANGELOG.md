@@ -4,6 +4,17 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-03: Hardware card and GPU chip
+
+- New `hardware.js`: a "Hardware" card at the top of Settings > Resource
+  manager (GPU name, VRAM bar, layers on GPU/RAM/disk, CPU threads vs physical
+  cores and cores kept free, RAM budget, governor state, headroom preset,
+  "lower threads while busy" toggle) and a topbar chip such as
+  `GPU 16/16 · 85 tok/s` / `CPU · 6 threads`. Reason: nothing in the UI said
+  the 1B model runs fully on the RTX 3050.
+- `api.js`: `resources` added to the SSE event list (it was dropped silently).
+- Older server: the card says hardware is not reported; no errors.
+
 ## 2026-11-02 (follow-up): three server answers used
 
 - Voice F1 is served: the Bengali `large-v3-turbo` choice now applies (the
