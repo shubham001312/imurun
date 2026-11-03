@@ -317,7 +317,6 @@ static void test_devformat(ComputeBackend* gpu, const TensorInfo& t) {
     }
     gpu->release(&t);
 }
-#endif
 
 static void run_kernel_tests(ComputeBackend* gpu, const std::string& path) {
     // Every supported type, independent of what the model file contains.
@@ -436,6 +435,7 @@ static void run_kernel_tests(ComputeBackend* gpu, const std::string& path) {
         for (int i = 0; i < n; ++i) gpu->release(ts[i]);
     }
 }
+#endif  // FISH_HAVE_VULKAN (kernel tests need the device)
 
 // ------------------------------------------------------------------ end to end
 
@@ -743,6 +743,7 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--no-kernels")) kernels = false;
         if (!std::strcmp(argv[i], "--no-cpu-compare")) cpu_compare = false;
         if (!std::strcmp(argv[i], "--quality") && i + 1 < argc) quality = std::atoi(argv[++i]);
+#if FISH_HAVE_VULKAN
         if (!std::strcmp(argv[i], "--fq3s-scan")) {
             // Plain FQ3S round-trip error of every re-quantisable tensor (study).
             std::string err;
@@ -768,6 +769,7 @@ int main(int argc, char** argv) {
             }
             return 0;
         }
+#endif  // FISH_HAVE_VULKAN
         if (!std::strcmp(argv[i], "--ppl")) { run_ppl(path); std::printf("\n%s\n", failures ? "PPL FAILED" : "PPL DONE"); return failures ? 1 : 0; }
     }
     if (quality > 0) {
@@ -787,7 +789,9 @@ int main(int argc, char** argv) {
     if (gpu) {
         std::printf("backend %s on %s: %.0f MB total, %.0f MB free\n", gpu->name(), gpu->device_name(),
                     gpu->memory_total() / 1048576.0, gpu->memory_free() / 1048576.0);
+#if FISH_HAVE_VULKAN
         if (kernels) run_kernel_tests(gpu, path);
+#endif
     } else {
         std::printf("no GPU backend: kernel checks SKIPPED\n");
     }
