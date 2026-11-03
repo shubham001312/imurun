@@ -2,6 +2,28 @@
 
 The API contract itself is documented in `services/server/doc/README.md`.
 
+## 2026-11-03 — resource governor (resources owner)
+
+- `/api/resources` governor view grows `gpu` (detected with fallbacks, engine placement
+  merged, `label`), `engine`, `priority`, `presets`, `custom`, `deviceClass`,
+  `lowerPriority`, `machine.gpuInfo`; `imurun.engine` gains `gpu`, `totalLayers`,
+  `tokensPerSecond`, `prefillTokensPerSecond`. Contract: README "Resource governor contract".
+- `resources` settings: `lowerPriority` (default true; the server runs below normal
+  priority while a reply / voice / tuning step runs); `preset` and `eco` accepted on input.
+- `resources` event also on model load / placement change; heartbeat 10 s, only while a
+  client listens.
+- `services/server/resources.handle_update` ready for `PUT/POST /api/resources`
+  (not routed in `api.py` yet). Details: `docs/resources/CHANGELOG.md`.
+
+## 2026-11-03 — keep the model loaded (cold start)
+
+- `services/config.py`, `services/server/app.py`: `idle_timeout_seconds` now defaults to
+  `0` (never unload) and the idle watchdog thread is not started at all when it is 0.
+  The old 300 s default unloaded the weights after five quiet minutes, so every return
+  to the app paid a full cold load (8B: read 4.9 GB + re-quantise + upload to VRAM) before
+  the first token — the owner's "cold start is the main culprit". `FISH_IDLE_TIMEOUT_SECONDS=<s>`
+  restores the old behaviour for machines that need the RAM back.
+
 ## 2026-11-02 — voice hook (voice owner)
 
 - `api.py`: `/api/voice/*` (GET/POST) is forwarded to `services/voice/routes.dispatch`;

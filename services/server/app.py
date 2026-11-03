@@ -199,7 +199,9 @@ def build_server(
             return
 
         def watchdog() -> None:
-            idle_timeout = getattr(cfg.fish, "idle_timeout_seconds", 300.0)
+            idle_timeout = getattr(cfg.fish, "idle_timeout_seconds", 0.0)
+            if not idle_timeout or idle_timeout <= 0:
+                return  # keep the model loaded; set FISH_IDLE_TIMEOUT_SECONDS to unload when idle
             check_interval = 30.0
             while True:
                 time.sleep(check_interval)

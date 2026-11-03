@@ -25,13 +25,23 @@ class FishConfig:
     # Native backend: path to a GGUF. Empty means no model configured.
     # The library path comes from FISH_LIBRARY or bin/fish.dll.
     model_path: str = ""
-    # Unload model weights after this many seconds of inactivity.
-    # Set to 0 to disable auto-unload.
-    idle_timeout_seconds: float = 300.0
+    # Unload model weights after this many seconds of inactivity; 0 keeps the
+    # model loaded (default). The old 300 s default forced a full cold load
+    # (8B: tens of seconds of read + re-quantisation + upload) every time the
+    # owner came back after five minutes, which read as "slow generation".
+    idle_timeout_seconds: float = 0.0
     # Speculative decoding: a small model with the same vocabulary that drafts
     # tokens for the main one (FISH_DRAFT_MODEL). Empty = off.
     draft_model_path: str = ""
     draft_k: int = 0
+    # Resource budget for the engine (services/resources, docs/resources/README.md).
+    # 0 = governed: the resource governor computes them from the measured
+    # machine and the `resources` settings headroom at every load. A positive
+    # value is a hard override; FISH_THREADS / FISH_RAM_BUDGET_MB /
+    # FISH_VRAM_HEADROOM_MB exported in the shell override both.
+    threads: int = 0
+    ram_budget_mb: int = 0
+    vram_headroom_mb: int = 0
 
     @property
     def stream_url(self) -> str:
@@ -128,7 +138,7 @@ def load_config() -> ServerConfig:
         health_endpoint=os.getenv("FISH_HEALTH_ENDPOINT", "/fish/health"),
         stats_endpoint=os.getenv("FISH_STATS_ENDPOINT", "/stats"),
         model_path=env_model,
-        idle_timeout_seconds=float(os.getenv("FISH_IDLE_TIMEOUT_SECONDS", "300.0")),
+        idle_timeout_seconds=float(os.getenv("FISH_IDLE_TIMEOUT_SECONDS", "0") or 0),
         draft_model_path=os.getenv("FISH_DRAFT_MODEL", ""),
         draft_k=int(os.getenv("FISH_DRAFT_K", "0") or 0),
     )
