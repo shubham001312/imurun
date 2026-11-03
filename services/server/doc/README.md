@@ -74,7 +74,9 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | GET | `/api/connectors/{id}` | Bearer | One connector status + `oauth` flag. |
 | GET | `/api/clients` | Bearer | API client list (no hashes). |
 | GET | `/api/usage` | Bearer | Usage panel view. |
-| GET | `/api/resources` | Bearer | Memory/disk/CPU/folder sizes. |
+| GET | `/api/resources` | Bearer | Memory/disk/CPU/folder sizes plus `governor` (resource governor view, see "Resource governor contract"). |
+| GET | `/api/resources/budget` | Bearer | Resource governor view alone. |
+| PUT/POST | `/api/resources` | Bearer | Change preset / dynamic / lowerPriority (`services/server/resources.py` `handle_update`; `PUT /api/settings/resources` does the same through the settings store). |
 | GET | `/api/stack/status` | Bearer | Docker stack status. |
 | GET | `/api/settings` | Bearer | Known section names. |
 | GET | `/api/settings/{section}` | Bearer | One section, merged with defaults. |
@@ -378,12 +380,93 @@ chmod `0600`. **Note:** nothing in the server currently calls `record_turn` or
 | `ResourceSampler.__init__` | `(data_root, models_root=None)` | `models_root` defaults to `<data_root>/models`. |
 | `ResourceSampler.view` | `() -> dict` | `{memory, disk, cpu, cache, transcripts, logs, sampledAt}`. |
 | `ResourceSampler.clear_cache` | `() -> dict` | Unlinks `*.gguf` under `models_root`; returns `{"removed_bytes": int}`. |
+| `view_with_governor` | `(server) -> dict` | The `GET /api/resources` body (sampler view + `governor`). |
+| `handle_update` | `(server, payload) -> (status, body)` | ResourcesUpdate: rejects empty / unknown keys / invalid values (400), writes the `resources` section, `governor.refresh()` (publishes `resources`), returns `{ok, governor}`. |
 
 `_memory` uses `psutil`, then `GlobalMemoryStatusEx` on Windows, then
 `/proc/meminfo`; `_cpu_percent` uses `psutil` then `getloadavg`; `_directory_size`
 walks at most 20 000 files. A missing probe becomes `None`/`0`, never an
 exception. `clear_cache` deletes model weights (its docstring also mentions
 transcripts, but the code only removes `*.gguf`).
+
+#### Resource governor contract (`/api/resources`, `resources` event)
+
+Owner: resources (`services/resources/`, `docs/resources/README.md`). This is
+the contract the frontend builds against; every field below is produced by
+`ResourceGovernor.view()` (`services/resources/governor.py`).
+
+| Method | Path | Body | Reply |
+|---|---|---|---|
+| GET | `/api/resources` | - | Sampler view `{memory, disk, cpu, cache, scratch, transcripts, logs, sampledAt}` plus `governor`: **ResourcesView**. |
+| GET | `/api/resources/budget` | - | **ResourcesView** alone. |
+| PUT / POST | `/api/resources` | **ResourcesUpdate** | `200` `{ok: true, governor: ResourcesView}`; `400 {error}` for an invalid value, an unknown key or an empty body. Handler: `services/server/resources.handle_update(server, payload)`. **Wiring pending** in `api.py` (not the resources owner's file, see `docs/resources/README.md` "Requests"); until then use the next row, which takes the same body. |
+| PUT | `/api/settings/resources` | **ResourcesUpdate** (plus the panel's own `cacheLimitGb`, `transcriptDays`, `logDays`) | `{section, values: {..., computed: ResourcesView}}`. Same validation (`services/resources.validate_settings`); `preset` is accepted as an alias of the stored key `headroom`. Works today. |
+
+**ResourcesUpdate** (every key optional, at least one required):
+
+| Key | Type | Meaning |
+|---|---|---|
+| `preset` (alias `headroom`) | `"gentle" \| "balanced" \| "performance" \| "custom"` | `gentle` doubles every headroom, `performance` halves it, `custom` uses `custom`. `eco` is accepted as an alias of `gentle` (stored and reported as `gentle`). |
+| `custom` | `{cpu?, ram?, vram?, disk?}` numbers 0..90 (percent) | Headroom per resource for `custom`; missing keys take the balanced value. `{}` clears. |
+| `dynamic` | bool, default `true` | Lower the next reply's threads while other programs are busy. |
+| `lowerPriority` | bool, default `true` | Run IMURUN below normal priority while a reply, voice request or tuning step runs. |
+
+**ResourcesView** (also the data of every `resources` SSE event):
+
+```jsonc
+{
+  "preset": "balanced", "presets": ["gentle", "balanced", "performance", "custom"],
+  "custom": {"cpu": 30.0, "ram": 20.0, "vram": 10.0, "disk": 10.0},   // effective custom % (balanced when unset)
+  "dynamic": true, "lowerPriority": true,
+  "deviceClass": "laptop",               // laptop | desktop | unknown (battery present = laptop)
+  "state": "normal",                     // normal | yielding (threads lowered for the user's other load)
+  "reason": "",                          // one human sentence when yielding
+  "priority": {"enabled": true, "lowered": false, "mode": "below_normal",  // below_normal | nice | unsupported | off
+               "holders": [], "error": ""},          // holders: "chat" | "voice" | "tuning" while lowered
+  "gpu": {                               // null only when no source found any GPU
+    "detected": true, "vendor": "nvidia", // nvidia | amd | intel | apple | other
+    "name": "NVIDIA GeForce RTX 3050 Laptop GPU", "shortName": "RTX 3050 Laptop GPU",
+    "source": "nvidia-smi",              // nvidia-smi | rocm-smi | sysfs | registry | cim | system_profiler | engine
+    "live": true,                        // usage numbers are measured (false: identity only)
+    "vramTotal": 4294967296, "vramFree": 3900000000, "vramUsedByOthers": 300000000,  // bytes; null when unknown
+    "utilization": 0.04,                 // 0..1 or null
+    "vramHeadroom": 509000000, "vramBudget": 3390000000,   // bytes kept free / IMURUN may use at the next load
+    "engine": {"gpuLayers": 16, "totalLayers": 16, "gpuBytes": 858993459, "mix": "q4_k->int8"},  // null before a load
+    "label": "GPU: RTX 3050 Laptop GPU - 16/16 layers, 0.8 GB of 3.2 GB"
+  },
+  "engine": {                            // null until a model is loaded; last report is kept during a reply
+    "loaded": true, "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU", "gpuLayers": 16, "ramLayers": 0,
+    "diskLayers": 0, "totalLayers": 16, "gpuBytes": 858993459, "mix": "q4_k->int8",
+    "threads": 6, "peakRssMb": 1400, "tokensPerSecond": 20.1, "prefillTokensPerSecond": 180.0
+  },
+  "budget": { "threads": 6, "headroom_cores": 2, "physical_cores": 8, "logical_cores": 16,
+              "ram_budget": 0, "ram_budget_gb": 10.7, "vram_headroom": 0, "vram_budget": 0,
+              "vram_used_by_others": 0, "disk_min_free": 0, "notes": ["..."],
+              "headroom": {"preset": "balanced", "cpu": 30.0, "ram": 20.0, "vram": 11.9, "disk": 10.0,
+                           "diskFloorGb": 10.0}, "...": "every size also as *_gb" },
+  "machine": {"physicalCores": 8, "logicalCores": 16, "ramTotal": 0, "vramTotal": 0, "deviceClass": "laptop",
+              "gpu": "NVIDIA GeForce RTX 3050 Laptop GPU",   // name string ("" = none); kept a string for hardware.js
+              "gpuInfo": { /* same as gpu above without engine/label/vramHeadroom/vramBudget, or null */ },
+              "diskTotal": 0, "errors": []},
+  "live": {"cpu": {"system": 0.12, "imurun": 0.02, "other": 0.10},   // fractions of all logical CPUs, null until 2 samples
+           "ram": {"total": 0, "available": 0}, "vram": { /* nvidia-smi / rocm-smi card view or null */ },
+           "sampledAt": 1762130000.0},
+  "imurun": {"threadTarget": 6, "engineThreads": 6, "engineAppliesTarget": false,
+             "ledger": {"total": 6, "held": {"chat": 6}, "free": 0}, "loadEnv": {"FISH_THREADS": "6"},
+             "engine": {"gpu": "...", "gpuLayers": 16, "ramLayers": 0, "diskLayers": 0, "totalLayers": 16,
+                        "gpuBytes": 0, "mix": "", "threads": 6, "peakRssMb": 0,
+                        "tokensPerSecond": 20.1, "prefillTokensPerSecond": 180.0}},  // {} before a load
+  "headroomState": {"cpu": "ok", "ram": "ok", "vram": "ok", "disk": "ok"},  // ok | busy | tight | none | unknown
+  "disk": {"ok": true, "freeGb": 270.0, "minFreeGb": 40.0, "usableGb": 230.0, "...": "DiskCheck.view()"}
+}
+```
+
+**Event cadence.** `resources` is published immediately when the settings
+change, the thread target changes, the priority is lowered or restored, or a
+model load reports its placement; otherwise as a heartbeat every 10 s **only
+while at least one `/api/events` client is connected** (no listener: no view
+is built and the GPU is not polled). A client that just connected should GET
+`/api/resources` once instead of waiting for the heartbeat.
 
 ### `C:\Users\imu\Desktop\ImuTechz\IMU CLI\imurun\services\server\models_api.py`
 

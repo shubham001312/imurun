@@ -86,6 +86,20 @@ def _cpu_percent() -> float | None:
         return float(psutil.cpu_percent(interval=0.1))
     except Exception:
         pass
+    # Without psutil: the platform's own CPU-time counters (kernel32 on
+    # Windows, /proc/stat on Linux) over 0.1 s - before 2026-11-03 Windows
+    # had no fallback here and the panel showed no CPU figure at all.
+    try:
+        from ..resources.counters import system_times
+
+        first = system_times()
+        if first is not None:
+            time.sleep(0.1)
+            second = system_times()
+            if second is not None and second[1] > first[1]:
+                return round(100.0 * (second[0] - first[0]) / (second[1] - first[1]), 1)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         load = os.getloadavg()[0]
         count = os.cpu_count() or 1
@@ -99,6 +113,10 @@ class ResourceSampler:
         self.data_root = Path(data_root)
         self.models_root = Path(models_root) if models_root else self.data_root / "models"
         self._lock = threading.Lock()
+        # The live, continuous side (CPU shares, VRAM, budget, dynamic
+        # thread target) lives in services/resources.ResourceGovernor; the
+        # server sets this so the panel and the governor share one sampler.
+        self.governor = None
 
     def view(self) -> dict:
         with self._lock:
@@ -163,3 +181,38 @@ class ResourceSampler:
                         continue
             cleared.append(target.name)
         return {"removed_bytes": removed, "cleared": cleared}
+
+
+# ------------------------------------------------------------ governor routes
+# GET/PUT/POST /api/resources (contract: services/server/doc/README.md,
+# "Resource governor contract"). api.py forwards here; PUT
+# /api/settings/resources takes the same body and stays canonical until then.
+UPDATE_KEYS = ("preset", "headroom", "custom", "dynamic", "lowerPriority")
+
+
+def view_with_governor(server) -> dict:
+    view = server._resources.view()
+    view["governor"] = server._governor.view()
+    return view
+
+
+def handle_update(server, payload) -> tuple[int, dict]:
+    """Validate a ResourcesUpdate, store it in the ``resources`` settings
+    section, re-measure and publish ``resources``. Returns (status, body)."""
+    from ..resources import validate_settings
+
+    if not isinstance(payload, dict) or not payload:
+        return 400, {"error": "send at least one of: " + ", ".join(UPDATE_KEYS)}
+    unknown = sorted(set(payload) - set(UPDATE_KEYS))
+    if unknown:
+        return 400, {"error": f"unknown key(s) {', '.join(unknown)}; allowed: {', '.join(UPDATE_KEYS)}"}
+    try:
+        cleaned = validate_settings(payload)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    try:
+        server._settings.write("resources", cleaned)
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    server._governor.refresh()
+    return 200, {"ok": True, "governor": server._governor.view()}

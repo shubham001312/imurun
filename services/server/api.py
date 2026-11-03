@@ -76,7 +76,8 @@ from ..tools.executor import ToolExecutor
 from ..tools.permissions import PermissionPolicy
 from .clients import ClientStore
 from .events import CLOSE, EventBroker
-from .resources import ResourceSampler
+from .resources import ResourceSampler, handle_update as resources_update
+from ..resources import ResourceGovernor, set_governor, validate_settings as validate_resources
 from .settings import SettingsStore, apply_search_env, mask_secrets
 from .stack import StackController
 from .turns import TurnRunner
@@ -312,6 +313,12 @@ class ApiServer:
         self._clients = clients or ClientStore(home / "clients.json")
         self._resources = resources or ResourceSampler(home, home / "models")
         self._stack = stack or StackController()
+        # Resource governor (docs/resources/README.md): one budget for the
+        # engine, voice, tuning, research and disk; publishes `resources`.
+        self._governor = ResourceGovernor(self._settings, data_root=home, publish=self._events.publish)
+        self._resources.governor = self._governor
+        set_governor(self._governor)
+        self._govern_engine(model)
 
         self._httpd = _LoopbackHTTPServer((host, port), self._handler())
         self._thread: threading.Thread | None = None
@@ -330,14 +337,33 @@ class ApiServer:
         with self._oauth_lock:
             self._oauth_flows[connector_id] = flow
 
+    def _govern_engine(self, model) -> None:
+        native = getattr(model, "_native", None)
+        if native is None and hasattr(model, "resource_hook"):
+            native = model
+        if native is None or not hasattr(native, "resource_hook"):
+            return
+        native.resource_hook = self._governor
+        governor = self._governor
+
+        def engine_stats() -> dict:
+            # Never read stats while a generation holds the context.
+            if governor.chat_active() or not getattr(native, "available", False):
+                return {}
+            return native.stats()
+
+        governor.attach_engine(engine_stats)
+
     def start(self) -> "ApiServer":
         self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
         self._thread.start()
         tuning_routes.attach(self)  # automation ticker; idle unless tuning.enabled
+        self._governor.start()      # resource sampler (2 s), `resources` events
         return self
 
     def stop(self) -> None:
         tuning_routes.detach(self)  # checkpoint + stop a running training job
+        self._governor.stop()
         self._events.close()
         # shutdown() waits for the serve loop to end, so it is only safe once
         # the server was actually started.
@@ -715,7 +741,12 @@ class ApiServer:
                     self._reply(200, server._usage.view())
                     return
                 if path == "/api/resources":
-                    self._reply(200, server._resources.view())
+                    view = server._resources.view()
+                    view["governor"] = server._governor.view()
+                    self._reply(200, view)
+                    return
+                if path == "/api/resources/budget":
+                    self._reply(200, server._governor.view())
                     return
                 if path == "/api/stack/status":
                     self._reply(200, server._stack.status())
@@ -729,7 +760,11 @@ class ApiServer:
                     except ValueError as exc:
                         self._reply(400, {"error": str(exc)})
                         return
-                    self._reply(200, {"section": parts[2], "values": mask_secrets(parts[2], values)})
+                    values = mask_secrets(parts[2], values)
+                    if parts[2] == "resources":
+                        # Live computed numbers, read-only (never stored).
+                        values["computed"] = server._governor.view()
+                    self._reply(200, {"section": parts[2], "values": values})
                     return
                 if len(parts) == 3 and parts[:2] == ["api", "sessions"]:
                     try:
@@ -795,12 +830,15 @@ class ApiServer:
                             selected and model.path and Path(model.path).name == selected
                         )
                         payload.append(view)
+                    disk = (manager.disk_status() if hasattr(manager, "disk_status")
+                            else server._governor.disk_view())
                     self._reply(
                         200,
                         {
                             "models": payload,
                             "selected": selected,
                             "engine": _model_status(server),
+                            "disk": disk,
                         },
                     )
                     return
@@ -851,6 +889,12 @@ class ApiServer:
                 parts = [part for part in path.split("/") if part]
                 if path.startswith(voice_routes.PREFIX):
                     voice_routes.dispatch(server, self, path)
+                    return
+                if path == "/api/resources":
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    self._reply(*resources_update(server, payload))
                     return
                 if tuning_routes.is_post_route(path) or tool_routes.is_post_route(path):
                     payload = self._body()
@@ -1296,6 +1340,12 @@ class ApiServer:
                 if not self._authorized():
                     return
                 path = unquote(urlsplit(self.path).path)
+                if path == "/api/resources":
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    self._reply(*resources_update(server, payload))
+                    return
                 if path == "/api/persona":
                     payload = self._body()
                     if payload is None:
@@ -1323,6 +1373,13 @@ class ApiServer:
                     if parts[2] == "search":
                         # A client echoing the mask back must not overwrite a key.
                         payload = {k: v for k, v in dict(payload).items() if v != "••••••••"}
+                    if parts[2] == "resources":
+                        payload = {k: v for k, v in dict(payload).items() if k != "computed"}
+                        try:
+                            payload.update(validate_resources(payload))
+                        except ValueError as exc:
+                            self._reply(400, {"error": str(exc)})
+                            return
                     try:
                         merged = server._settings.write(parts[2], payload)
                     except ValueError as exc:
@@ -1331,7 +1388,12 @@ class ApiServer:
                     if parts[2] == "search":
                         apply_search_env(merged)
                         server._record("settings", "search providers updated")
-                    self._reply(200, {"section": parts[2], "values": mask_secrets(parts[2], merged)})
+                    values = mask_secrets(parts[2], merged)
+                    if parts[2] == "resources":
+                        server._governor.refresh()
+                        values = dict(values)
+                        values["computed"] = server._governor.view()
+                    self._reply(200, {"section": parts[2], "values": values})
                     return
 
                 self._reply(404, {"error": "not found"})

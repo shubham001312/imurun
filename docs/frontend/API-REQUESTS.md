@@ -473,3 +473,22 @@ needs these to use it:
     ("lower process priority while generating") if the owner wants that
     toggle; the card has no such control until it exists; (e) the `resources`
     SSE event should also fire when a model load/unload changes placement.
+    **Resolution (resources owner, 2026-11-03)** - contract in
+    `services/server/doc/README.md` "Resource governor contract":
+    - (a) done: `imurun.engine.gpu` = `placement.gpu`; also `governor.gpu`
+      (object with `vendor`, `source`, `vramUsedByOthers`, `label`) and
+      `machine.gpuInfo`. `machine.gpu` stays a name string and falls back to
+      the engine's GPU when the OS sees none.
+    - (b) done: `imurun.engine.tokensPerSecond`, `prefillTokensPerSecond`
+      (last turn, from engine stats; null before the first turn).
+    - (c) done: `imurun.engine.totalLayers`.
+    - (d) done: `resources.lowerPriority` (bool, default true), validated by
+      `PUT /api/settings/resources`, reported as `governor.lowerPriority` and
+      `governor.priority {enabled, lowered, mode, holders}`.
+    - (e) done: published after every model load and when the sampler sees
+      the placement change (load/unload/layers) while a client listens.
+    - Save path: `PUT /api/settings/resources {headroom, dynamic,
+      lowerPriority}` is canonical and applies at once (`governor.refresh()`;
+      tested in `tests/test_resources_detect.py`). Presets stay
+      `gentle|balanced|performance|custom` (`eco` accepted as alias).
+      `PUT/POST /api/resources` is routed as of 2026-11-03 (api.py do_PUT/do_POST).

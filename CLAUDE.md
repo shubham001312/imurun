@@ -32,6 +32,7 @@ Entry points: `python start.py` (native window if pywebview is installed, else b
 | Connectors (OAuth for Gmail, GitHub, Slack, Vercel, Render, Cloudflare, Supabase, Canva; `<service>_<verb>` tools) and the MCP client | `docs/connectors/` (README, one page per service, MCP, CHANGELOG, REQUESTS) |
 | Tuning channel: consented local LoRA/QLoRA fine-tuning from thumbs/teach feedback, feasibility gate, separate training venv, GGUF export (`services/tuning/`, `/api/tuning/*`) | `docs/tuning/` (README, CHANGELOG, REQUESTS) |
 | Voice: server STT/TTS, languages, measured round trips, install per OS (`services/voice/`, `/api/voice/*`) | `docs/voice/` (README, CHANGELOG, BUGS-FIXED, REQUESTS) |
+| Resources: CPU/RAM/VRAM/disk budget with headroom per device class, dynamic thread target, process priority, GPU detection (`services/resources/`, `/api/resources`) | `docs/resources/` (README, CHANGELOG, BUGS-FIXED) |
 | Frontend architecture, bugs fixed, voice, API requests | `docs/frontend/*.md` |
 | Cross-module requests between owners | `docs/setup/CODE-REQUESTS.md`, `docs/frontend/API-REQUESTS.md` |
 | Roadmap (GPU, voice server, streaming beyond prefetch…) | `docs/ROADMAP.md` |
