@@ -99,6 +99,7 @@
     '            </div>',
     '          </div>',
     '        </div>',
+    '        <p class="composer-hint" id="composer-load-hint" role="status" hidden>Model is loading; your first reply starts when it is ready.</p>',
     '        <div class="composer-foot"><label class="composer-model"><span class="sr-only">Active model</span><select id="composer-model" aria-label="Active model" disabled><option>No model downloaded</option></select></label><span id="composer-usage"></span></div>',
     '      </footer>',
     '    </div>',

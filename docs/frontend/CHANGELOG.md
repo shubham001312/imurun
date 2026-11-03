@@ -13,6 +13,10 @@ why.
   `GPU 16/16 · 85 tok/s` / `CPU · 6 threads`. Reason: nothing in the UI said
   the 1B model runs fully on the RTX 3050.
 - `api.js`: `resources` added to the SSE event list (it was dropped silently).
+- Warm start: `model.load.start/done/error` are consumed (and in `EVENT_TYPES`).
+  The chip reads "Loading <model>… N s" (also when the page opens mid-load, via
+  `GET /api/status` engine.warm_start), then the GPU/CPU chip; errors show
+  briefly. The composer stays enabled; `#composer-load-hint` explains the wait.
 - Older server: the card says hardware is not reported; no errors.
 
 ## 2026-11-02 (follow-up): three server answers used

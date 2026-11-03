@@ -136,6 +136,12 @@ def _model_status(server) -> dict:
     except Exception:  # noqa: BLE001
         return {"engine": "unknown", "available": False}
     status.setdefault("available", bool(getattr(model, "available", False)))
+    try:
+        from .warmstart import view as warm_view
+
+        status["warm_start"] = warm_view()
+    except Exception:  # noqa: BLE001
+        pass
     return status
 
 # Optional FastAPI models API (requires huggingface_hub, fastapi)

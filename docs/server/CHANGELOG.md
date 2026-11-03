@@ -15,6 +15,21 @@ The API contract itself is documented in `services/server/doc/README.md`.
 - `services/server/resources.handle_update` ready for `PUT/POST /api/resources`
   (not routed in `api.py` yet). Details: `docs/resources/CHANGELOG.md`.
 
+## 2026-11-03 — warm start (first token no longer pays the model load)
+
+- `services/server/warmstart.py` (new), `app.py`: right after the server is up, the model
+  the user last chose (`--model`/`FISH_MODEL`, else `<home>/last_model.json` written by
+  `POST /api/models/select`) is loaded in a background thread at below-normal process
+  priority with the governor's budget. Before, the weights were loaded by the first
+  message of every launch (owner measured 225 s to the first token on the 8B). Measured:
+  1B resident 2.0 s after start with no user action. `IMURUN_WARM_START=0` disables it.
+  Progress: `/api/status` → `engine.warm_start {state: idle|loading|ready|error, model,
+  seconds, error}` and events `model.load.start` / `model.load.done` / `model.load.error`
+  (`reason: "warm_start"`). A message sent during the load waits for it (the engine's
+  select holds the generation lock) instead of failing.
+- Removed `models/.imurun-selected.json`: a stale copy from the previous machine, read by
+  nothing.
+
 ## 2026-11-03 — keep the model loaded (cold start)
 
 - `services/config.py`, `services/server/app.py`: `idle_timeout_seconds` now defaults to

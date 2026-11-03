@@ -184,7 +184,7 @@ def build_server(
     elif hasattr(model, "_async_client") and hasattr(model._async_client, "_native"):
         server._stack.set_native_fish(model._async_client._native)
 
-    # Start the idle-unload watchdog (no warm-start — model loads on first use).
+    # Start the idle-unload watchdog (off by default; see services/config.py).
     def _start_idle_watchdog(cfg: ServerConfig) -> None:
         import threading
         import time
@@ -214,6 +214,15 @@ def build_server(
         threading.Thread(target=watchdog, name="imurun-idle-watchdog", daemon=True).start()
 
     _start_idle_watchdog(cfg)
+
+    # Warm start: load the last chosen model now, in the background, instead of
+    # making the first message of the session pay the whole load (warmstart.py).
+    try:
+        from .warmstart import start as warm_start
+
+        warm_start(server, cfg, home)
+    except Exception as exc:  # noqa: BLE001 - the shell must come up regardless
+        print(f"warm start: skipped ({type(exc).__name__}: {exc})", file=sys.stderr)
 
     # Production composition registers the eight connectors and any OAuth flow
     # whose client id is configured. Tests that inject their own registry keep

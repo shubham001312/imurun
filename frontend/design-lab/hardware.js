@@ -76,7 +76,33 @@
     return d;
   }
 
+  /* Warm start: {state, model, since (ms), error}. Counts up once a second. */
+  var warm = { state: 'idle', model: '', since: 0, error: '' };
+  var warmTimer = null;
+
+  function shortName(name) {
+    var n = String(name || '').split(/[\\/]/).pop().replace(/\.gguf$/i, '');
+    return n.length > 28 ? n.slice(0, 27) + '…' : n;
+  }
+
+  function setWarm(state, model, seconds, error) {
+    warm.state = state;
+    warm.model = model || warm.model;
+    warm.error = error || '';
+    warm.since = Date.now() - (Number(seconds) > 0 ? Number(seconds) * 1000 : 0);
+    if (warmTimer) { clearInterval(warmTimer); warmTimer = null; }
+    if (state === 'loading') warmTimer = setInterval(renderChip, 1000);
+    if (state === 'error') setTimeout(function () { if (warm.state === 'error') { warm.state = 'idle'; renderChip(); } }, 8000);
+    var hint = byId('composer-load-hint');
+    if (hint) hint.hidden = state !== 'loading';
+    renderChip();
+  }
+
   function chipText() {
+    if (warm.state === 'loading') {
+      return 'Loading ' + (shortName(warm.model) || 'model') + '… ' + Math.max(0, Math.round((Date.now() - warm.since) / 1000)) + ' s';
+    }
+    if (warm.state === 'error') return 'Load failed: ' + String(warm.error || 'unknown error').slice(0, 60);
     if (!view) return '';
     var d = derive(view);
     var tps = lastTps ? Math.round(lastTps) + ' tok/s' : '';
@@ -93,11 +119,12 @@
     var text = chipText();
     chip.hidden = !text;
     if (!text) return;
-    var d = derive(view);
+    var d = view ? derive(view) : {};
     chip.textContent = text;
     chip.title = (d.gpuName ? d.gpuName + '. ' : 'No GPU detected. ') + 'Open Settings > Resource manager for details.';
     chip.classList.toggle('is-gpu', Boolean(d.loaded && d.gpuLayers > 0));
-    chip.classList.toggle('is-yield', d.state === 'yielding');
+    chip.classList.toggle('is-yield', d.state === 'yielding' || warm.state === 'error');
+    if (warm.state !== 'idle' && warm.state !== 'ready') { chip.title = warm.state === 'loading' ? 'Loading the last chosen model; the composer still works.' : String(warm.error || ''); chip.classList.remove('is-gpu'); }
   }
 
   /* --------------------------------------------------------------- card */
@@ -232,6 +259,9 @@
     render();
     if (IM.bus) {
       IM.bus.on('server:resources', accept);
+      IM.bus.on('server:model.load.start', function (e) { setWarm('loading', e.model_name, 0); });
+      IM.bus.on('server:model.load.done', function (e) { setWarm('ready', e.model_name, 0); refresh(); });
+      IM.bus.on('server:model.load.error', function (e) { setWarm('error', e.model_name, 0, e.error); });
       IM.bus.on('turn.stats', function (s) {
         if (s && s.source === 'engine' && s.tokensPerSecond) { lastTps = s.tokensPerSecond; renderChip(); }
       });
@@ -246,6 +276,12 @@
       });
     }
     refresh();
+    if (window.__imurun_api && window.__imurun_api.getStatus) {
+      window.__imurun_api.getStatus().then(function (st) {
+        var w = st && st.engine && st.engine.warm_start;
+        if (w && w.state === 'loading') setWarm('loading', w.model, w.seconds);
+      }, function () {});
+    }
     /* Poll only while the card is on screen; the SSE event keeps the chip live. */
     setInterval(function () { if (visible()) refresh(); }, POLL_MS);
   }

@@ -144,3 +144,5 @@
 .hw-chip.is-gpu { color: var(--success); background: var(--success-soft); border-color: color-mix(in srgb, var(--success) 24%, transparent); }
 .hw-chip.is-yield { color: var(--danger); border-color: var(--danger-line); }
 @media (max-width: 640px) { .hw-chip { display: none; } }
+.composer-hint { margin: 4px 2px 0; font-size: 11px; color: var(--muted); }
+.composer-hint[hidden] { display: none; }

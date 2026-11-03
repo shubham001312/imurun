@@ -67,7 +67,7 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | GET | `/` and any non-`/api/` path | none (loopback `Host` only) | Static shell/assets; `index.html` gets the token injected. |
 | GET | `/health` | none | Liveness `{"ok": true}`. |
 | GET | `/oauth/callback` | none (one-time `state` is the capability) | OAuth redirect target. When connectors are wired the page comes from `connectors/routes.handle_callback`: "Connected as <account> — you can close this tab", `window.close()` after 2 s (CSP `script-src 'sha256-…'`), `connector` event; otherwise the built-in page. |
-| GET | `/api/status` | Bearer | Version, uptime, session count, queue depth, connector totals, model availability. |
+| GET | `/api/status` | Bearer | Version, uptime, session count, queue depth, connector totals, model availability. `engine.warm_start` = `{state: idle\|loading\|ready\|error, model, seconds, error}` for the background load of the last chosen model at startup (`services/server/warmstart.py`, off with `IMURUN_WARM_START=0`). |
 | GET | `/api/events` | Bearer, or `?token=` for GET | SSE broker stream. |
 | GET | `/api/persona` | Bearer | Persona view. |
 | GET | `/api/connectors` | Bearer | Connector cards. |
@@ -526,3 +526,5 @@ Imported by: `start.py`, `test/services/server/*`, `test/e2e/*`, and the Docker
 - Settings section names must match `SECTION_RE`; writes are atomic and private.
 - `StackController` never runs a shell; it invokes `docker compose` with an
   argument list and a timeout, and reports failures as data.
+
+`model.load.start` / `model.load.done` / `model.load.error` — the warm start (`{model_name, reason: "warm_start", seconds?, error?}`). A message sent while it runs waits for the weights.
