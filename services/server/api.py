@@ -1266,8 +1266,8 @@ class ApiServer:
                     loop = asyncio.new_event_loop()
                     try:
                         loop.run_until_complete(stream_progress())
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        pass  # the client hung up; nothing to report
                     except Exception as exc:  # noqa: BLE001 - report, never crash
                         try:
                             self.wfile.write(

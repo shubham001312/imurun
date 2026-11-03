@@ -182,6 +182,80 @@ Paired, alternating, best of 3 per round, 3 rounds, through `FishNativeClient`:
 Merge quality and the rounding comparison are in `CHANGELOG.md` (2026-11-02).
 Reproduce: `model\fish\build\fish_test_m5.exe <base.gguf> <adapter.gguf> [<merged reference.gguf>]`.
 
+## Default placement, cold vs warm load, 2026-11-03
+
+RTX 3050 Laptop 4 GB (the desktop held 0.63–0.80 GB of VRAM during every
+run), Ryzen 7 7435HS, **`FISH_THREADS=4`**, below-normal priority, one
+benchmark at a time. Driver: the C ABI through `ctypes`, two chat turns,
+greedy, 64 new tokens:
+- turn 1: system prompt + "Explain in two sentences why the sky is blue.";
+- turn 2: shares the system prompt via the prefix cache.
+
+TTFT = wall time from `fish_generate_chat` to the first streamed token
+(prefill + the first decode step). "CPU only" = `FISH_GPU_LAYERS=0` in the
+same session, right after the GPU run. "Before" = `bin/fish.dll` of
+2026-11-01 (no residency planner), same session. No environment knobs other
+than the ones named.
+
+### Decode and first token
+
+| Model | Build | Placement (`stats().placement.planner`) | Decode | TTFT turn 1 / turn 2 | Load |
+|---|---|---|---|---|---|
+| DeepSeek-R1-Distill-Llama-8B Q4_K_M | before | 14/32 layers at file precision | 7.3 tok/s | 3.96 s / 1.11 s | 4.1 s |
+| | **after** | partial: 31/32 planned, span 28 (FQ3S mostly), ctx 2048, KV int8 | **18.7 tok/s** | **0.67 s / 0.29 s** | **2.75 s** (warm) |
+| | after, second cache dir | 29 planned, span 28 | 16.2 tok/s | 0.84 s / 0.27 s | 3.71 s (warm) |
+| | after, `fish_test_gpu --ppl` (ctx 512) | 30/32, span 30 | 21.3 tok/s | — | 1.6 s |
+| | CPU only | — | 5.3 tok/s | 3.87 s / 1.28 s | 0.8 s |
+| same, `FISH_VRAM_HEADROOM_MB=1024` (server balanced preset) | before | 13/32 at file precision | 6.9 tok/s | 4.21 s / 1.03 s | 3.8 s |
+| | after | partial: 21/32 | 11.5 tok/s | 1.49 s / 0.55 s | 2.5 s (warm) |
+| Phi-3-mini-4k Q4_K_M | before | 29/32, f16 KV (ctx 2048) | 32.3 tok/s | 0.76 s | 3.8 s |
+| | before, n_ctx 4096 requested | 23/32 | 21.4 tok/s | 1.68 s | 3.5 s |
+| | **after** | resident 32/32 at file precision, KV int8 | **39.7 tok/s** | 0.31 s / 0.12 s | 3.3 s |
+| | after, n_ctx 4096 requested | resident, ctx fitted to 2816 | 40.2 tok/s | 0.14 s | 1.4 s |
+| | after, headroom 1024 | resident, re-quantised (Q4_K/FQ3) | 47.9 tok/s | 0.25 s | 190 s cold (see below) |
+| | CPU only | — | 9.7 tok/s | 2.46 s | 0.7 s |
+| Llama-3.2-1B-Instruct Q4_K_M | after | resident 16/16 at file precision, ctx 8192, KV f16 | 84.2 tok/s (100.3 turn 2) | 0.17 s / 0.04 s | 2.5 s |
+| | CPU only | — | 17.1 tok/s | 1.04 s | 1.1 s |
+
+The decode spread on the 8B at 28 GPU layers (16.2–18.7 tok/s) is
+run-to-run: machine load, GPU clocks, and which tensors the upgrade passes
+moved to a bigger format. The planner wants 31 layers with the default
+headroom, but the span usually ends at 28–29. WDDM's live budget falls
+further during the upload than the 6% margin allows, and the span gives back
+a layer at a time until its KV + arena fit next to the 256 MB headroom.
+
+**20 tok/s for the 8B** is reached when ≥ 30 layers fit: 21.3 tok/s at 30.
+It is missed at 28: 16.2–18.7 tok/s. Each CPU layer costs ~6 ms per token at
+4 threads. The server's 1 GB headroom leaves room for only 21 layers
+(11.5 tok/s).
+
+### 8B quality of the default placement (`fish_test_gpu --ppl`, held-out text, 291 positions)
+
+| | Perplexity | Top-1 vs CPU | KL mean / max |
+|---|---|---|---|
+| CPU, file precision | 14.105 | — | — |
+| GPU default (30 layers, 147 FQ3S + 3 FQ3 tensors) | 15.120 (+7.2%) | 82.8% | 0.158 / 1.56 nats |
+
+### Load phases (`fish_stats.load_profile`, 4 threads)
+
+| Model, cache state | Total load | Calibration | Re-quantisation | Upload (copy) | Rest |
+|---|---|---|---|---|---|
+| 8B, empty cache (`FISH_CACHE_DIR` new dir) | **153.2 s** | 69.6 s | 79.8 s (146 tensors) | 2.2 s | 0.2 s |
+| 8B, same dir, second load | **3.71 s** | cached | 0 (146 from cache, 1.6 s) | 0.5 s | 0.1 s |
+| 8B, every load before the cache fix (cache hits silently rejected) | 106 s | cached | 100.4 s (161 tensors) | 2.4 s | — |
+| Phi-3, headroom 1024, empty cache (before the re-quantiser speed-up) | 190 s | 35.4 s | 152.4 s (103 tensors) | 1.5 s | — |
+
+The open, metadata and bind phases take 0.03–0.07 s for every model: the file
+is mmapped, not read. The CPU KV cache allocates in 0.0–0.24 s.
+
+Re-quantiser, single thread (micro-benchmark, 4096×256 synthetic rows):
+
+| Kernel | ns/weight before | after | Weighted relative RMS error (unchanged) |
+|---|---|---|---|
+| Q4_K (weighted) | 135 | 66 | 3.69% |
+| FQ3 (weighted) | 141 | 65 | 7.32% |
+| FQ3S | 35 | 34 | 10.02% |
+
 ## How to reproduce
 
 ```
@@ -197,3 +271,6 @@ For prefill scaling use `fish_generate` with `max_tokens=1` on prompts of 28 /
 109 / 406 tokens and read `prefill_tokens_per_second` from `fish_get_stats`.
 Set `FISH_LIBRARY` to `model\fish\build\fish.dll` to bench a fresh build while
 a server still holds `bin\fish.dll`.
+Load phases and the planner decision: FISH_GPU_VERBOSE=1 ([fish/plan] and [fish/load]
+lines) or stats()["placement"]["planner" / "load_profile"]; a cold-cache load: point
+FISH_CACHE_DIR at an empty directory. test/test_fish.py honours FISH_LIBRARY.

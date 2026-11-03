@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "backend.h"
+#include "calib.h"
 #include "gguf.h"
 #include "lora.h"
 #include "ops.h"
@@ -185,6 +186,17 @@ public:
 
     // The merged adapter, if any (report.active).
     const LoraReport& adapter() const { return adapter_; }
+
+    // Load-time calibration (device formats, include/fish/calib.h): run the
+    // CPU forward over the built-in text (at most max_tokens) and return, per
+    // projection, E[x_j^2] of its input columns. Only valid before placement
+    // (every matmul must run on the CPU at file precision); the planner calls
+    // it itself when it re-quantises. Public for fish_test_gpu's studies.
+    bool calibrate(Importance* out, int max_tokens, std::string* err);
+    // What the residency planner decided (empty when it was not used).
+    const std::string& placement_note() const { return placement_note_; }
+    // Wall-clock per load phase (open, bind, place = calibration + upload, span, KV).
+    const std::string& load_profile() const { return load_profile_; }
     // The tensor the forward pass actually uses for `name`: the merged copy
     // when an adapter touched it, else the file's tensor. nullptr if unbound.
     const TensorInfo* weight(const std::string& name) const;
@@ -199,6 +211,11 @@ private:
     void place_layers();
     void evict_layer(int li);
     void prepare_span();
+    // Whole model + output on the GPU as one span, re-quantising device
+    // copies and/or shortening the context only as far as needed. False =
+    // not possible; nothing is left resident and the caller places partially.
+    bool plan_resident(ComputeBackend* gpu, uint64_t vram_budget, uint64_t arena);
+    bool alloc_cpu_kv();
     void moe_ffn(const LayerTensors& L, int n_tok);
     void dense_ffn(const LayerTensors& L, int n_tok);
     // expert < 0: whole tensors (dense / shared expert); otherwise the slice of
@@ -254,6 +271,7 @@ private:
     bool stream_ = false;
     int stream_window_ = 3;
     std::thread prefetch_thread_;
+    std::thread warm_thread_;   // one-shot page-in of the CPU layers after load
     std::mutex prefetch_mu_;
     std::condition_variable prefetch_cv_;
     int prefetch_request_ = -1;
@@ -280,6 +298,10 @@ private:
     uint64_t weights_bytes_ = 0;
     uint64_t kv_bytes_ = 0;
     int kv_len_ = 0;
+    std::string placement_note_;
+    std::string load_profile_;
+    double calib_seconds_ = 0, upload_seconds_ = 0;
+    bool gpu_kv_q8_ = false;   // planner chose the int8 device KV cache
 };
 
 } // namespace fish

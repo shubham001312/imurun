@@ -16,6 +16,7 @@ This document describes the code that exists. For what is planned, see
 | `src/gguf.cpp`, `include/fish/gguf.h` | GGUF v2/v3 reader: header, metadata, tensor table; whole file memory-mapped read-only; every read bounds-checked. Supports 1–4-D tensors (3-D for MoE experts). |
 | `src/quant.cpp`, `include/fish/quant.h` | Scalar reference kernels: dequantisers for F32/F16/BF16/Q4_0/Q4_1/Q5_0/Q5_1/Q8_0/Q2_K…Q8_K/IQ4_NL/IQ4_XS/MXFP4; `vec_dot` (weights × f32); `vec_dot_q8`/`vec_dot_q8k` (weights × int8); activation quantisers. The dispatch table `QuantKernels` starts scalar. |
 | `src/quantize.cpp` | Writing blocks (the inverse of `quant.cpp`): `quantize_row` / `merge_row` for F32, F16, BF16, Q8_0, Q4_0, Q4_K, Q5_K, Q6_K. Used by the LoRA merge. |
+| `src/calib.cpp`, `include/fish/calib.h` | Load-time calibration for device re-quantisation: the built-in calibration text, the per-column importance (E[x²]) file and the cache directory key (`~/.imurun/cache/fish/`). Used by the residency planner (`LlamaModel::plan_resident`, `docs/engine/GPU.md`). |
 | `src/lora.cpp`, `include/fish/lora.h` | LoRA adapter GGUF validation (`lora_plan`) and row-by-row merge (`lora_merge`); see "LoRA adapters" below. |
 | `src/quant_x86.cpp` | AVX2+FMA+F16C kernels installed at startup after a CPUID check. Each function carries its own `target` attribute so the TU compiles for baseline x86-64. |
 | `src/ops.cpp`, `include/fish/ops.h` | RMSNorm, SiLU/GELU, RoPE (precomputed cos/sin table, normal & NeoX pairing, linear/YaRN/longrope/Llama-3 factors), `matmul_batch` (threaded, int8 fast path), `attention_batch` (threaded over token×head, softcap, sliding window). |
@@ -102,6 +103,15 @@ Disk reads then overlap compute instead of stalling it. Throughput in that
 regime is disk-bound (`specs` predicts it from the measured read speed).
 
 There is no VRAM arena, staging ring or expert cache yet — see the roadmap.
+
+## GPU residency planner
+
+`LlamaModel::place_layers()` first tries `plan_resident()`: every layer and the output
+projection on the GPU as one span, giving up file precision (importance-weighted
+re-quantisation to Q4_K / FQ3 / FQ3S device copies), context length (down to
+`FISH_GPU_MIN_CTX`) and f16 KV (int8) before it gives up residency. The CPU KV cache is
+allocated after placement and only for CPU layers (`alloc_cpu_kv`). Details and
+measurements: `docs/engine/GPU.md`, "Residency planner and device formats".
 
 ## Planner (`specs.cpp`)
 

@@ -42,6 +42,12 @@ class Stats(ctypes.Structure):
         ("draft_accepted", ctypes.c_int),
         ("draft_active", ctypes.c_int),
         ("gpu_mix", ctypes.c_char * 160),
+        # ABI 4
+        ("placement", ctypes.c_char * 320),
+        ("load_profile", ctypes.c_char * 400),
+        ("vram_total", ctypes.c_ulonglong),
+        ("vram_free", ctypes.c_ulonglong),
+        ("vram_headroom", ctypes.c_ulonglong),
     ]
 
 class ModelInfo(ctypes.Structure):
@@ -117,7 +123,7 @@ def load_lib(path: str):
 
 
 def main() -> int:
-    dll = os.path.join(ROOT, "bin", "fish.dll")
+    dll = os.environ.get("FISH_LIBRARY") or os.path.join(ROOT, "bin", "fish.dll")
     model = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
         ROOT, "models", "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
     if not os.path.exists(dll):
@@ -164,7 +170,8 @@ def main() -> int:
           f"vocab={info.vocab} tied={info.tied_output}")
     print(f"  quant: {info.quant.decode()}")
     check(info.n_layers > 0, "model info exposed to the caller")
-    check(info.n_head_kv < info.n_head, "GQA exposed")
+    # Phi-3-mini has no GQA (n_head_kv == n_head); Llama-3 does.
+    check(0 < info.n_head_kv <= info.n_head, "head counts exposed (n_head_kv <= n_head)")
 
     # ---- tokenizer round trip
     text = "Hello, world! The capital of France is"

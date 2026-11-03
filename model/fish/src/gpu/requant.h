@@ -54,8 +54,17 @@ void quantize_row_fq3_w(const float* x, int64_t n, uint8_t* out, const float* im
  * eight levels symmetric around zero, denser near zero than a uniform grid
  * (c = kFQ3SCubic), because weights within a group are bell-shaped. One scale
  * per 32 values and no min (0.25 bpw less than FQ3).
+ *
+ * ONLY WITH IMPORTANCE. The grid has no zero level: every near-zero weight
+ * moves by about +-0.11 s. Unweighted, that took Llama-3.2-1B to perplexity
+ * 287 (from 11.9) although every tensor's relative RMS error was 16-19%:
+ * the few massive-activation input columns multiply exactly those errors.
+ * The planner never picks FQ3S without calibration data. A Q3_K-style
+ * variant (u = (q-4)/4 with a zero level, signed 6-bit scales) was measured
+ * the same day: unweighted +64% perplexity on the 1B, but importance-weighted
+ * +50% against +34% for this grid, so this grid stays.
  */
-constexpr float kFQ3SCubic = 0.20f;
+constexpr float kFQ3SCubic = 0.35f;
 float fq3s_level(int q);
 void quantize_row_fq3s(const float* x, int64_t n, uint8_t* out, const float* imp);
 void dequant_row_fq3s(const uint8_t* src, float* y, int64_t n);

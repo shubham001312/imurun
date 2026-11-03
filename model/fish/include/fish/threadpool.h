@@ -33,6 +33,11 @@ public:
     void parallel_range(int n, const std::function<void(int, int)>& fn, int grain = 0);
 
     int size() const { return static_cast<int>(workers_.size()) + 1; }
+    // Threads that take part in the next jobs (1..size(), the caller counts
+    // as one). Workers above the limit park: they wake for each job and
+    // return at once without taking work. fish_set_threads (REQUESTS.md R1).
+    int active_threads() const { return limit_.load(std::memory_order_relaxed); }
+    void set_active_threads(int n);
 
     // How many threads FISH would use by default on this machine.
     static int default_threads();
@@ -43,7 +48,7 @@ private:
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
-    void worker_loop();
+    void worker_loop(int index);
     void run_job(const std::function<void(int, int)>& fn, int n, int grain);
 
     std::vector<std::thread> workers_;
@@ -57,6 +62,7 @@ private:
     int generation_ = 0;
     int active_ = 0;
     bool stop_ = false;
+    std::atomic<int> limit_{1};
 };
 
 } // namespace fish

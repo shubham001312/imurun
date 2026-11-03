@@ -37,6 +37,11 @@ struct fish_ctx {
     fish_stats stats{};
     // Token ids whose KV is currently live in the model, used for prefix reuse.
     std::vector<int32_t> cache_ids;
+    // Last truncation of an over-long prompt: kept = ids[0, trunc_head) +
+    // ids[trunc_drop_end, end). Re-applied while it still fits so the
+    // prefix cache keeps hitting on an append-only conversation.
+    int trunc_head = 0, trunc_drop_end = 0;
+    std::vector<int32_t> trunc_head_ids;
     // Speculative decoding: a small model with the same vocabulary.
     std::unique_ptr<LlamaModel> draft;
     std::vector<int32_t> draft_cache_ids;
@@ -190,7 +195,7 @@ static int load_locked(fish_ctx* ctx, const char* path, int n_ctx) {
     ctx->stats.weights_bytes = ctx->model->weights_bytes();
     ctx->stats.kv_bytes = ctx->model->kv_bytes();
     ctx->stats.context_size = ctx->model->config().n_ctx;
-    ctx->stats.n_threads = ThreadPool::instance().size();
+    ctx->stats.n_threads = ThreadPool::instance().active_threads();
     ctx->stats.streaming = ctx->model->streaming() ? 1 : 0;
     ctx->stats.gpu_layers = ctx->model->gpu_layers();
     ctx->stats.ram_layers = ctx->model->ram_layers();
@@ -202,7 +207,11 @@ static int load_locked(fish_ctx* ctx, const char* path, int n_ctx) {
         const std::string mix = gpu->describe();
         std::snprintf(ctx->stats.gpu_mix, sizeof(ctx->stats.gpu_mix), "%s%s",
                       ctx->model->gpu_span() ? "span: " : "", mix.c_str());
+        ctx->stats.vram_total = gpu->memory_total();
+        ctx->stats.vram_headroom = vram_headroom_bytes(ctx->stats.vram_total);
     }
+    std::snprintf(ctx->stats.placement, sizeof(ctx->stats.placement), "%s", ctx->model->placement_note().c_str());
+    std::snprintf(ctx->stats.load_profile, sizeof(ctx->stats.load_profile), "%s", ctx->model->load_profile().c_str());
     ctx->err.clear();
     return 0;
 }
@@ -441,6 +450,17 @@ void fish_get_stats(fish_ctx* ctx, fish_stats* out) {
     *out = ctx->stats;
     out->peak_rss_mb = peak_rss_mb();
     if (ctx->model) out->context_used = ctx->model->kv_len();
+    out->n_threads = ThreadPool::instance().active_threads();
+    if (ComputeBackend* gpu = gpu_backend()) if (ctx->model && out->vram_total) out->vram_free = gpu->memory_free();
+}
+
+int fish_set_threads(fish_ctx* ctx, int n) {
+    if (!ctx) return -1;
+    // Under the context lock: never while a generation of this context runs.
+    std::lock_guard<std::mutex> lock(ctx->mu);
+    ThreadPool::instance().set_active_threads(n);
+    ctx->stats.n_threads = ThreadPool::instance().active_threads();
+    return 0;
 }
 
 const char* fish_kernel_name(void) { return quant_kernels().name; }
@@ -462,7 +482,8 @@ const char* fish_specs_json(fish_ctx* ctx) {
         }
     }
     buf = "{\"hardware\":" + hardware_json(hw) + ",\"plan\":" + plan_part +
-          ",\"threads\":" + std::to_string(ThreadPool::instance().size()) +
+          ",\"threads\":" + std::to_string(ThreadPool::instance().active_threads()) +
+          ",\"pool_threads\":" + std::to_string(ThreadPool::instance().size()) +
           ",\"kernel\":\"" + std::string(fish_kernel_name()) + "\"}";
     return buf.c_str();
 }
@@ -487,13 +508,34 @@ static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
     {
         const int reserve = std::max(64, std::min(max_tokens, c.n_ctx / 4));
         const int budget = std::max(32, c.n_ctx - reserve);
-        if (static_cast<int>(ids.size()) > budget) {
-            const int head = budget / 4;
-            const int tail = budget - head;
+        const int n = static_cast<int>(ids.size());
+        if (n > budget) {
+            // Same cut as last time if it still fits and the head is the same:
+            // the kept tokens are then a prefix-extension of the cached ones.
+            // Measured before (8B, CPU): every turn after the first cut moved
+            // the cut point, the cache matched 497 of 1984 tokens and the turn
+            // took 222 s instead of ~2 s.
+            int head = ctx->trunc_head, drop_end = ctx->trunc_drop_end;
+            bool reuse = head > 0 && drop_end > head && drop_end < n && n - (drop_end - head) <= budget &&
+                         static_cast<int>(ctx->trunc_head_ids.size()) == head &&
+                         std::equal(ctx->trunc_head_ids.begin(), ctx->trunc_head_ids.end(), ids.begin());
+            if (!reuse) {
+                // A new cut drops a quarter of the budget more than needed, so
+                // the next turns fit under the same cut.
+                head = budget / 4;
+                const int tail = std::max(1, budget - head - budget / 4);
+                drop_end = n - tail;
+                ctx->trunc_head = head;
+                ctx->trunc_drop_end = drop_end;
+                ctx->trunc_head_ids.assign(ids.begin(), ids.begin() + head);
+            }
             std::vector<int32_t> kept(ids.begin(), ids.begin() + head);
-            kept.insert(kept.end(), ids.end() - tail, ids.end());
+            kept.insert(kept.end(), ids.begin() + drop_end, ids.end());
             ids.swap(kept);
             ctx->stats.truncated = 1;
+        } else {
+            ctx->trunc_head = ctx->trunc_drop_end = 0;
+            ctx->trunc_head_ids.clear();
         }
     }
 

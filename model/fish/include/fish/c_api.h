@@ -23,7 +23,7 @@
 extern "C" {
 #endif
 
-#define FISH_ABI_VERSION 3
+#define FISH_ABI_VERSION 4
 
 typedef struct fish_ctx fish_ctx;
 
@@ -61,6 +61,12 @@ typedef struct fish_stats {
     int    draft_active;       /* 1 when a draft model is loaded */
     /* what the GPU holds, human readable: layers, re-quantised mix, span KV */
     char   gpu_mix[160];
+    /* ABI 4 */
+    char   placement[320];     /* the residency planner's decision, or why it was not used */
+    char   load_profile[400];  /* wall-clock per load phase (open, bind, calibration, upload, span, KV) */
+    unsigned long long vram_total;     /* device heap bytes (any Vulkan vendor), 0 without a GPU */
+    unsigned long long vram_free;      /* live free VRAM at this stats call (VK_EXT_memory_budget) */
+    unsigned long long vram_headroom;  /* VRAM the engine keeps free (FISH_VRAM_HEADROOM_PCT / _MB) */
 } fish_stats;
 
 typedef struct fish_model_info {
@@ -162,6 +168,11 @@ FISH_API const char* fish_supported_archs(void);
  * identical to decoding with the target alone; only speed changes. Returns 0,
  * -1 on a bad argument, -2 if the draft fails to load, -3 if the vocabularies
  * differ. k <= 0 picks a default (5). */
+/* Threads that take part in the next generations: 1..pool size (extra
+ * workers park). The pool itself is created once (FISH_THREADS). Returns 0 on
+ * success, -1 without a context. fish_stats.n_threads reports the active count. */
+FISH_API int  fish_set_threads(fish_ctx* ctx, int n);
+
 FISH_API int  fish_set_draft(fish_ctx* ctx, const char* path, int k);
 FISH_API void fish_clear_draft(fish_ctx* ctx);
 

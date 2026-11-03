@@ -321,7 +321,7 @@ void dequant32(uint ro, uint k, out float v[32]) {
 // Rows are 4-aligned (104 = 26 words).
 const uint BLOCK_K = 256u;
 const uint BLOCK_B = 104u;
-const float FQ3S_C = 0.20;   // = kFQ3SCubic
+const float FQ3S_C = 0.35;   // = kFQ3SCubic
 
 float fq3s_scale(uint b, uint g) {
     const uint w0 = w[b >> 2], w1 = w[(b >> 2) + 1u];

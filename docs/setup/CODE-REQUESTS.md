@@ -139,6 +139,8 @@ exist. This holds until tag `v0.3.0` is pushed. (b) It does not mention the new
 
 ## 14. `services/server/api.py`: a client that hangs up mid-reply prints a traceback (owner: services/server) — 2026-11-03
 
+**Done 2026-11-03:** `ConnectionAbortedError` joined `BrokenPipeError`/`ConnectionResetError` in the download-stream handler (the turn stream already caught `OSError`).
+
 Reported by the owner (many of these in the console):
 `ConnectionAbortedError: [WinError 10053]` from `self.wfile.write(body)` in
 `_reply` (line ~430), surfaced through `socketserver.process_request_thread`

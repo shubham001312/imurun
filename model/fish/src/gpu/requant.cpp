@@ -12,6 +12,16 @@ namespace gpu {
 
 namespace {
 
+// Round-to-nearest for a code that is clamped to [0, nmax] right after:
+// equal to clamp(lround(v)) (halves away from zero, negatives -> 0) without
+// the libm call, which was ~70% of the re-quantisation time (q4k_w / fq3_w
+// 135-141 ns per weight single-threaded, 2026-11-03).
+inline int code_round(float v, int nmax) {
+    if (!(v > 0.0f)) return 0;
+    const int q = static_cast<int>(v + 0.5f);
+    return q < nmax ? q : nmax;
+}
+
 // IEEE f32 -> f16, round to nearest even, with subnormals (super-block scales
 // of small weights are often below the f16 normal range).
 uint16_t f2h(float f) {
@@ -54,7 +64,7 @@ void fit_group(const float* x, int nmax, float* scale, float* mout) {
         double sq = 0, sqq = 0, sx = 0, sqx = 0;
         const float inv = 1.0f / sc;
         for (int i = 0; i < 32; ++i) {
-            const int q = std::max(0, std::min(nmax, static_cast<int>(std::lround((x[i] - b) * inv))));
+            const int q = code_round((x[i] - b) * inv, nmax);
             sq += q; sqq += static_cast<double>(q) * q; sx += x[i]; sqx += static_cast<double>(q) * x[i];
         }
         const double det = 32.0 * sqq - sq * sq;
@@ -93,9 +103,7 @@ void quantize_super(const float* x, int nmax, SuperBlock& sb) {
         sb.lm[g] = static_cast<uint8_t>(dm > 0 ? std::max(0, std::min(63, static_cast<int>(std::lround(mn[g] / dm)))) : 0);
         const float s = dd * sb.ls[g], m = dm * sb.lm[g];
         for (int i = 0; i < 32; ++i) {
-            int q = 0;
-            if (s > 0) q = static_cast<int>(std::lround((x[32 * g + i] + m) / s));
-            sb.q[32 * g + i] = static_cast<uint8_t>(std::max(0, std::min(nmax, q)));
+            sb.q[32 * g + i] = static_cast<uint8_t>(s > 0 ? code_round((x[32 * g + i] + m) / s, nmax) : 0);
         }
     }
 }
@@ -193,13 +201,15 @@ void fit_group_w(const float* x, const float* w, int nmax, float* scale, float* 
         const float lo = xmin * shrink, hi = xmax * shrink;
         float sc = (hi - lo) / nmax, b = lo;
         for (int it = 0; it < 3; ++it) {
-            double sw = 0, sq = 0, sqq = 0, sx = 0, sqx = 0;
+            // 32-term sums in float (they vectorise), the solve in double.
+            float fsw = 0, fsq = 0, fsqq = 0, fsx = 0, fsqx = 0;
             const float inv = 1.0f / sc;
             for (int i = 0; i < 32; ++i) {
-                const int q = std::max(0, std::min(nmax, static_cast<int>(std::lround((x[i] - b) * inv))));
-                sw += w[i]; sq += w[i] * q; sqq += w[i] * static_cast<double>(q) * q;
-                sx += w[i] * x[i]; sqx += w[i] * static_cast<double>(q) * x[i];
+                const float q = static_cast<float>(code_round((x[i] - b) * inv, nmax));
+                fsw += w[i]; fsq += w[i] * q; fsqq += w[i] * q * q;
+                fsx += w[i] * x[i]; fsqx += w[i] * q * x[i];
             }
+            const double sw = fsw, sq = fsq, sqq = fsqq, sx = fsx, sqx = fsqx;
             const double det = sw * sqq - sq * sq;
             if (det <= 0) break;
             double nsc = (sw * sqx - sq * sx) / det;
@@ -209,10 +219,10 @@ void fit_group_w(const float* x, const float* w, int nmax, float* scale, float* 
             sc = static_cast<float>(nsc);
             b = static_cast<float>(nb);
         }
-        double err = 0;
+        float err = 0;   // 32 terms: float is enough to rank candidates (and vectorises)
         const float inv = 1.0f / sc;
         for (int i = 0; i < 32; ++i) {
-            const int q = std::max(0, std::min(nmax, static_cast<int>(std::lround((x[i] - b) * inv))));
+            const int q = code_round((x[i] - b) * inv, nmax);
             const float d = sc * q + b - x[i];
             err += w[i] * d * d;
         }
@@ -244,10 +254,10 @@ void quantize_super_w(const float* x, const float* w, int nmax, SuperBlock& sb) 
         for (int a = std::max(0, ls0 - 1); a <= std::min(63, ls0 + 1); ++a) {
             for (int c = std::max(0, lm0 - 1); c <= std::min(63, lm0 + 1); ++c) {
                 const float s = dd * a, m = dm * c;
-                double err = 0;
+                float err = 0;
+                const float inv = s > 0 ? 1.0f / s : 0.0f;
                 for (int i = 0; i < 32; ++i) {
-                    int q = s > 0 ? static_cast<int>(std::lround((xg[i] + m) / s)) : 0;
-                    q = std::max(0, std::min(nmax, q));
+                    const int q = s > 0 ? code_round((xg[i] + m) * inv, nmax) : 0;
                     const float e = s * q - m - xg[i];
                     err += wg[i] * e * e;
                 }
@@ -257,11 +267,8 @@ void quantize_super_w(const float* x, const float* w, int nmax, SuperBlock& sb) 
         sb.ls[g] = static_cast<uint8_t>(bls);
         sb.lm[g] = static_cast<uint8_t>(blm);
         const float s = dd * bls, m = dm * blm;
-        for (int i = 0; i < 32; ++i) {
-            int q = 0;
-            if (s > 0) q = static_cast<int>(std::lround((xg[i] + m) / s));
-            sb.q[32 * g + i] = static_cast<uint8_t>(std::max(0, std::min(nmax, q)));
-        }
+        for (int i = 0; i < 32; ++i)
+            sb.q[32 * g + i] = static_cast<uint8_t>(s > 0 ? code_round((xg[i] + m) / s, nmax) : 0);
     }
 }
 
@@ -304,8 +311,8 @@ inline int fq3s_nearest(const Fq3sTable& tb, float y) {
 
 // Weighted error of one group at scale s (codes chosen nearest).
 inline double fq3s_err(const Fq3sTable& tb, const float* x, const float* w, float s, uint8_t* q) {
-    double err = 0;
-    const float inv = s > 0 ? 1.0f / s : 0.0f;
+    float err = 0;
+    const float inv = s != 0.0f ? 1.0f / s : 0.0f;
     for (int i = 0; i < 32; ++i) {
         const int c = fq3s_nearest(tb, x[i] * inv);
         if (q) q[i] = static_cast<uint8_t>(c);
@@ -384,7 +391,7 @@ void quantize_row_fq3s_tb(const Fq3sTable& tb, const float* x, int64_t n, uint8_
             double best = INFINITY;
             if (amax > 0) {
                 uint8_t q[32];
-                for (int k = 0; k < 6; ++k) {
+                for (int k = 0; k < 8; ++k) {
                     float s = amax / tb.L[7] * (1.0f - 0.05f * k);
                     fq3s_err(tb, xg, wg, s, q);
                     double num = 0, den = 0;
@@ -414,7 +421,7 @@ void quantize_row_fq3s_tb(const Fq3sTable& tb, const float* x, int64_t n, uint8_
                 const double e = fq3s_err(tb, xg, wg, d * l, nullptr);
                 if (e < best) { best = e; bl = l; }
             }
-            ls[g] = static_cast<uint8_t>(bl);
+            ls[g] = static_cast<uint8_t>(bl & 63);
             fq3s_err(tb, xg, wg, d * bl, qall + 32 * g);
         }
         std::memcpy(o, &hd, 2);

@@ -11,9 +11,11 @@ Windows/Linux, later Android and macOS (MoltenVK). Two levels:
   KV cache**, FFN, residuals. One command buffer, one submit, one fence per
   `forward()`; x crosses the bus once each way. Default when the model allows it
   (`FISH_GPU_SPAN=0` turns it off).
-- **Online re-quantisation** (`FISH_GPU_REQUANT=1/2/3`, opt-in): the device gets
-  a smaller copy of the weights, so more layers fit in VRAM. The GGUF and the CPU
-  path are untouched.
+- **Online re-quantisation** (default since the residency planner,
+  2026-11-02/03; `FISH_GPU_REQUANT=0` turns it off): the device gets a smaller,
+  importance-weighted copy of the weights (Q4_K / FQ3 / FQ3S) so more layers fit
+  in VRAM; the copies are cached on disk. The GGUF and the CPU path are
+  untouched. See "Residency planner and device formats".
 
 Code: `model/fish/src/gpu/` (`vk_loader.*`, `vulkan_backend.*`, `requant.*`),
 `model/fish/shaders/` (GLSL), test `model/fish/test/test_gpu.cpp`.
@@ -56,9 +58,15 @@ the graphics+compute family; measured: no latency difference on the RTX 3050).
 | `FISH_GPU=0` | No GPU backend at all (not even registered). |
 | `FISH_GPU=cpu` | Allow (and prefer) a software Vulkan device. For CI/testing. |
 | `FISH_GPU_LAYERS=N` | At most N layers on the GPU (`0` = CPU only). Unset = as many as fit. |
-| `FISH_VRAM_BUDGET_MB=M` | VRAM ceiling. Unset = 85% of free VRAM at load. |
+| `FISH_VRAM_BUDGET_MB=M` | VRAM ceiling. Unset = live free VRAM minus the headroom. |
 | `FISH_GPU_SPAN=0` | Disable layer spans (stage-1 per-matmul routing only). |
-| `FISH_GPU_REQUANT=1/2/3` | Re-quantise the device copy (see below). Default 0 (off). |
+| `FISH_GPU_REQUANT=1/2/3` | Legacy fixed re-quantisation modes (see below); they skip the residency planner. `0` = never re-quantise (the planner may still shorten the context). Unset / `auto` = the residency planner decides ("Residency planner and device formats"). |
+| `FISH_GPU_MIN_CTX=n` | Shortest context the planner may fit to keep the whole model on the GPU (default 2048). |
+| `FISH_GPU_KV=f16\|q8` | Device KV type; default f16, int8 when the planner is VRAM-bound. |
+| `FISH_VRAM_HEADROOM_MB=m` | VRAM kept free (default max(256 MB, 5% of the heap)). Wins over `_PCT`. |
+| `FISH_VRAM_HEADROOM_PCT=p` | VRAM kept free as a share of the device heap (0..90); for hosts that do not know the card's size. |
+| `FISH_GPU_CACHE=0`, `FISH_CACHE_DIR` | Disable / move the importance + re-quantised-bytes cache (`~/.imurun/cache/fish`). |
+| `FISH_VK_COOPMAT=0` | No tensor-core prefill kernels. |
 | `FISH_GPU_DEVICE=i` | Use physical device i. |
 | `FISH_GPU_VERBOSE=1` | Init line (device, heap, budget), span sizes, or why the backend / span declined. |
 | `FISH_GPU_PROFILE=1` | GPU timestamps around every submit (`fish::gpu::vulkan_profile`). |
@@ -284,17 +292,180 @@ other 11 layers (~5.7 ms each on this loaded CPU). Span ≡ per-matmul on the
    one submit (tiled kernels for n > 4) and `span_kv_truncate` drops rejected
    ones.
 
-Re-quantisation stays **opt-in** (default 0): only mode 2 clears 95% with
-margin; mode 3 sits exactly on the bar in one 200-token sample.
+(2026-11-01 conclusion, superseded: re-quantisation was opt-in then. Since
+the residency planner it is the default; see the next section and the quality
+line in "Known limits".)
+
+## Residency planner and device formats (2026-11-02)
+
+`LlamaModel::plan_resident()` (called from `place_layers()` for dense models
+with spans enabled and no `FISH_GPU_LAYERS` cap) tries to put **every layer
+and the output projection** on the GPU as one span before the old
+"last layers backwards while they fit" placement is used. A layer left on the
+CPU costs more per token than the whole span saves on an 8B, so the planner
+gives up first file precision, then context, before it gives up residency:
+
+1. File bytes + device KV for the requested context fit → nothing changes.
+2. File bytes fit with a shorter context (≥ `FISH_GPU_MIN_CTX`, default 2048,
+   or the request if smaller) → the context is shortened to what fits
+   (multiple of 256). `fish_model_info.n_ctx` / stats show the new value.
+3. Otherwise the device copies are **re-quantised** (`FISH_GPU_REQUANT` unset
+   or `auto`): every tensor starts at its smallest format, then the most
+   sensitive tensors are upgraded while the budget at the floor context allows
+   (k/v to the file's type first, then in three rounds output, ffn_down,
+   q/o/qkv, gate/up; first and last layers before middle ones). Whatever is
+   left becomes context.
+4. **(2026-11-03)** Not even that fits → the **top N layers + output**,
+   re-quantised the same way, with N as large as the budget allows at the
+   floor context; the first 32 − N layers run on the CPU at file precision.
+   Before this step existed, an 8B that missed full residency by ~100 MB fell
+   all the way back to step 5 (13–16 layers at file precision, 4.6–7.3 tok/s):
+   this was the "GPU not used properly" the owner saw.
+5. Otherwise (or if calibration fails) → per-layer placement at file
+   precision, as before.
+
+**This is the default path**: no environment variable is needed for an 8B to
+be re-quantised and placed on the GPU. `FISH_GPU_REQUANT=0` keeps file
+precision (steps 1–2, then 5); `FISH_GPU_REQUANT=1/2/3` are the old fixed
+modes and skip the planner.
+
+**What it decided** is in `fish_stats.placement` (ABI 4; Python
+`stats()["placement"]["planner"]`) and, with `FISH_GPU_VERBOSE=1`, on stderr
+as `[fish/plan]` lines, e.g.
+`partial: 31/32 layers + output, 2873 MB weights (file 57, q4k 0, fq3 3, fq3s 158 tensors), ctx 4096 -> 2048, KV int8, budget 3109 MB, calibration cached 0.0 s, upload 1.8 s`,
+or why it did not run (`planner skipped: GPU layer cap …`, `no resident plan:
+… re-quantisation is off`, `resident upload of … failed …`). The load phases
+are in `fish_stats.load_profile` / `[fish/load]`.
+
+Budget: live free VRAM (`VK_EXT_memory_budget`) minus a headroom of
+max(256 MB, 5% of the heap), `FISH_VRAM_HEADROOM_PCT` (share of the heap) or
+`FISH_VRAM_HEADROOM_MB` (wins), minus the span arena, a 64 MB margin for
+scratch, span parameters and driver allocations, and **6% of the weights**
+(measured: WDDM lowers the live budget by 8–14% more than the bytes uploaded;
+without that margin the span declined afterwards and gave back 3 of 31
+planned layers). After reserving the weight blocks the planner re-reads the
+live budget and drops layers *before* uploading if the span's KV + arena would
+no longer fit. The backend applies the same headroom rule
+(`vram_headroom_bytes()`, `backend.h`) to every new allocation; tensors that
+land in a block the planner reserved are not checked again (they take no new
+VRAM; before this fix the planner's own reservation made the first upload
+fail). (Before 2026-11-02: 85% of free plus a max(256 MB, 10%) headroom.)
+
+**Headroom matters most.** The server's balanced preset passes
+`FISH_VRAM_HEADROOM_MB=1024`. On this 4 GB card with ~0.75 GB held by the
+desktop that leaves ~2.3 GB, i.e. ~22–24 of the 8B's 32 layers; with the
+engine default (256 MB) ~3.1 GB, i.e. 28–31 layers. See `BENCHMARKS.md`
+(2026-11-03) for both.
+
+**Format choice prefers the cache.** Re-quantising the 8B costs ~80 s at 4
+threads, and the live budget moves by tens of MB between loads. When the
+model's cache directory already holds device files, the upgrade passes only
+move a tensor to a format that is cached (or to the file's own bytes), so a
+slightly different budget does not trigger a new re-quantisation.
+
+Device KV: f16, or **int8** (`span_kv_store_q8` / `span_attention_q8`: four
+codes per word, one f32 absmax per 32 values, 2.25 B per K+V element instead
+of 4) when the planner is VRAM-bound (the file's weights with an f16 cache
+for the requested context do not fit). `FISH_GPU_KV=f16|q8` forces one.
+Measured on Llama-3.2-1B (file weights, held-out perplexity vs the CPU):
+f16 KV +0.90%, int8 KV +1.30% (top-1 98.3% / 98.6%, KL 0.0018 / 0.0025).
+
+### Device formats
+
+| Format | bpw | Layout (`src/gpu/requant.h`) | From |
+|---|---|---|---|
+| file | as is | the GGUF bytes | any supported type |
+| Q4_K | 4.5 | GGUF Q4_K, importance-weighted fit | Q5_K, Q6_K, Q8_0, F16, … |
+| FQ3 | 3.5 | 6-bit scale + min per 32, 3-bit codes, importance-weighted fit | any K/legacy type |
+| **FQ3S** | **3.25** | f16 d, 8 × 6-bit scales, 3-bit codes on 8 levels symmetric around 0, cubic warp `L = u(1−c+cu²)`, c = 0.35 | any K/legacy type |
+
+FQ3S keeps the FQ3 code planes (three words per 32 values, decoded with two
+masks and one `unpackUnorm4x8`) and replaces scale + min by one scale and a
+non-uniform level map, which costs two extra FMAs per value in the kernel.
+
+**Importance.** The re-quantisers minimise Σ w_j (x_j − x̂_j)² per block with
+w_j = E[x_j²] · sqrt(σ² + x_j²), where E[x_j²] is input column j's mean square
+over a built-in calibration text (`src/calib.cpp`, ~600 tokens: prose,
+explanation, code, arithmetic, dialogue, lists, three other languages), run
+once through the CPU forward at file precision with a matmul observer
+(`set_matmul_observer`, `ops.h`). The output projection gets the plain fit
+(it sees one row per forward). The planner never re-quantises without
+importance. Unweighted, FQ3S has no zero level and every near-zero weight
+moves by ±0.11 s; the few massive-activation channels of Llama models
+multiply exactly those errors (1B perplexity 287 vs 11.9).
+
+**Cache.** `~/.imurun/cache/fish/<file stem>-<size>-<hash>/`:
+`importance.v1.bin` and one `<tensor>.<fmt>.dev` per re-quantised tensor
+(header with types/shape, then the device bytes). The key hashes the file
+size, the first and last MiB, the adapter (path + scale) and the format
+version. `FISH_CACHE_DIR` moves the root, `FISH_GPU_CACHE=0` disables it.
+Second load reads the bytes instead of calibrating and re-quantising.
+**Since 2026-11-03 the warm path really is one:** a cache hit is read with a
+4 MB stdio buffer straight into a two-buffer staging ring (`stream_upload`:
+chunk k is read from disk while chunk k−1 is DMA'd), with no host copy of the
+tensor and no GGUF page touched. Before, every hit was silently rejected
+(`setvbuf` was called after the header read, which drops buffered bytes, so
+the payload read came up short) and the whole model was re-quantised on every
+load: 8B load 106 s → **2.75 s** warm (2873 MB from cache in 1.4 s).
+File-precision tensors go through the same ring (memcpy from the mapping
+overlapped with the copy).
+
+**Allocation.** Weight buffers are bound into shared device-memory blocks;
+the planner reserves its whole total up front (`reserve_device`, ≤ 256 MB
+blocks, first-fit). One `vkAllocateMemory` per tensor cost ~1.2 MB each
+under WDDM. The per-matmul scratch is capped at 32 MB of output (tokens are
+chunked): sized for 256 tokens it was 262 MB of VRAM for a 128k vocabulary.
+
+Study switches (tests only): `FISH_GPU_FORCE=file|q4k|fq3|fq3s` (every tensor
+in one format), `FISH_GPU_TIERS=<list>` (formats the planner may use),
+`FISH_GPU_NO_IMPORTANCE=1`, `FISH_CALIB_TOKENS=n`, `fish_test_gpu --ppl`
+(held-out perplexity, top-1, KL vs the CPU file path; `FISH_TEST_CTX` sets the
+load context), `--fq3s-scan` (per-tensor FQ3S error).
+
+### Prefill on the tensor cores (`matmul_coop.comp`, 2026-11-03)
+
+For n_tok > `FISH_VK_MATVEC_MAX` (prefill, verification) every weight type
+now has a cooperative-matrix kernel: 64 rows × 64 tokens per workgroup, K in
+steps of 32. Half the threads dequantise the weight slab into f16 shared
+memory (the same `dequant32` as every other kernel) while the other half
+convert the activations to f16. Four subgroups then do 16×16×16
+`coopMatMulAdd` with f32 accumulators. It is enabled when the device has
+`VK_KHR_cooperative_matrix` with a 16×16×16 f16×f16→f32 subgroup
+configuration, `shaderFloat16`, the Vulkan memory model and 32-wide subgroups
+(the RTX 3050 has all of them); otherwise the f32 tiled kernel is used.
+`FISH_VK_COOPMAT=0` turns it off. f16 activations change kernel outputs by up
+to ~4e-4 × max|y|; held-out perplexity on the 1B went from +0.90% to +0.92%
+vs the CPU (no measurable change).
+
+Measured, 1B fully on the GPU: prefill of 128 tokens **983 tok/s** vs 670
+(tiled f32), 256 tokens 626 tok/s, on a GPU that other programs were using.
+A 64 × 128 tile with 128-token span chunks measured no better under the same
+contention and was reverted. The kernel reaches only ~1 TFLOPS on the 1B's
+shapes, far below the tensor cores' peak. The next step is the load side:
+coalesced activation loads, double-buffered slabs, and a wider K per barrier.
+
+### Prefix cache across requests
+
+`fish_generate_chat` keeps the longest common token prefix with the previous
+request, including the tokens it generated (`cache_ids`). Measured on the 8B
+on the CPU: a repeated 1,936-token prompt costs 0.42 s instead of 157 s.
+Since 2026-11-03 a **truncated** prompt keeps its cut point (`trunc_head`,
+`trunc_drop_end` in `c_api.cpp`). Before, every new turn moved the cut and
+the cache matched only the head: 8B follow-up turn 222 s with 497 of 1,984
+tokens cached; 1B at ctx 1024: 240/960 cached, 4.35 s → 720/739 cached,
+0.08 s. A new cut drops an extra quarter of the budget, so the next turns fit
+under the same cut. There is one cached sequence per context: a side
+generation with another prefix (planner, title, voice clean-up) evicts the
+conversation. A multi-slot cache is on the roadmap.
 
 ## Known limits
 
 - **VRAM is the binding constraint for the 8B on a 4 GB card.** Other programs
-  (desktop, browser) hold ~0.7–1.8 GB of it during these runs; with the 85%
-  rule and the headroom, ~2.3–2.8 GB is usable. The file's 32 layers + output
-  need ~4.3 GB as is, ~3.35 GB fully re-quantised (mode 1), so at most ~22
-  layers reach the GPU. 20 tok/s needs essentially all 32 layers on the GPU
-  (CPU layers cost ~5.5 ms each per token here).
+  (desktop, browser) hold ~0.7–1.8 GB of it. The 32 layers + output need
+  2.9 GB at the smallest formats (FQ3S) + KV + margins ≈ 3.2 GB, so with
+  0.75 GB taken and the default 256 MB headroom 28–30 layers fit, with the
+  server's 1024 MB headroom ~22. Each layer left on the CPU costs ~6 ms per
+  token at 4 threads; 28 GPU layers measured 18.7 tok/s, 30 measured 21.3.
 - **Quality of 3-bit re-quantisation**: see Measured; mode 1 does not meet the
   ≥ 95% top-1 bar, so re-quantisation stays opt-in.
 - Decode matvec reaches ~75–100 GB/s (Q4_K) and ~60–86 GB/s (Q6_K) of ~192;
@@ -304,8 +475,16 @@ margin; mode 3 sits exactly on the bar in one 200-token sample.
 - The tiled prefill kernel is a plain f32 tile (~1.4 TFLOPS); no
   cooperative-matrix path.
 - MoE models use stage 1 only (experts on the CPU).
-- Load with `FISH_GPU_REQUANT` costs the re-quantisation (~6 ns per weight
-  with 8 threads: ~30 s for the 8B on a busy machine).
+- Cold load (first load of a model, or a format the cache does not hold yet)
+  costs calibration (~512 tokens on the CPU) plus the re-quantisation:
+  153 s for the 8B at 4 threads (calibration 69.6 s, re-quantisation 79.8 s,
+  2026-11-03, after the 2.1x re-quantiser speed-up). Warm loads read the
+  cache: 2.75–3.7 s for the 8B.
+- **Quality of the 8B's default placement** (mostly FQ3S, 3.25 bpw): held-out
+  perplexity +7.2% vs the CPU at file precision, top-1 agreement 82.8% over
+  every position, KL 0.158 nats (`fish_test_gpu --ppl`, 2026-11-03). This is
+  roughly what a Q3_K file costs; it is the price of residency on a 4 GB card.
+  `FISH_GPU_REQUANT=0` keeps file precision (and ~7 tok/s).
 - Tested on NVIDIA only (RTX 3050 Laptop, driver 610.62). AMD/Intel/Android
   paths are portable SPIR-V without vendor extensions but **not run**.
 

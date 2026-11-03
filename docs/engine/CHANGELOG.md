@@ -1,5 +1,152 @@
 # Engine changelog
 
+## 2026-11-03 — default GPU residency for the 8B, warm loads in seconds, ABI 4
+
+Measured on the RTX 3050 Laptop (4 GB; the desktop held 0.63–0.80 GB of it),
+`FISH_THREADS=4`, every GPU number paired with a CPU-only run from the same
+session. Tables: `BENCHMARKS.md` (2026-11-03).
+
+**Why the owner saw "the GPU is not used".** For the 8B the residency planner
+(`plan_resident`, uncommitted work of 2026-11-02) needed all 32 layers to fit
+at the smallest formats. 32 layers + output + KV + margins come to ~3.2 GB.
+The planner missed that by ~100 MB with the default headroom and by ~900 MB
+with the server's 1024 MB headroom, gave up silently, and the old per-layer
+placement put 13–14 layers on the GPU at file precision (6.9–7.3 tok/s).
+
+Planner and placement (`src/model.cpp`):
+- **Partial plan (step 4).** If the whole model does not fit, the planner now
+  places the top N layers + output, re-quantised, with N as large as the
+  budget allows at the floor context. The first layers run on the CPU at file
+  precision.
+- **Decision is visible.** `placement_note_` records what was decided, or why
+  nothing was (`planner skipped: …`, `no resident plan: …`,
+  `resident upload of … failed …`). It reaches the new
+  `fish_stats.placement`, Python `stats()["placement"]["planner"]`, and
+  `[fish/plan]` lines with `FISH_GPU_VERBOSE=1`.
+- **Reservation counted once.** The planner reserves its weight blocks up front.
+  The backend then refused the first tensor, because WDDM's live budget already
+  counted the reservation: "live free fell by 2960 MB" and the plan was lost.
+  Uploads that land in a reserved block are no longer checked against the live
+  budget (`vulkan_backend.cpp`). `release_reserve()` frees unused blocks.
+- **Margin for driver overhead.** WDDM's live budget fell 8–14% more than the
+  bytes uploaded. The plan now adds 6% of the weights to its margin.
+  - Before: the span declined afterwards and gave back 3 of 31 planned layers,
+    after they had been uploaded.
+  - After reserving, the planner re-reads the live budget. If the span's KV +
+    arena no longer fit, it drops layers before any upload.
+- **Format choice prefers the cache.** When the model's cache directory holds
+  device files, the upgrade passes only move a tensor to a cached format (or to
+  the file's own bytes). A budget that differs by a few MB from the last load
+  no longer re-quantises the model.
+  - Measured with the 1024 MB headroom: 105 cache hits, 0 re-quantised.
+
+Cold start (owner priority 1):
+- **The warm path never worked.** `dev_cache_open` / the old `dev_cache_read`
+  called `setvbuf` after reading the header. That drops buffered bytes, so the
+  payload read came up short and every cached tensor was rejected and
+  re-quantised again on every load.
+  - Fixed: `setvbuf` is now called before the first read.
+  - 8B load: **106 s → 2.75 s** (161 tensors / 2873 MB from cache in 1.4 s).
+- **Streamed upload.** `stream_upload` reads a cache hit with a 4 MB stdio
+  buffer straight into a two-buffer staging ring: chunk k is read while chunk
+  k−1 is DMA'd. No host copy of the tensor is made and no GGUF page is touched.
+  - File-precision tensors go through the same ring: a memcpy from the mapping,
+    overlapped with the copy.
+  - Phi-3 (2.2 GB at file precision) uploads in 1.0–2.6 s.
+- **Re-quantiser 2.1× faster** (`requant.cpp`), with weighted error unchanged
+  (micro-benchmark: Q4_K→Q4_K_w 3.688%, FQ3_w 7.318%, FQ3S 10.024%):
+  - `code_round()` replaces `std::lround` in the per-element loops: the libm
+    call was ~70% of the time.
+  - The 32-term sums are in float; the solve stays in double.
+  - Single thread: q4k_w 135 → 66 ns/weight, fq3_w 141 → 65; fq3s unchanged
+    at 34.
+  - Cold Phi-3 at the 1024 MB headroom was 190 s, of which 152 s was
+    re-quantisation; it was measured before this change.
+- **Load profile.** `fish_stats.load_profile` and `[fish/load]` give wall-clock
+  seconds per phase: open, metadata+bind, place (calibration, upload: cache
+  hits / re-quantised / file tensors / copy), span, CPU KV. The backend's
+  `upload_profile()` supplies the upload breakdown.
+- **Page-in of the CPU layers.** After a resident (non-streamed) placement, a
+  one-shot thread prefetches the CPU layers' file pages (`warm_thread_`). The
+  first prefill then does not fault them in 4–64 KB at a time.
+
+Requests (`REQUESTS.md`):
+- **R1** `fish_set_threads(ctx, n)`: active pool threads 1..pool size; workers
+  above the limit park.
+  - `fish_stats.n_threads` and `fish_specs_json().threads` report the active
+    count; `pool_threads` reports the pool size.
+  - The matmul grain uses the active count.
+- **R2** `SpecsEngine::plan()` uses `FISH_RAM_BUDGET_MB` as its RAM budget when
+  set (n_ctx choice).
+- **R3** Two parts:
+  - `FISH_VRAM_HEADROOM_PCT`: one rule, `vram_headroom_bytes()` in
+    `backend.h`, for the backend and the planner.
+  - `fish_stats.vram_total` / `vram_free` (live) / `vram_headroom`.
+
+ABI 4 (`c_api.h`, mirrored in `model/fish_native.py` `EXPECTED_ABI = 4` and
+`test/test_fish.py`):
+- `fish_stats` grows at the end: `placement[320]`, `load_profile[400]`,
+  `vram_total`, `vram_free`, `vram_headroom`.
+- New function `fish_set_threads`.
+- Python `stats()["placement"]` gains `planner`, `load_profile` and
+  `vram_*_bytes`.
+
+Cleanup:
+- Deleted the never-compiled skeleton modules:
+  - sources: `engine`, `platform`, `hardware_probe`, `layer_planner`,
+    `resident_window`, `prefetcher`, `expert_streamer`, `adapter_mgr`,
+    `compression_policy`, `gguf_inspect` (`.cpp`);
+  - headers: `engine.h`, `platform.h`, `mingw_fix.h`;
+  - test: `test_hardware_gguf.cpp` (also never built).
+- `model/fish/doc/*.md` still describe that old design (see CLAUDE.md).
+- `test/test_fish.py` honours `FISH_LIBRARY`, so a fresh build can be tested
+  while a server holds `bin/fish.dll`.
+- The uncommitted 2026-11-02/03 work is now part of this change and builds
+  cleanly: `calib.cpp` (calibration text, cache dir/key, importance file),
+  the FQ3S format, int8 device KV, and `matmul_coop` prefill.
+
+Also measured: Llama-3.2-1B, 16/16 resident at file precision, 84.2 tok/s
+(100.3 on the second turn), TTFT 0.17 s, vs 17.1 tok/s / 1.04 s on the CPU.
+
+Results, before → after (old `bin/fish.dll` of 2026-11-01 vs this build; same
+session, 4 threads):
+
+| | Before | After | CPU only, same session |
+|---|---|---|---|
+| 8B, default headroom | 14/32 layers, 7.3 tok/s, TTFT 3.96 s | 28/32 layers (31 planned at ctx 2048; 30 at ctx 512 → 21.3 tok/s), **18.7 tok/s**, TTFT **0.67 s** (0.29 s with the prefix cache), warm load 2.75 s | 5.3 tok/s, TTFT 3.87 s |
+| 8B, `FISH_VRAM_HEADROOM_MB=1024` (server balanced preset) | 13 layers, 6.9 tok/s, TTFT 4.21 s | 21 layers, 11.5 tok/s, TTFT 1.49 s, load 2.52 s | — |
+| Phi-3-mini, default | 29 layers (ctx 2048) 32.3 tok/s; 23 layers at ctx 4096, 21.4 | 32/32 at file precision, **39.7 tok/s** (40.2 when 4096 was requested; context fitted to 2816), TTFT 0.31 s | 9.7 tok/s, TTFT 2.46 s |
+| Phi-3-mini, headroom 1024 | 29 layers, 31.4 tok/s | 32/32 re-quantised (Q4_K/FQ3), **47.9 tok/s**; cold load 190 s (calibration 35 s, before the re-quantiser speed-up) | — |
+
+Quality of the 8B's default placement:
+- Format: mostly FQ3S, 3.25 bpw.
+- Held-out perplexity 15.12 vs 14.11 on the CPU at file precision (+7.2%).
+- Top-1 agreement 82.8% over all 291 positions; KL mean 0.158, max 1.56 nats
+  (`fish_test_gpu --ppl`).
+- That is roughly the cost of a Q3_K file. `FISH_GPU_REQUANT=0` keeps file
+  precision.
+
+Not reached / not done:
+- **8B 20 tok/s holds only when ≥ 30 layers fit**: 21.3 tok/s at 30 layers,
+  18.7 at 28.
+  - With 0.75 GB taken by the desktop and the server's 1 GB headroom it is
+    11.5 tok/s.
+  - 30 tok/s would need all 32 layers plus ~110 GB/s sustained matvec.
+- Phi-3 "~5 tok/s" was not reproduced in this session. The old build gave
+  21–32 tok/s here.
+  - Most likely cause: the old placement counted f16 KV at full n_ctx per GPU
+    layer and had no re-quantisation, so a busier card left only a few
+    layers.
+  - Phi-3 is now fully resident in every configuration measured.
+- **Cold load of the 8B** (empty cache, after the re-quantiser speed-up) is
+  still **153 s**: calibration 69.6 s (512 tokens through the CPU forward)
+  plus re-quantisation 79.8 s (146 tensors), 4 threads. It happens once per
+  model; warm loads are 2.75–3.7 s. The levers left are fewer calibration
+  tokens (quality not measured yet) and a background re-quantisation that
+  serves the first load at file precision.
+- Upload of layers is not yet overlapped with re-quantisation of the next
+  tensor (cold path only; the warm path is IO-bound at ~2 GB/s).
+
 ## 2026-11-02 — Linux link fix
 
 - `CMakeLists.txt`: `libfish.so` now links `Threads::Threads` (non-MinGW builds).

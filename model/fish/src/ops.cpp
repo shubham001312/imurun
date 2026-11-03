@@ -213,7 +213,7 @@ void matmul_batch(GgmlType type, const void* w,
                     }
                 }
             }
-        }, /*grain=*/std::max(rows_per_tile, n_out / (pool.size() * 8)));
+        }, /*grain=*/std::max(rows_per_tile, n_out / (pool.active_threads() * 8)));
         return;
     }
 

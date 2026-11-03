@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -53,14 +54,15 @@ constexpr int kMaxTok = 256;               // tokens per dispatch (engine max ba
 constexpr uint64_t kStagingBytes = 32ull << 20;
 constexpr uint64_t kPadBytes = 16;         // straddling 32-bit reads in dequant.glsl
 // Headroom kept free on the device heap (live, via VK_EXT_memory_budget):
-// max(256 MB, 5% of the heap), FISH_VRAM_HEADROOM_MB overrides. Measured on a
+// max(256 MB, 5% of the heap), FISH_VRAM_HEADROOM_PCT / _MB override. Measured on a
 // 4 GB laptop GPU shared with another process: filling the heap to the last
 // ~64 MB made WDDM demote part of the weights to system memory and the
 // kernels fell from ~60 to ~35 GB/s. Until 2026-11-02 the rule was
 // max(256 MB, 10%) plus a separate 85%-of-free ceiling; on a 4 GB card that
 // left ~500 MB unused, which is exactly what a fully resident 8B lacks.
 // 256 MB held with the whole model resident (GPU.md, "Device formats").
-constexpr uint64_t kMinHeadroom = 256ull << 20;
+// The rule itself is vram_headroom_bytes() (backend.h), shared with the planner.
+constexpr uint64_t kScratchOutBytes = 32ull << 20;   // per-matmul output scratch cap
 constexpr uint32_t kGroupOut = 2;          // dev_y_ holds this many max-width outputs (gate|up)
 
 bool env_is(const char* name, const char* v) {
@@ -82,6 +84,7 @@ struct TypeKernels {
     const char* suffix;
     VkPipeline matvec = VK_NULL_HANDLE;
     VkPipeline tiled = VK_NULL_HANDLE;
+    VkPipeline coop = VK_NULL_HANDLE;    // matmul_coop.comp, null without cooperative matrices
 };
 
 struct Buffer {
@@ -90,7 +93,20 @@ struct Buffer {
     uint64_t size = 0;
     void* map = nullptr;
     bool coherent = true;
+    int block = -1;          // >= 0: bound inside weight block `block` (mem not owned)
 };
+
+// Weight buffers are bound into shared device-memory blocks. One
+// vkAllocateMemory per tensor cost ~1.2 MB each on the RTX 3050 / WDDM
+// (measured: 2778 MB of weights in 224 buffers lowered the live budget by
+// 3097 MB, scratch and staging included), i.e. ~250 MB on an 8B.
+struct WeightBlock {
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    uint32_t type = 0;
+    uint64_t size = 0, used = 0;
+    int live = 0;
+};
+constexpr uint64_t kWeightBlockBytes = 64ull << 20;
 
 // Internal device-only type id for the re-quantised 3-bit layout (never a GGUF type).
 constexpr GgmlType kFQ3 = static_cast<GgmlType>(100);
@@ -117,20 +133,21 @@ struct DevCacheHeader {
     uint64_t payload;
 };
 
-bool dev_cache_read(const std::string& path, const DevCacheHeader& want, std::vector<uint8_t>& out) {
-    if (path.empty()) return false;
+// Opens a cache file whose header matches; the caller reads the payload
+// (streamed straight into the staging ring) and closes it.
+FILE* dev_cache_open(const std::string& path, const DevCacheHeader& want) {
+    if (path.empty()) return nullptr;
     FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
+    if (!f) return nullptr;
+    // 4 MB stdio buffer: large sequential reads instead of 4 KB ones. Must be
+    // set before the first read (setvbuf after I/O drops buffered bytes).
+    std::setvbuf(f, nullptr, _IOFBF, 4u << 20);
     DevCacheHeader h{};
-    bool ok = std::fread(&h, sizeof(h), 1, f) == 1 && std::memcmp(h.magic, want.magic, 8) == 0 &&
-              h.dev_type == want.dev_type && h.src_type == want.src_type && h.n_in == want.n_in &&
-              h.n_out == want.n_out && h.row_bytes == want.row_bytes && h.payload == want.payload;
-    if (ok) {
-        try { out.resize(static_cast<size_t>(h.payload)); } catch (const std::bad_alloc&) { ok = false; }
-    }
-    if (ok) ok = std::fread(out.data(), 1, static_cast<size_t>(h.payload), f) == h.payload;
-    std::fclose(f);
-    return ok;
+    const bool ok = std::fread(&h, sizeof(h), 1, f) == 1 && std::memcmp(h.magic, want.magic, 8) == 0 &&
+                    h.dev_type == want.dev_type && h.src_type == want.src_type && h.n_in == want.n_in &&
+                    h.n_out == want.n_out && h.row_bytes == want.row_bytes && h.payload == want.payload;
+    if (!ok) { std::fclose(f); return nullptr; }
+    return f;
 }
 
 void dev_cache_write(const std::string& path, const DevCacheHeader& h, const uint8_t* data) {
@@ -184,6 +201,11 @@ struct AddPC  { uint32_t n, n_tok, dst_off, dst_stride, src_off, src_stride, src
 struct RopePC { uint32_t off, tok_stride, head_dim, half_rot, pos0, neox, cos_off, sin_off; };
 struct KvPC   { uint32_t kvd, k_off, k_stride, v_off, v_stride, ck_off, cv_off, pos0; };
 struct AttnPC { uint32_t head_dim, group, kvd, q_off, q_stride, o_off, o_stride, ck_off, cv_off, pos0, window; float scale, softcap; };
+// int8 KV (span_kv_store_q8 / span_attention_q8): the same fields + scale offsets.
+struct KvQ8PC   { uint32_t kvd, k_off, k_stride, v_off, v_stride, ck_off, cv_off, pos0, cks_off, cvs_off; };
+struct AttnQ8PC { uint32_t head_dim, group, kvd, q_off, q_stride, o_off, o_stride, ck_off, cv_off, pos0, window; float scale, softcap;
+                  uint32_t cks_off, cvs_off; };
+static_assert(sizeof(AttnQ8PC) <= kPushBytes, "push constants");
 struct ActPC  { uint32_t n, n_tok, g_off, g_stride, u_off, u_stride, o_off, o_stride, gelu; };
 static_assert(sizeof(AttnPC) <= kPushBytes, "push constants");
 
@@ -256,14 +278,7 @@ private:
     // Device type for a planner format, or F32 with ok=false if not possible.
     GgmlType format_type(const TensorInfo* t, int fmt, bool* ok) const;
     bool upload_impl(const TensorInfo* t, GgmlType dev_type, const float* imp, const std::string& cache);
-    uint64_t headroom() const {
-        uint64_t h = std::max<uint64_t>(kMinHeadroom, heap_size_ / 20);
-        if (const char* e = std::getenv("FISH_VRAM_HEADROOM_MB")) {
-            const long long mb = std::atoll(e);
-            if (mb >= 0) h = static_cast<uint64_t>(mb) << 20;
-        }
-        return h;
-    }
+    uint64_t headroom() const { return vram_headroom_bytes(heap_size_); }
 public:
     std::string describe() const;
 private:
@@ -282,6 +297,12 @@ private:
     uint64_t live_free_locked() const;
     int find_type(uint32_t bits, VkMemoryPropertyFlags want, VkMemoryPropertyFlags avoid) const;
     bool create_buffer(Buffer& b, uint64_t size, VkBufferUsageFlags usage, bool host);
+    bool create_weight_buffer(Buffer& b, uint64_t size);
+public:
+    void reserve_device(uint64_t bytes) override;
+    void release_reserve() override;
+private:
+    std::vector<WeightBlock> blocks_;
     bool create_host_buffer(Buffer& b, uint64_t size, VkBufferUsageFlags usage, bool readback);
     void destroy_buffer(Buffer& b);
     bool ensure_scratch(uint32_t n_in, uint32_t n_out);
@@ -306,6 +327,7 @@ private:
     VkPhysicalDeviceMemoryProperties memprops_{};
     VkPhysicalDeviceLimits limits_{};
     bool has_budget_ext_ = false;
+    bool coop_ = false;              // cooperative-matrix prefill kernels enabled
     uint32_t dev_heap_ = 0;
     uint64_t heap_size_ = 0;
     uint64_t budget_ = 0;            // this backend's own VRAM ceiling
@@ -323,8 +345,26 @@ private:
     // mapped host buffers they are copied through.
     Buffer dev_x_, dev_y_, host_x_, host_y_;
     uint32_t cap_in_ = 0, cap_out_ = 0;
+    int tok_cap_ = kMaxTok;              // tokens per run_locked submit (ensure_scratch)
     uint64_t scratch_dev_bytes_ = 0;
     Buffer staging_;
+    // Upload ring (load time): two staging halves, each with its own command
+    // buffer and fence, so the next chunk is read / copied on the CPU while the
+    // previous one is still being DMA'd (stream_upload).
+    Buffer staging2_;
+    VkCommandBuffer cmd_up_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFence fence_up_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    bool up_pending_[2] = {false, false};
+    bool ensure_upload_ring();
+    bool wait_up(int i);
+    bool stream_upload(Buffer& dst, uint64_t bytes, const std::function<bool(uint8_t*, uint64_t, uint64_t)>& fill);
+    // Load profile (upload_profile()): where upload time went.
+    double prof_read_s_ = 0, prof_requant_s_ = 0, prof_copy_s_ = 0;
+    int prof_hits_ = 0, prof_misses_ = 0, prof_file_ = 0;
+    uint64_t prof_bytes_ = 0;
+public:
+    std::string upload_profile(bool reset) override;
+private:
 
     // Last activation batch that is still in dev_x_ (so wq/wk/wv share one
     // upload). A shadow copy is compared because xb_ is reused by every layer.
@@ -343,9 +383,14 @@ private:
     // ---- layer span
     VkPipeline sp_rms_ = VK_NULL_HANDLE, sp_add_ = VK_NULL_HANDLE, sp_rope_ = VK_NULL_HANDLE;
     VkPipeline sp_kv_ = VK_NULL_HANDLE, sp_attn_ = VK_NULL_HANDLE, sp_act_ = VK_NULL_HANDLE;
+    VkPipeline sp_kv8_ = VK_NULL_HANDLE, sp_attn8_ = VK_NULL_HANDLE;   // int8 KV cache
     bool span_ready_ = false;
     std::vector<SpanLayerDev> span_layers_;
     Buffer span_arena_, span_params_, span_kv_;
+    // Host staging of x for span_forward, kMaxTok tokens. Not shared with the
+    // per-matmul scratch, which is capped by output width (ensure_scratch):
+    // sharing it limited span batches to 32 tokens on a 128k vocabulary.
+    Buffer span_hx_, span_hy_;
     VkDescriptorSet span_set_ = VK_NULL_HANDLE;        // (arena, params, kv)
     VkDescriptorPool span_pool_ = VK_NULL_HANDLE;
     uint64_t span_dev_bytes_ = 0;
@@ -362,6 +407,7 @@ private:
         uint32_t E = 0, H = 0, HKV = 0, D = 0, F = 0, Q = 0, KV = 0, n_ctx = 0, half = 0;
         float eps = 0, scale = 0, softcap = 0;
         uint32_t window = 0, gelu = 0, neox = 0, cos_off = 0, sin_off = 0;
+        bool kvq8 = false;
         // arena offsets (floats)
         uint32_t X = 0, XB = 0, QKV = 0, ATT = 0, PROJ = 0, GU = 0, ACT = 0, FFN = 0;
     } sp_;
@@ -513,6 +559,79 @@ bool VulkanBackend::init_locked() {
         }
     }
 
+    // ---- tensor cores for prefill (matmul_coop.comp): VK_KHR_cooperative_matrix
+    // with a 16x16x16 f16 x f16 -> f32 subgroup configuration, shaderFloat16,
+    // the Vulkan memory model and 32-wide subgroups. FISH_VK_COOPMAT=0 opts out.
+    VkPhysicalDeviceCooperativeMatrixFeaturesKHR en_cm{};
+    VkPhysicalDeviceShaderFloat16Int8Features en_f16{};
+    VkPhysicalDeviceVulkanMemoryModelFeatures en_vmm{};
+    const void* dev_pnext = nullptr;
+    {
+        bool e_cm = false, e_f16 = false, e_vmm = false;
+        for (const auto& e : dexts) {
+            if (std::strcmp(e.extensionName, "VK_KHR_cooperative_matrix") == 0) e_cm = true;
+            if (std::strcmp(e.extensionName, "VK_KHR_shader_float16_int8") == 0) e_f16 = true;
+            if (std::strcmp(e.extensionName, "VK_KHR_vulkan_memory_model") == 0) e_vmm = true;
+        }
+        bool ok = e_cm && e_f16 && e_vmm && !env_is("FISH_VK_COOPMAT", "0");
+        if (ok) {
+            VkPhysicalDeviceCooperativeMatrixFeaturesKHR cm{};
+            cm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+            VkPhysicalDeviceShaderFloat16Int8Features f16{};
+            f16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+            VkPhysicalDeviceVulkanMemoryModelFeatures vmm{};
+            vmm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+            cm.pNext = &f16;
+            f16.pNext = &vmm;
+            VkPhysicalDeviceFeatures2 f2{};
+            f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            f2.pNext = &cm;
+            vk_.vkGetPhysicalDeviceFeatures2(phys_, &f2);
+            ok = cm.cooperativeMatrix && f16.shaderFloat16 && vmm.vulkanMemoryModel;
+        }
+        if (ok) {
+            VkPhysicalDeviceSubgroupProperties sp{};
+            sp.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+            VkPhysicalDeviceProperties2 p2{};
+            p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            p2.pNext = &sp;
+            vk_.vkGetPhysicalDeviceProperties2(phys_, &p2);
+            ok = sp.subgroupSize == 32;
+        }
+        if (ok) {
+            auto fn = reinterpret_cast<PFN_vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR>(
+                vk_.vkGetInstanceProcAddr(instance_, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"));
+            uint32_t n = 0;
+            bool found = false;
+            if (fn && fn(phys_, &n, nullptr) == VK_SUCCESS && n > 0) {
+                std::vector<VkCooperativeMatrixPropertiesKHR> cps(n);
+                for (auto& c : cps) c.sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+                if (fn(phys_, &n, cps.data()) == VK_SUCCESS)
+                    for (const auto& c : cps)
+                        found |= c.MSize == 16 && c.NSize == 16 && c.KSize == 16 &&
+                                 c.AType == VK_COMPONENT_TYPE_FLOAT16_KHR && c.BType == VK_COMPONENT_TYPE_FLOAT16_KHR &&
+                                 c.CType == VK_COMPONENT_TYPE_FLOAT32_KHR && c.ResultType == VK_COMPONENT_TYPE_FLOAT32_KHR &&
+                                 c.scope == VK_SCOPE_SUBGROUP_KHR;
+            }
+            ok = found;
+        }
+        if (ok) {
+            dev_ext.push_back("VK_KHR_cooperative_matrix");
+            dev_ext.push_back("VK_KHR_shader_float16_int8");
+            dev_ext.push_back("VK_KHR_vulkan_memory_model");
+            en_cm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
+            en_cm.cooperativeMatrix = VK_TRUE;
+            en_f16.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES;
+            en_f16.shaderFloat16 = VK_TRUE;
+            en_vmm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES;
+            en_vmm.vulkanMemoryModel = VK_TRUE;
+            en_cm.pNext = &en_f16;
+            en_f16.pNext = &en_vmm;
+            dev_pnext = &en_cm;
+            coop_ = true;
+        }
+    }
+
     const float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{};
     qci.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -525,6 +644,7 @@ bool VulkanBackend::init_locked() {
     dci.pQueueCreateInfos = &qci;
     dci.enabledExtensionCount = static_cast<uint32_t>(dev_ext.size());
     dci.ppEnabledExtensionNames = dev_ext.empty() ? nullptr : dev_ext.data();
+    dci.pNext = dev_pnext;
     if (vk_.vkCreateDevice(phys_, &dci, nullptr, &device_) != VK_SUCCESS) {
         device_ = VK_NULL_HANDLE;
         return fail("vkCreateDevice failed");
@@ -615,6 +735,7 @@ bool VulkanBackend::init_locked() {
     for (auto& k : kernels_) {
         k.matvec = make_pipeline(std::string("matvec_") + k.suffix);
         k.tiled = make_pipeline(std::string("matmul_tiled_") + k.suffix);
+        if (coop_) k.coop = make_pipeline(std::string("matmul_coop_") + k.suffix);
         if (k.matvec && k.tiled) ++n_ok;
     }
     if (n_ok == 0) return fail("no compute pipeline could be created");
@@ -624,6 +745,8 @@ bool VulkanBackend::init_locked() {
     sp_rope_ = make_pipeline("span_rope");
     sp_kv_   = make_pipeline("span_kv_store");
     sp_attn_ = make_pipeline("span_attention");
+    sp_kv8_  = make_pipeline("span_kv_store_q8");
+    sp_attn8_ = make_pipeline("span_attention_q8");
     sp_act_  = make_pipeline("span_act_mul");
 
     if (const char* e = std::getenv("FISH_VK_MATVEC_MAX")) matvec_max_tok_ = std::max(1, std::atoi(e));
@@ -661,7 +784,7 @@ void VulkanBackend::shutdown() {
     if (device_) {
         vk_.vkDeviceWaitIdle(device_);
         span_release_locked();
-        for (VkPipeline p : {sp_rms_, sp_add_, sp_rope_, sp_kv_, sp_attn_, sp_act_})
+        for (VkPipeline p : {sp_rms_, sp_add_, sp_rope_, sp_kv_, sp_attn_, sp_act_, sp_kv8_, sp_attn8_})
             if (p) vk_.vkDestroyPipeline(device_, p, nullptr);
         for (auto& kv : res_) {
             destroy_buffer(kv.second.w);
@@ -670,6 +793,7 @@ void VulkanBackend::shutdown() {
         destroy_buffer(dev_x_); destroy_buffer(dev_y_);
         destroy_buffer(host_x_); destroy_buffer(host_y_);
         destroy_buffer(staging_);
+        destroy_buffer(staging2_);
         for (VkDescriptorPool p : pools_) vk_.vkDestroyDescriptorPool(device_, p, nullptr);
         pools_.clear();
         for (auto& k : kernels_) {
@@ -680,6 +804,7 @@ void VulkanBackend::shutdown() {
         if (pipe_layout_) vk_.vkDestroyPipelineLayout(device_, pipe_layout_, nullptr);
         if (set_layout_) vk_.vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
         if (fence_) vk_.vkDestroyFence(device_, fence_, nullptr);
+        for (VkFence& f : fence_up_) if (f) { vk_.vkDestroyFence(device_, f, nullptr); f = VK_NULL_HANDLE; }
         if (qpool_) vk_.vkDestroyQueryPool(device_, qpool_, nullptr);
         if (stage_pool_) vk_.vkDestroyQueryPool(device_, stage_pool_, nullptr);
         if (cmd_pool_) vk_.vkDestroyCommandPool(device_, cmd_pool_, nullptr);
@@ -784,10 +909,141 @@ bool VulkanBackend::create_host_buffer(Buffer& b, uint64_t size, VkBufferUsageFl
 
 void VulkanBackend::destroy_buffer(Buffer& b) {
     if (!device_) { b = Buffer{}; return; }
+    if (b.block >= 0) {
+        if (b.buf) vk_.vkDestroyBuffer(device_, b.buf, nullptr);
+        --blocks_[static_cast<size_t>(b.block)].live;
+        // Free every block without a live buffer, including reserved blocks
+        // that were never used (planner fallback, unload).
+        for (WeightBlock& wb : blocks_) {
+            if (wb.mem && wb.live <= 0) {
+                vk_.vkFreeMemory(device_, wb.mem, nullptr);
+                wb = WeightBlock{};
+            }
+        }
+        b = Buffer{};
+        return;
+    }
     if (b.map && b.mem) vk_.vkUnmapMemory(device_, b.mem);
     if (b.buf) vk_.vkDestroyBuffer(device_, b.buf, nullptr);
     if (b.mem) vk_.vkFreeMemory(device_, b.mem, nullptr);
     b = Buffer{};
+}
+
+// The planner knows its total before uploading: allocate it as a few large
+// blocks (first-fit then leaves only small holes) instead of growing 64 MB
+// blocks whose tails are wasted when tensor sizes mix (Q6_K 46 MB next to
+// FQ3S 23 MB). A block holds no buffer yet, so it is freed with the last one
+// bound to it or by release of the whole model.
+void VulkanBackend::reserve_device(uint64_t bytes) {
+    if (!ensure_init() || bytes == 0) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    if (broken_) return;
+    // Memory type of a device-local storage buffer (probe with a tiny buffer).
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = 4096;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer probe = VK_NULL_HANDLE;
+    if (vk_.vkCreateBuffer(device_, &bci, nullptr, &probe) != VK_SUCCESS) return;
+    VkMemoryRequirements req{};
+    vk_.vkGetBufferMemoryRequirements(device_, probe, &req);
+    vk_.vkDestroyBuffer(device_, probe, nullptr);
+    int type = find_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    if (type < 0) type = find_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (type < 0) return;
+    constexpr uint64_t kBig = 256ull << 20;
+    const uint64_t n = (bytes + kBig - 1) / kBig;
+    const uint64_t each = (bytes / n + (4ull << 20) + 0xFFFFF) & ~0xFFFFFull;   // + 4 MB holes slack
+    for (uint64_t i = 0; i < n; ++i) {
+        WeightBlock wb;
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = std::min<uint64_t>(each, limits_.maxStorageBufferRange);
+        mai.memoryTypeIndex = static_cast<uint32_t>(type);
+        if (vk_.vkAllocateMemory(device_, &mai, nullptr, &wb.mem) != VK_SUCCESS) return;
+        wb.type = static_cast<uint32_t>(type);
+        wb.size = mai.allocationSize;
+        wb.live = 0;
+        bool placed = false;
+        for (auto& slot : blocks_) if (!slot.mem) { slot = wb; placed = true; break; }
+        if (!placed) blocks_.push_back(wb);
+    }
+    if (verbose()) std::fprintf(stderr, "[fish/vulkan] reserved %llu x %.0f MB weight blocks; live free now %.0f MB\n",
+                                static_cast<unsigned long long>(n), each / 1048576.0, live_free_locked() / 1048576.0);
+}
+
+void VulkanBackend::release_reserve() {
+    if (!ensure_init()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    for (WeightBlock& wb : blocks_) {
+        if (wb.mem && wb.live <= 0) {
+            vk_.vkFreeMemory(device_, wb.mem, nullptr);
+            wb = WeightBlock{};
+        }
+    }
+}
+
+// A device-local buffer bound into a shared block (bump allocation; a block
+// is freed when its last buffer goes). Larger than a block: dedicated memory.
+bool VulkanBackend::create_weight_buffer(Buffer& b, uint64_t size) {
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = size;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vk_.vkCreateBuffer(device_, &bci, nullptr, &b.buf) != VK_SUCCESS) { b.buf = VK_NULL_HANDLE; return false; }
+    VkMemoryRequirements req{};
+    vk_.vkGetBufferMemoryRequirements(device_, b.buf, &req);
+    int type = find_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+    if (type < 0) type = find_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, 0);
+    if (type < 0) {
+        vk_.vkDestroyBuffer(device_, b.buf, nullptr);
+        b = Buffer{};
+        return false;
+    }
+    const uint64_t align = std::max<uint64_t>(req.alignment, 256);
+    int bi = -1;
+    for (size_t i = 0; i < blocks_.size(); ++i) {
+        const WeightBlock& wb = blocks_[i];
+        if (!wb.mem || wb.type != static_cast<uint32_t>(type)) continue;
+        const uint64_t off = (wb.used + align - 1) / align * align;
+        if (off + req.size <= wb.size) { bi = static_cast<int>(i); break; }
+    }
+    if (bi < 0 && req.size > kWeightBlockBytes) {
+        vk_.vkDestroyBuffer(device_, b.buf, nullptr);
+        b = Buffer{};
+        return create_buffer(b, size, bci.usage, false);
+    }
+    if (bi < 0) {
+        WeightBlock wb;
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = kWeightBlockBytes;
+        mai.memoryTypeIndex = static_cast<uint32_t>(type);
+        if (vk_.vkAllocateMemory(device_, &mai, nullptr, &wb.mem) != VK_SUCCESS) {
+            vk_.vkDestroyBuffer(device_, b.buf, nullptr);
+            b = Buffer{};
+            return false;
+        }
+        wb.type = static_cast<uint32_t>(type);
+        wb.size = kWeightBlockBytes;
+        for (size_t i = 0; i < blocks_.size() && bi < 0; ++i) if (!blocks_[i].mem) { blocks_[i] = wb; bi = static_cast<int>(i); }
+        if (bi < 0) { blocks_.push_back(wb); bi = static_cast<int>(blocks_.size() - 1); }
+    }
+    WeightBlock& wb = blocks_[static_cast<size_t>(bi)];
+    const uint64_t off = (wb.used + align - 1) / align * align;
+    if (vk_.vkBindBufferMemory(device_, b.buf, wb.mem, off) != VK_SUCCESS) {
+        vk_.vkDestroyBuffer(device_, b.buf, nullptr);
+        b = Buffer{};
+        if (wb.live == 0) { vk_.vkFreeMemory(device_, wb.mem, nullptr); wb = WeightBlock{}; }
+        return false;
+    }
+    wb.used = off + req.size;
+    ++wb.live;
+    b.block = bi;
+    b.size = size;
+    return true;
 }
 
 // Grow the activation/result buffers so a kMaxTok batch of this tensor fits.
@@ -796,8 +1052,15 @@ bool VulkanBackend::ensure_scratch(uint32_t n_in, uint32_t n_out) {
     const uint32_t want_in = std::max(cap_in_, n_in);
     const uint32_t want_out = std::max(cap_out_, n_out);
     if (want_in == cap_in_ && want_out == cap_out_ && dev_x_.buf) return true;
-    const uint64_t xb = static_cast<uint64_t>(kMaxTok) * want_in * 4;
-    const uint64_t yb = static_cast<uint64_t>(kMaxTok) * want_out * kGroupOut * 4;
+    // Tokens per submit: up to kMaxTok, but the output scratch is capped at
+    // kScratchOutBytes. Sized for 256 tokens it was 256 x vocab x 2 floats:
+    // 262 MB of VRAM (and as much pinned host memory) for a 128k vocabulary,
+    // which is what a fully resident 8B was short of. Wide outputs only see
+    // many tokens in verification / tests; run_locked() chunks those.
+    const uint64_t per_tok_out = static_cast<uint64_t>(want_out) * kGroupOut * 4;
+    const int tok_cap = static_cast<int>(std::max<uint64_t>(8, std::min<uint64_t>(kMaxTok, kScratchOutBytes / per_tok_out)));
+    const uint64_t xb = static_cast<uint64_t>(tok_cap) * want_in * 4;
+    const uint64_t yb = static_cast<uint64_t>(tok_cap) * per_tok_out;
     if (bytes_resident_ + xb + yb > budget_) return false;
 
     Buffer nx, ny, hx, hy;
@@ -814,7 +1077,8 @@ bool VulkanBackend::ensure_scratch(uint32_t n_in, uint32_t n_out) {
     cap_in_ = want_in;
     cap_out_ = want_out;
     scratch_dev_bytes_ = xb + yb;
-    shadow_.assign(static_cast<size_t>(kMaxTok) * want_in, 0.0f);
+    tok_cap_ = tok_cap;
+    shadow_.assign(static_cast<size_t>(tok_cap) * want_in, 0.0f);
     last_x_ = nullptr;
     last_count_ = 0;
     for (auto& kv : res_) write_set(kv.second);
@@ -889,6 +1153,82 @@ bool VulkanBackend::submit_and_wait() {
     broken_ = true;
     status_ = "device stopped responding; GPU disabled for this process";
     return false;
+}
+
+bool VulkanBackend::ensure_upload_ring() {
+    if (cmd_up_[0] && fence_up_[0] && fence_up_[1] && staging_.buf && staging2_.buf) return true;
+    if (!staging_.buf && !create_host_buffer(staging_, kStagingBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false)) return false;
+    if (!staging2_.buf && !create_host_buffer(staging2_, kStagingBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false)) return false;
+    if (!cmd_up_[0]) {
+        VkCommandBufferAllocateInfo cai{};
+        cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cai.commandPool = cmd_pool_;
+        cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cai.commandBufferCount = 2;
+        if (vk_.vkAllocateCommandBuffers(device_, &cai, cmd_up_) != VK_SUCCESS) { cmd_up_[0] = cmd_up_[1] = VK_NULL_HANDLE; return false; }
+    }
+    for (VkFence& f : fence_up_) {
+        if (f) continue;
+        VkFenceCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        if (vk_.vkCreateFence(device_, &fci, nullptr, &f) != VK_SUCCESS) { f = VK_NULL_HANDLE; return false; }
+    }
+    return true;
+}
+
+bool VulkanBackend::wait_up(int i) {
+    if (!up_pending_[i]) return true;
+    up_pending_[i] = false;
+    for (int k = 0; k < 20; ++k) {
+        const VkResult r = vk_.vkWaitForFences(device_, 1, &fence_up_[i], VK_TRUE, 1000000000ull);
+        if (r == VK_SUCCESS) { vk_.vkResetFences(device_, 1, &fence_up_[i]); return true; }
+        if (r != VK_TIMEOUT) break;
+    }
+    broken_ = true;
+    status_ = "device stopped responding; GPU disabled for this process";
+    return false;
+}
+
+// Copies `bytes` into dst through the two staging halves: fill(staging, off,
+// n) produces chunk k on the CPU while chunk k-1 is still in flight.
+bool VulkanBackend::stream_upload(Buffer& dst, uint64_t bytes,
+                                  const std::function<bool(uint8_t*, uint64_t, uint64_t)>& fill) {
+    if (!ensure_upload_ring()) return false;
+    Buffer* st[2] = {&staging_, &staging2_};
+    int k = 0;
+    bool ok = true;
+    for (uint64_t off = 0; off < bytes; off += kStagingBytes, k ^= 1) {
+        const uint64_t n = std::min<uint64_t>(kStagingBytes, bytes - off);
+        if (!wait_up(k)) return false;
+        if (!fill(static_cast<uint8_t*>(st[k]->map), off, n)) { ok = false; break; }
+        vk_.vkResetCommandBuffer(cmd_up_[k], 0);
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vk_.vkBeginCommandBuffer(cmd_up_[k], &bi);
+        VkBufferCopy c{0, off, (n + 3) & ~3ull};
+        if (c.size > st[k]->size) c.size = n;
+        if (c.dstOffset + c.size > dst.size) c.size = dst.size - c.dstOffset;
+        vk_.vkCmdCopyBuffer(cmd_up_[k], st[k]->buf, dst.buf, 1, &c);
+        vk_.vkEndCommandBuffer(cmd_up_[k]);
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd_up_[k];
+        if (vk_.vkQueueSubmit(queue_, 1, &si, fence_up_[k]) != VK_SUCCESS) { broken_ = true; return false; }
+        up_pending_[k] = true;
+    }
+    const bool w0 = wait_up(0), w1 = wait_up(1);
+    return ok && w0 && w1;
+}
+
+std::string VulkanBackend::upload_profile(bool reset) {
+    std::lock_guard<std::mutex> lk(mu_);
+    char b[256];
+    std::snprintf(b, sizeof(b), "%.0f MB: %d from cache %.1f s, %d re-quantised %.1f s, %d file tensors, copy %.1f s",
+                  prof_bytes_ / 1048576.0, prof_hits_, prof_read_s_, prof_misses_, prof_requant_s_, prof_file_, prof_copy_s_);
+    if (reset) { prof_read_s_ = prof_requant_s_ = prof_copy_s_ = 0; prof_hits_ = prof_misses_ = prof_file_ = 0; prof_bytes_ = 0; }
+    return b;
 }
 
 // ---------------------------------------------------------------- upload
@@ -973,17 +1313,35 @@ bool VulkanBackend::upload_impl(const TensorInfo* t, GgmlType dev_type, const fl
     // Own ceiling plus what the driver says is free right now (other programs
     // may have taken VRAM since load started).
     if (bytes_resident_ + scratch_dev_bytes_ + size > budget_) return false;
+    // Blocks reserved up front by the planner (reserve_device) are already
+    // ours: a tensor that lands in one takes no new VRAM, so only a fresh
+    // allocation is checked against the live budget. WDDM lowers the
+    // reported budget as this process allocates, so after reserving 2.3 GB
+    // the "live free" figure read 0 MB although every tensor still fitted its
+    // block (8B, 2026-11-03: the first upload after the reservation failed).
+    bool in_block = false;
+    for (const WeightBlock& wb : blocks_) {
+        if (!wb.mem) continue;
+        const uint64_t off = (wb.used + 255) / 256 * 256;
+        if (off + size + 4096 <= wb.size) { in_block = true; break; }
+    }
     const uint64_t live = live_free_locked();
-    if (has_budget_ext_ && size + headroom() > live) return false;
+    if (has_budget_ext_ && !in_block && size + headroom() > live) {
+        if (verbose()) std::fprintf(stderr, "[fish/vulkan] upload of %s (%.1f MB) refused: live free %.0f MB < size + headroom %.0f MB (resident %.0f MB, scratch %.0f MB)\n",
+                                    t->name.c_str(), size / 1048576.0, live / 1048576.0, headroom() / 1048576.0,
+                                    bytes_resident_ / 1048576.0, scratch_dev_bytes_ / 1048576.0);
+        return false;
+    }
 
     Resident r;
-    if (!create_buffer(r.w, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false))
-        return false;
+    if (!create_weight_buffer(r.w, size)) return false;
     if (!staging_.buf && !create_host_buffer(staging_, kStagingBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false)) {
         destroy_buffer(r.w);
         return false;
     }
-    const uint8_t* src = t->data;
+    using clk = std::chrono::steady_clock;
+    const auto tp0 = clk::now();
+    bool streamed = false;
     if (dev_type != t->type) {
         DevCacheHeader h{};
         std::memcpy(h.magic, "FISHDEV1", 8);
@@ -993,27 +1351,46 @@ bool VulkanBackend::upload_impl(const TensorInfo* t, GgmlType dev_type, const fl
         h.n_out = static_cast<uint32_t>(n_out);
         h.row_bytes = static_cast<uint32_t>(row_bytes);
         h.payload = dev_bytes;
-        if (!dev_cache_read(cache, h, requant_buf_)) {
+        // Warm path: the cached device bytes go from the file straight into
+        // the staging ring (no host copy of the tensor, no re-quantisation,
+        // the GGUF pages are never touched).
+        if (FILE* f = dev_cache_open(cache, h)) {
+            const bool ok = stream_upload(r.w, dev_bytes, [&](uint8_t* dst, uint64_t, uint64_t n) {
+                return std::fread(dst, 1, static_cast<size_t>(n), f) == n;
+            });
+            std::fclose(f);
+            if (!ok && broken_) { destroy_buffer(r.w); return false; }
+            streamed = ok;   // a short / corrupt file falls through and is rewritten
+            if (ok) { ++prof_hits_; prof_read_s_ += std::chrono::duration<double>(clk::now() - tp0).count(); }
+        }
+        if (!streamed) {
+            const auto tq = clk::now();
             if (!requantize(t, dev_type, row_bytes, imp)) { destroy_buffer(r.w); return false; }
             dev_cache_write(cache, h, requant_buf_.data());
+            prof_requant_s_ += std::chrono::duration<double>(clk::now() - tq).count();
+            ++prof_misses_;
+            const auto tc = clk::now();
+            const uint8_t* src = requant_buf_.data();
+            if (!stream_upload(r.w, dev_bytes, [&](uint8_t* dst, uint64_t off, uint64_t n) {
+                    std::memcpy(dst, src + off, static_cast<size_t>(n)); return true; })) {
+                destroy_buffer(r.w);
+                return false;
+            }
+            prof_copy_s_ += std::chrono::duration<double>(clk::now() - tc).count();
         }
-        src = requant_buf_.data();
+    } else {
+        // File bytes: memcpy from the mapping (the page faults read the GGUF)
+        // overlaps with the DMA of the previous chunk.
+        const uint8_t* src = t->data;
+        if (!stream_upload(r.w, dev_bytes, [&](uint8_t* dst, uint64_t off, uint64_t n) {
+                std::memcpy(dst, src + off, static_cast<size_t>(n)); return true; })) {
+            destroy_buffer(r.w);
+            return false;
+        }
+        ++prof_file_;
+        prof_copy_s_ += std::chrono::duration<double>(clk::now() - tp0).count();
     }
-    for (uint64_t off = 0; off < dev_bytes; off += kStagingBytes) {
-        const uint64_t n = std::min<uint64_t>(kStagingBytes, dev_bytes - off);
-        std::memcpy(staging_.map, src + off, static_cast<size_t>(n));
-        vk_.vkResetCommandBuffer(cmd_, 0);
-        VkCommandBufferBeginInfo bi{};
-        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vk_.vkBeginCommandBuffer(cmd_, &bi);
-        VkBufferCopy c{0, off, (n + 3) & ~3ull};
-        if (c.size > staging_.size) c.size = n;
-        if (c.dstOffset + c.size > r.w.size) c.size = r.w.size - c.dstOffset;
-        vk_.vkCmdCopyBuffer(cmd_, staging_.buf, r.w.buf, 1, &c);
-        vk_.vkEndCommandBuffer(cmd_);
-        if (!submit_and_wait()) { destroy_buffer(r.w); return false; }
-    }
+    prof_bytes_ += dev_bytes;
     if (!requant_buf_.empty() && requant_buf_.capacity() > (64u << 20)) {
         std::vector<uint8_t>().swap(requant_buf_);   // do not keep a large host buffer around
     }
@@ -1027,6 +1404,10 @@ bool VulkanBackend::upload_impl(const TensorInfo* t, GgmlType dev_type, const fl
     r.nbytes = t->nbytes;
     write_set(r);
     bytes_resident_ += r.w.size;
+    if (env_is("FISH_GPU_VERBOSE", "2")) {
+        int nb = 0; for (const auto& wb : blocks_) nb += wb.mem != VK_NULL_HANDLE;
+        std::fprintf(stderr, "[fish/vulkan] upload %s %s %.1f MB: resident %.0f MB, %d blocks, live free %.0f MB\n", t->name.c_str(), dev_type_name(dev_type), r.w.size / 1048576.0, bytes_resident_ / 1048576.0, nb, live_free_locked() / 1048576.0);
+    }
     res_.emplace(t, r);
     return true;
 }
@@ -1084,8 +1465,8 @@ std::string VulkanBackend::describe() const {
         s += buf;
     }
     if (span_ready_) {
-        std::snprintf(buf, sizeof(buf), "; span %zu layers, KV %.0f MB f16", span_layers_.size(),
-                      span_kv_.size / 1048576.0);
+        std::snprintf(buf, sizeof(buf), "; span %zu layers, KV %.0f MB %s", span_layers_.size(),
+                      span_kv_.size / 1048576.0, sp_.kvq8 ? "int8" : "f16");
         s += buf;
     }
     return s;
@@ -1118,10 +1499,11 @@ bool VulkanBackend::run_locked(const Resident* const* rs, int n, const float* x,
 
     // Load is over once decoding starts: give the staging memory back.
     if (staging_.buf) destroy_buffer(staging_);
+    if (staging2_.buf) destroy_buffer(staging2_);
     if (requant_buf_.capacity()) std::vector<uint8_t>().swap(requant_buf_);
 
-    for (int t0 = 0; t0 < n_tok; t0 += kMaxTok) {
-        const int nt = std::min(kMaxTok, n_tok - t0);
+    for (int t0 = 0; t0 < n_tok; t0 += tok_cap_) {
+        const int nt = std::min(tok_cap_, n_tok - t0);
         const float* xs = x + static_cast<size_t>(t0) * n_in;
         const size_t count = static_cast<size_t>(nt) * n_in;
         const size_t xbytes = count * sizeof(float);
@@ -1161,7 +1543,8 @@ bool VulkanBackend::run_locked(const Resident* const* rs, int n, const float* x,
         for (int i = 0; i < n; ++i) {
             const Resident& r = *rs[i];
             const TypeKernels* k = kernels_for(r.type);
-            vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, use_matvec ? k->matvec : k->tiled);
+            vk_.vkCmdBindPipeline(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                  use_matvec ? k->matvec : (k->coop ? k->coop : k->tiled));
             vk_.vkCmdBindDescriptorSets(cmd_, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &r.set, 0, nullptr);
             const PushConsts pc{r.n_in, r.n_out, static_cast<uint32_t>(nt), r.row_bytes, y_off, 0};
             vk_.vkCmdPushConstants(cmd_, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -1319,6 +1702,8 @@ bool VulkanBackend::upload_bytes(Buffer& dst, const void* src, uint64_t bytes) {
 
 void VulkanBackend::span_release_locked() {
     if (!device_) return;
+    destroy_buffer(span_hx_);
+    destroy_buffer(span_hy_);
     if (prof_stages_ && stage_calls_ > 0) {
         double total = 0;
         for (const auto& e : stage_ms_) total += e.second;
@@ -1363,6 +1748,12 @@ bool VulkanBackend::span_prepare(const SpanParams& p) {
     std::lock_guard<std::mutex> lk(mu_);
     span_release_locked();
     if (broken_ || env_is("FISH_GPU_SPAN", "0")) return false;
+    // Uploads are over: the 32 MB staging buffer and the re-quantisation
+    // buffer would otherwise still hold VRAM / RAM while the span's KV cache
+    // is sized against what is live-free.
+    if (staging_.buf) destroy_buffer(staging_);
+    if (staging2_.buf) destroy_buffer(staging2_);
+    if (requant_buf_.capacity()) std::vector<uint8_t>().swap(requant_buf_);
     if (!sp_rms_ || !sp_add_ || !sp_rope_ || !sp_kv_ || !sp_attn_ || !sp_act_) return false;
     const int nl = p.layer_end - p.layer_begin;
     if (nl <= 0 || !p.layers || p.n_embd <= 0 || p.n_head <= 0 || p.n_head_kv <= 0 ||
@@ -1388,6 +1779,7 @@ bool VulkanBackend::span_prepare(const SpanParams& p) {
     s.gelu = p.gelu ? 1u : 0u;
     s.neox = p.rope_neox ? 1u : 0u;
     if (s.E % 4 || s.Q % 4 || s.F % 4) return false;   // vec4 activation reads
+    s.kvq8 = p.kv_q8 && sp_kv8_ && sp_attn8_ && s.KV % 32 == 0 && s.D % 32 == 0;
 
     // ---- params: norm vectors, biases, RoPE table
     std::vector<float> prm;
@@ -1451,8 +1843,11 @@ bool VulkanBackend::span_prepare(const SpanParams& p) {
     s.FFN = region(C * s.E);
     const uint64_t arena_bytes = at * 4;
     const uint64_t params_bytes = prm.size() * 4;
-    // KV: per layer K and V, n_ctx x kv_dim halves = n_ctx x kv_dim / 2 words each.
-    const uint64_t kv_words = static_cast<uint64_t>(nl) * s.n_ctx * s.KV;
+    // KV per layer: f16 K and V = n_ctx x kv_dim / 2 words each; int8: codes
+    // n_ctx x kv_dim / 4 words each + one f32 scale per 32 values each.
+    const uint64_t kv_words = s.kvq8
+        ? static_cast<uint64_t>(nl) * s.n_ctx * (s.KV / 2 + s.KV / 16)
+        : static_cast<uint64_t>(nl) * s.n_ctx * s.KV;
     const uint64_t kv_bytes = kv_words * 4;
     if (at >= (1ull << 32) || kv_words >= (1ull << 32)) { span_layers_.clear(); return false; }
     const uint64_t need = arena_bytes + params_bytes + kv_bytes;
@@ -1465,10 +1860,18 @@ bool VulkanBackend::span_prepare(const SpanParams& p) {
         span_layers_.clear();
         return false;
     }
-    if (has_budget_ext_ && need + headroom() > live_free_locked()) { span_layers_.clear(); return false; }
+    if (has_budget_ext_ && need + headroom() > live_free_locked()) {
+        if (verbose()) std::fprintf(stderr, "[fish/vulkan] span declined: needs %.0f MB + %.0f MB headroom, live free %.0f MB\n",
+                                    need / 1048576.0, headroom() / 1048576.0, live_free_locked() / 1048576.0);
+        span_layers_.clear();
+        return false;
+    }
 
     const VkBufferUsageFlags st = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    bool ok = create_buffer(span_arena_, arena_bytes, st | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false) &&
+    const uint64_t hx_bytes = static_cast<uint64_t>(kMaxTok) * s.E * sizeof(float);
+    bool ok = create_host_buffer(span_hx_, hx_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false) &&
+              create_host_buffer(span_hy_, hx_bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true) &&
+              create_buffer(span_arena_, arena_bytes, st | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false) &&
               create_buffer(span_params_, params_bytes, st | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false) &&
               create_buffer(span_kv_, kv_bytes, st, false) &&
               upload_bytes(span_params_, prm.data(), params_bytes) &&
@@ -1493,8 +1896,9 @@ bool VulkanBackend::span_prepare(const SpanParams& p) {
     span_kv_len_ = 0;
     span_ready_ = true;
     if (verbose())
-        std::fprintf(stderr, "[fish/vulkan] span ready: layers %d..%d, arena %.1f MB, KV %.1f MB (f16, %u positions)\n",
-                     p.layer_begin, p.layer_end - 1, arena_bytes / 1048576.0, kv_bytes / 1048576.0, s.n_ctx);
+        std::fprintf(stderr, "[fish/vulkan] span ready: layers %d..%d, arena %.1f MB, KV %.1f MB (%s, %u positions)\n",
+                     p.layer_begin, p.layer_end - 1, arena_bytes / 1048576.0, kv_bytes / 1048576.0,
+                     s.kvq8 ? "int8" : "f16", s.n_ctx);
     return true;
 }
 
@@ -1505,10 +1909,11 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
     if (static_cast<uint32_t>(pos0 + n_tok) > s.n_ctx) return false;
     if (pos0 > span_kv_len_) return false;   // device KV has a gap: never guess
     if (staging_.buf) destroy_buffer(staging_);
+    if (staging2_.buf) destroy_buffer(staging2_);
 
     const size_t xbytes = static_cast<size_t>(n_tok) * s.E * sizeof(float);
-    if (xbytes > host_x_.size || xbytes > host_y_.size) return false;
-    std::memcpy(host_x_.map, x, xbytes);
+    if (xbytes > span_hx_.size || xbytes > span_hy_.size) return false;
+    std::memcpy(span_hx_.map, x, xbytes);
 
     VkCommandBuffer cb = cmd_;
     vk_.vkResetCommandBuffer(cb, 0);
@@ -1546,8 +1951,8 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
         if (pl == sp_rms_) return "rmsnorm";
         if (pl == sp_add_) return "add";
         if (pl == sp_rope_) return "rope";
-        if (pl == sp_kv_) return "kv_store";
-        if (pl == sp_attn_) return "attention";
+        if (pl == sp_kv_ || pl == sp_kv8_) return "kv_store";
+        if (pl == sp_attn_ || pl == sp_attn8_) return "attention";
         if (pl == sp_act_) return "act_mul";
         return "misc";
     };
@@ -1562,8 +1967,8 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
         const Resident& r = *t.r;
         const TypeKernels* k = kernels_for(r.type);
         const bool mv = static_cast<int>(nt) <= matvec_max_tok_;
-        last_kind = mv ? "matvec" : "matmul_tiled";
-        vk_.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, mv ? k->matvec : k->tiled);
+        last_kind = mv ? "matvec" : (k->coop ? "matmul_coop" : "matmul_tiled");
+        vk_.vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, mv ? k->matvec : (k->coop ? k->coop : k->tiled));
         vk_.vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe_layout_, 0, 1, &t.set, 0, nullptr);
         const PushConsts pc{r.n_in, r.n_out, nt, r.row_bytes, y_off, x_off};
         vk_.vkCmdPushConstants(cb, pipe_layout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -1583,7 +1988,7 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
     // x in
     {
         VkBufferCopy c{0, static_cast<VkDeviceSize>(s.X) * 4, xbytes};
-        vk_.vkCmdCopyBuffer(cb, host_x_.buf, span_arena_.buf, 1, &c);
+        vk_.vkCmdCopyBuffer(cb, span_hx_.buf, span_arena_.buf, 1, &c);
         barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, CS,
                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     }
@@ -1593,7 +1998,9 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
     }
 
     const uint32_t E = s.E, Q = s.Q, KVD = s.KV, F = s.F, H = s.H, HKV = s.HKV, D = s.D;
-    const uint32_t layer_words = s.n_ctx * KVD;          // K + V of one layer, in words
+    // K + V of one layer, in words (codes, then for int8 the two scale arrays).
+    const uint32_t layer_words = s.kvq8 ? s.n_ctx * (KVD / 2 + KVD / 16) : s.n_ctx * KVD;
+    const uint32_t code_words = s.kvq8 ? s.n_ctx * KVD / 4 : s.n_ctx * KVD / 2;   // one of K / V
     for (int t0 = 0; t0 < n_tok; t0 += kSpanChunk) {
         const uint32_t nt = static_cast<uint32_t>(std::min(kSpanChunk, n_tok - t0));
         const uint32_t posc = static_cast<uint32_t>(pos0 + t0);
@@ -1601,7 +2008,8 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
         for (size_t li = 0; li < span_layers_.size(); ++li) {
             const SpanLayerDev& L = span_layers_[li];
             const uint32_t ck = static_cast<uint32_t>(li) * layer_words;
-            const uint32_t cv = ck + layer_words / 2;
+            const uint32_t cv = ck + code_words;
+            const uint32_t cks = cv + code_words, cvs = cks + s.n_ctx * KVD / 32;   // int8 only
 
             // ---- attention block
             rms(E, 1, xoff, E, s.XB, E, L.attn_norm, nt);
@@ -1639,12 +2047,20 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
                 aux(sp_rope_, &rk, sizeof(rk), nt, HKV);
                 bar();
             }
-            {
-                const KvPC kp{KVD, ko, ks, vo, vs, ck, cv, posc};
-                aux(sp_kv_, &kp, sizeof(kp), nt, 1);
+            if (s.kvq8) {
+                const KvQ8PC kp{KVD, ko, ks, vo, vs, ck, cv, posc, cks, cvs};
+                aux(sp_kv8_, &kp, sizeof(kp), nt, 1);
                 bar();
-            }
-            {
+                const AttnQ8PC ap{D, H / HKV, KVD, qo, qs, s.ATT, Q, ck, cv, posc,
+                                  L.window ? s.window : 0u, s.scale, s.softcap, cks, cvs};
+                aux(sp_attn8_, &ap, sizeof(ap), H, nt);
+                bar();
+            } else {
+                {
+                    const KvPC kp{KVD, ko, ks, vo, vs, ck, cv, posc};
+                    aux(sp_kv_, &kp, sizeof(kp), nt, 1);
+                    bar();
+                }
                 const AttnPC ap{D, H / HKV, KVD, qo, qs, s.ATT, Q, ck, cv, posc,
                                 L.window ? s.window : 0u, s.scale, s.softcap};
                 aux(sp_attn_, &ap, sizeof(ap), H, nt);
@@ -1688,7 +2104,7 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
     barrier(CS, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     {
         VkBufferCopy c{static_cast<VkDeviceSize>(s.X) * 4, 0, xbytes};
-        vk_.vkCmdCopyBuffer(cb, span_arena_.buf, host_y_.buf, 1, &c);
+        vk_.vkCmdCopyBuffer(cb, span_arena_.buf, span_hy_.buf, 1, &c);
     }
     barrier(VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
     vk_.vkEndCommandBuffer(cb);
@@ -1716,14 +2132,14 @@ bool VulkanBackend::span_forward(float* x, int n_tok, int pos0) {
             ++stage_calls_;
         }
     }
-    if (!host_y_.coherent) {
+    if (!span_hy_.coherent) {
         VkMappedMemoryRange mr{};
         mr.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-        mr.memory = host_y_.mem;
+        mr.memory = span_hy_.mem;
         mr.size = VK_WHOLE_SIZE;
         vk_.vkInvalidateMappedMemoryRanges(device_, 1, &mr);
     }
-    std::memcpy(x, host_y_.map, xbytes);
+    std::memcpy(x, span_hy_.map, xbytes);
     // Positions written now replace pos0..; anything the device held beyond
     // them belonged to a different continuation and is no longer valid.
     span_kv_len_ = pos0 + n_tok;

@@ -17,12 +17,15 @@
 #include <fish/backend.h>
 #include <fish/ops.h>
 #include <fish/threadpool.h>
+#include <fish/tokenizer.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <new>
 
@@ -145,6 +148,7 @@ LlamaModel::~LlamaModel() {
     }
     prefetch_cv_.notify_all();
     if (prefetch_thread_.joinable()) prefetch_thread_.join();
+    if (warm_thread_.joinable()) warm_thread_.join();
 
     // Give the device memory back: the TensorInfo pointers die with gguf_, so
     // the backend must not be left holding them.
@@ -343,7 +347,11 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
     m->opts_ = opts;
 
     std::string gerr;
+    using lclk = std::chrono::steady_clock;
+    auto since = [](lclk::time_point a) { return std::chrono::duration<double>(lclk::now() - a).count(); };
+    const auto lt0 = lclk::now();
     m->gguf_ = GgufFile::open(path, &gerr);
+    const double t_open = since(lt0);
     if (!m->gguf_) return fail(gerr);
 
     const GgufFile& g = *m->gguf_;
@@ -471,10 +479,11 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
     const uint64_t kv_elems = static_cast<uint64_t>(c.n_layers) * c.n_ctx * KV;
     m->kv_bytes_ = kv_elems * sizeof(float) * 2;
     if (m->kv_bytes_ > (16ull << 30)) return fail("KV cache would exceed 16 GB");
+    // The CPU KV cache is allocated after placement (alloc_cpu_kv): layers
+    // in a GPU span keep theirs in VRAM, and the planner may shorten n_ctx.
+    // Allocating all of it here first committed n_layers x n_ctx x kv_dim x 8
+    // bytes (3.2 GB for Phi-3-mini at 4096) that placement then had to count.
     try {
-        m->k_cache_.assign(static_cast<size_t>(kv_elems), 0.0f);
-        m->v_cache_.assign(static_cast<size_t>(kv_elems), 0.0f);
-
         const int mb = m->max_batch_;
         const int ff = std::max(c.n_ff, std::max(c.n_ff_exp, c.n_ff_shexp));
         m->x_.assign(static_cast<size_t>(mb) * E, 0.0f);
@@ -500,9 +509,45 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
     // the RAM/disk tiers all see the merged weights and nothing else changes.
     if (!opts.adapter_path.empty() && !m->apply_adapter(err)) return nullptr;
 
+    const double t_meta = since(lt0) - t_open;
+    if (ComputeBackend* gb = gpu_backend()) gb->upload_profile(true);
+    const auto lt1 = lclk::now();
     m->place_layers();
+    const double t_place = since(lt1);
+    const auto lt2 = lclk::now();
     m->prepare_span();
+    const double t_span = since(lt2);
+    const auto lt3 = lclk::now();
+    if (!m->alloc_cpu_kv()) return fail("not enough memory for the KV cache");
+    const double t_kv = since(lt3);
     if (m->stream_) m->prefetch_thread_ = std::thread([mp = m.get()] { mp->prefetch_loop(); });
+    // CPU layers of a resident (non-streamed) placement: ask the OS to read
+    // their file pages now, in large requests, while the caller tokenises
+    // and starts the first prefill, instead of faulting them in 4-64 KB at a
+    // time inside the first forward pass (cold first token on the 8B).
+    if (!m->stream_ && m->gpu_layers_ < c.n_layers) {
+        m->warm_thread_ = std::thread([mp = m.get()] {
+            const int cpu = mp->cfg_.n_layers - mp->gpu_layers_;
+            for (int li = 0; li < cpu; ++li) {
+                const LayerTensors& L = mp->layers_[static_cast<size_t>(li)];
+                if (L.file_end > L.file_begin)
+                    os_prefetch(mp->gguf_->data_base() + L.file_begin, static_cast<size_t>(L.file_end - L.file_begin));
+            }
+        });
+    }
+    {
+        // Wall-clock per load phase (fish_stats.load_profile, FISH_GPU_VERBOSE).
+        // "place" contains calibration and the GPU upload; the upload part is
+        // broken down by the backend (cache hits / re-quantised / file bytes).
+        char b[400];
+        const std::string up = gpu_backend() ? gpu_backend()->upload_profile(false) : std::string();
+        std::snprintf(b, sizeof(b), "open %.2f s, metadata+bind %.2f s, place %.2f s (calibration %.1f s, upload %.1f s%s%s%s), span %.2f s, cpu kv %.2f s",
+                      t_open, t_meta, t_place, m->calib_seconds_, m->upload_seconds_,
+                      up.empty() ? "" : " [", up.c_str(), up.empty() ? "" : "]", t_span, t_kv);
+        m->load_profile_ = b;
+        if (std::getenv("FISH_GPU_VERBOSE") && std::atoi(std::getenv("FISH_GPU_VERBOSE")) != 0)
+            std::fprintf(stderr, "[fish/load] %s\n", b);
+    }
     return m;
 }
 
@@ -675,6 +720,7 @@ void LlamaModel::prepare_span() {
     p.rot_dim = rope_.rot_dim;
     p.rope_neox = rope_.neox;
     p.layers = span_layers_.data();
+    p.kv_q8 = gpu_kv_q8_;
     gpu_span_ = gpu->span_prepare(p);
 
     // No room for the span's KV cache / arena: give back the lowest GPU
@@ -686,26 +732,450 @@ void LlamaModel::prepare_span() {
         for (const TensorInfo* t : {L.wq, L.wk, L.wv, L.wo, L.wqkv, L.wg, L.wu, L.wd})
             if (t && gpu->resident(t)) gpu->release(t);
         --gpu_layers_;
-        ram_layers_ = std::max(ram_layers_, 0);
+        // The released layer runs on the CPU from RAM (it was evicted after
+        // upload; the OS pages it back in). It is not a disk-streamed layer.
+        if (!stream_) ram_layers_ = cfg_.n_layers - gpu_layers_;
         span_layers_.erase(span_layers_.begin());
         p.layer_begin = cfg_.n_layers - gpu_layers_;
         p.layers = span_layers_.data();
         gpu_span_ = gpu->span_prepare(p);
     }
     gpu_bytes_ = gpu->bytes_resident();
+}
 
-    // The span keeps its own KV cache in VRAM; the CPU copy for those layers
-    // would only waste RAM (512 MB on an 8B at 4096). Keep the CPU cache for
-    // the CPU layers only — they are the prefix [0, layer_begin).
-    if (gpu_span_) {
-        const int cpu_layers = cfg_.n_layers - gpu_layers_;
-        const size_t keep = static_cast<size_t>(cpu_layers) * cfg_.n_ctx * cfg_.kv_dim();
-        k_cache_.resize(keep);
-        k_cache_.shrink_to_fit();
-        v_cache_.resize(keep);
-        v_cache_.shrink_to_fit();
-        kv_bytes_ = static_cast<uint64_t>(keep) * sizeof(float) * 2;
+// The span keeps its own KV cache in VRAM; the CPU copy for those layers
+// would only waste RAM (512 MB on an 8B at 4096). The CPU cache covers the
+// CPU layers only: they are the prefix [0, n_layers - gpu_layers).
+bool LlamaModel::alloc_cpu_kv() {
+    const int cpu_layers = gpu_span_ ? cfg_.n_layers - gpu_layers_ : cfg_.n_layers;
+    const size_t n = static_cast<size_t>(cpu_layers) * cfg_.n_ctx * cfg_.kv_dim();
+    try {
+        k_cache_.assign(n, 0.0f);
+        v_cache_.assign(n, 0.0f);
+    } catch (const std::bad_alloc&) {
+        return false;
     }
+    kv_bytes_ = static_cast<uint64_t>(n) * sizeof(float) * 2;
+    return true;
+}
+
+// ---------------------------------------------------------------- calibration
+
+bool LlamaModel::calibrate(Importance* out, int max_tokens, std::string* err) {
+    auto fail = [&](const std::string& why) { if (err) *err = "calibration: " + why; return false; };
+    if (gpu_layers_ > 0 || gpu_span_) return fail("must run before placement");
+    std::string e;
+    auto tok = Tokenizer::create(*gguf_, &e);
+    if (!tok) return fail(e);
+    std::vector<int32_t> ids = tok->encode(calibration_text(), true, false);
+    if (static_cast<int>(ids.size()) > max_tokens) ids.resize(static_cast<size_t>(max_tokens));
+    if (ids.size() < 16) return fail("calibration text too short for this tokenizer");
+
+    struct Acc { std::vector<double> s; long n = 0; };
+    std::unordered_map<const TensorInfo*, Acc> acc;
+    MatmulObserver obs = [](void* u, const TensorInfo* t, const float* x, int n_tok, int n_in) {
+        Acc& a = (*static_cast<std::unordered_map<const TensorInfo*, Acc>*>(u))[t];
+        if (a.s.size() != static_cast<size_t>(n_in)) { a.s.assign(static_cast<size_t>(n_in), 0.0); a.n = 0; }
+        for (int r = 0; r < n_tok; ++r) {
+            const float* xr = x + static_cast<size_t>(r) * n_in;
+            for (int j = 0; j < n_in; ++j) a.s[static_cast<size_t>(j)] += static_cast<double>(xr[j]) * xr[j];
+        }
+        a.n += n_tok;
+    };
+
+    // A temporary KV cache for the calibration sequence only.
+    const int saved_ctx = cfg_.n_ctx;
+    const int len = static_cast<int>(ids.size());
+    cfg_.n_ctx = len;
+    try {
+        const size_t n = static_cast<size_t>(cfg_.n_layers) * len * cfg_.kv_dim();
+        k_cache_.assign(n, 0.0f);
+        v_cache_.assign(n, 0.0f);
+    } catch (const std::bad_alloc&) {
+        cfg_.n_ctx = saved_ctx;
+        return fail("no memory for the calibration KV cache");
+    }
+    set_matmul_observer(obs, &acc);
+    bool ok = true;
+    for (int p = 0; p < len && ok; p += max_batch_) {
+        const int n = std::min(max_batch_, len - p);
+        ok = forward(ids.data() + p, n, p);
+    }
+    set_matmul_observer(nullptr, nullptr);
+    cfg_.n_ctx = saved_ctx;
+    std::vector<float>().swap(k_cache_);
+    std::vector<float>().swap(v_cache_);
+    kv_len_ = 0;
+    if (!ok) return fail("forward pass failed");
+
+    out->clear();
+    for (const auto& kv : acc) {
+        // The output projection sees one row per forward call (last token
+        // only): too few samples to weight by. It gets the plain fit.
+        if (kv.second.n < 64) continue;
+        std::vector<float> v(kv.second.s.size());
+        for (size_t j = 0; j < v.size(); ++j) v[j] = static_cast<float>(kv.second.s[j] / kv.second.n);
+        (*out)[kv.first->name] = std::move(v);
+    }
+    return true;
+}
+
+// ---------------------------------------------------------------- residency planner
+//
+// Goal: as many layers as possible (all of them, ideally) and the output
+// projection resident on the GPU as one span: one submit per token, and a
+// CPU layer costs ~6 ms per token on an 8B (4 threads) against ~1 ms on the
+// GPU. In order:
+//   1. file bytes + KV for the requested context fit      -> nothing changes;
+//   2. file bytes + KV for a shorter context fit (>= FISH_GPU_MIN_CTX,
+//      default 2048, or the request if smaller)           -> context shortened;
+//   3. device copies re-quantised (FISH_GPU_REQUANT unset or "auto"): start
+//      every tensor at its smallest format, then upgrade the most sensitive
+//      tensors while the budget at the floor context allows (k/v first, then
+//      output, ffn_down, attention, gate/up; first and last layers first);
+//      what is left becomes context;
+//   4. not even that fits: the top N layers + output, re-quantised the same
+//      way, with N as large as the budget allows at the floor context (the
+//      first layers run on the CPU at file precision);
+//   5. otherwise false: the caller places partially at file precision.
+// placement_note_ records the decision (or why there was none) for
+// fish_stats.placement and FISH_GPU_VERBOSE.
+bool LlamaModel::plan_resident(ComputeBackend* gpu, uint64_t budget, uint64_t arena) {
+    using CB = ComputeBackend;
+    placement_note_.clear();
+    const bool verbose = std::getenv("FISH_GPU_VERBOSE") && std::atoi(std::getenv("FISH_GPU_VERBOSE")) != 0;
+    char why[320];
+    auto decline = [&]() {
+        placement_note_ = why;
+        if (verbose) std::fprintf(stderr, "[fish/plan] %s\n", why);
+        return false;
+    };
+    const char* rq = std::getenv("FISH_GPU_REQUANT");
+    const bool allow_requant = !rq || !*rq || std::strcmp(rq, "auto") == 0;
+    // FISH_GPU_TIERS: subset of "file,q4k,fq3,fq3s" (format studies).
+    std::string tiers = "file,q4k,fq3,fq3s";
+    if (const char* e = std::getenv("FISH_GPU_TIERS")) if (*e) tiers = e;
+    auto tier_on = [&](const char* n) {
+        const std::string s = "," + tiers + ",";
+        return s.find(std::string(",") + n + ",") != std::string::npos;
+    };
+    const int fmts[4] = {CB::kDevFile, CB::kDevQ4K, CB::kDevFQ3, CB::kDevFQ3S};
+    const char* fmt_names[4] = {"file", "q4k", "fq3", "fq3s"};
+    const int NL = cfg_.n_layers;
+
+    // Roles, in the order the upgrade passes visit them.
+    enum Role { kQ, kK, kV, kO, kQKV, kG, kU, kD, kOut };
+    struct Item {
+        const TensorInfo* t;
+        int role, layer;
+        std::vector<std::pair<int, uint64_t>> opts;   // best first, strictly shrinking
+        size_t cur = 0;
+    };
+    std::vector<Item> items;
+    auto add = [&](const TensorInfo* t, int role, int layer) {
+        Item it{t, role, layer, {}, 0};
+        uint64_t prev = UINT64_MAX;
+        for (int i = 0; i < 4; ++i) {
+            if (i > 0 && !allow_requant) break;
+            if (!tier_on(fmt_names[i])) continue;
+            const uint64_t b = gpu->device_bytes(t, fmts[i]);
+            if (b == 0 || b >= prev) continue;
+            it.opts.push_back({fmts[i], b});
+            prev = b;
+        }
+        if (it.opts.empty()) return false;
+        items.push_back(std::move(it));
+        return true;
+    };
+    if (!out_w_ || !add(out_w_, kOut, NL)) {
+        std::snprintf(why, sizeof(why), "no resident plan: the output projection has no device format");
+        return decline();
+    }
+    // Besides the span arena: per-matmul scratch, descriptor pools and the
+    // driver's own allocations, measured at ~20-40 MB on the RTX 3050.
+    arena += 64ull << 20;
+    for (int li = 0; li < NL; ++li) {
+        const LayerTensors& L = layers_[static_cast<size_t>(li)];
+        const std::pair<const TensorInfo*, int> ts[] = {{L.wq, kQ}, {L.wk, kK}, {L.wv, kV}, {L.wo, kO},
+            {L.wqkv, kQKV}, {L.wg, kG}, {L.wu, kU}, {L.wd, kD}};
+        for (const auto& p : ts) {
+            if (p.first && !add(p.first, p.second, li)) {
+                std::snprintf(why, sizeof(why), "no resident plan: %s (%s) has no device format",
+                              p.first->name.c_str(), ggml_type_name(p.first->type));
+                return decline();
+            }
+        }
+    }
+
+    int floor_ctx = 2048;
+    if (const char* e = std::getenv("FISH_GPU_MIN_CTX")) floor_ctx = std::max(64, std::atoi(e));
+    floor_ctx = std::min(floor_ctx, cfg_.n_ctx);
+    // lo = first GPU layer; the layers below it stay on the CPU (inactive).
+    int lo = 0;
+    auto active = [&](const Item& it) { return it.layer >= lo; };
+    auto total = [&] { uint64_t s = 0; for (const Item& it : items) if (active(it)) s += it.opts[it.cur].second; return s; };
+    // Device KV per position (GPU layers): f16 K+V = 4 B per kv element;
+    // int8 + one f32 scale per 32 = 2.25 B. int8 when VRAM-bound: the file's
+    // weights with an f16 cache for the requested context do not fit
+    // (FISH_GPU_KV=f16|q8 forces one).
+    const bool q8_ok = cfg_.kv_dim() % 32 == 0 && cfg_.head_dim % 32 == 0;
+    const char* kvenv = std::getenv("FISH_GPU_KV");
+    auto kvpp = [&]() -> uint64_t {
+        const uint64_t e = static_cast<uint64_t>(NL - lo) * static_cast<uint64_t>(cfg_.kv_dim());
+        return gpu_kv_q8_ ? e * 9ull / 4ull : e * 4ull;
+    };
+    // + 6% of the weights: measured on the RTX 3050 (8B, 218 tensors), the
+    // live budget fell ~8-11% more than the bytes uploaded (lazy residency of
+    // the reserved blocks, scratch, driver bookkeeping); without it the span
+    // later declined and gave back 3 of 31 planned layers.
+    auto fits = [&](uint64_t w, int ctx) { return w + w / 16 + arena + kvpp() * static_cast<uint64_t>(ctx) <= budget; };
+    gpu_kv_q8_ = false;
+    if (q8_ok && kvenv && std::strcmp(kvenv, "q8") == 0) gpu_kv_q8_ = true;
+    else if (q8_ok && !(kvenv && std::strcmp(kvenv, "f16") == 0) && !fits(total(), cfg_.n_ctx)) gpu_kv_q8_ = true;
+
+    // Format studies: FISH_GPU_FORCE=<file|q4k|fq3|fq3s> puts every tensor in
+    // that format where it exists (else its smallest), no upgrades.
+    const char* force = std::getenv("FISH_GPU_FORCE");
+    const bool forced = force && *force && allow_requant;
+    if (forced) {
+        int ff = -1;
+        for (int i = 0; i < 4; ++i) if (std::strcmp(force, fmt_names[i]) == 0) ff = fmts[i];
+        for (Item& it : items) {
+            it.cur = it.opts.size() - 1;
+            for (size_t k = 0; k < it.opts.size(); ++k) if (it.opts[k].first == ff) it.cur = k;
+        }
+    }
+    // The device-bytes cache (calib.h). Computed before the format choice:
+    // re-quantising the 8B costs ~100 s at 4 threads, so when a previous load
+    // left cached files the upgrade passes only move a tensor to a format
+    // that is cached (or the file's own bytes), and a budget that differs by
+    // a few MB from the last load does not trigger a new re-quantisation.
+    std::string variant = "dev1;fq3s1-c0.35";
+    if (adapter_.active) variant += ";adapter=" + opts_.adapter_path + ";" + std::to_string(opts_.adapter_scale);
+    const std::string dir = allow_requant ? device_cache_dir(*gguf_, variant) : std::string();
+    auto cached = [&](const Item& it, int f) {
+        if (f == CB::kDevFile) return true;
+        if (dir.empty()) return false;
+        std::error_code ec;
+        return std::filesystem::exists(dir + "/" + cache_file_name(it.t->name, fmt_names[f]), ec);
+    };
+    bool have_cache = false;
+    if (!dir.empty()) {
+        std::error_code ec;
+        for (const auto& de : std::filesystem::directory_iterator(dir, ec)) {
+            if (de.path().extension() == ".dev") { have_cache = true; break; }
+        }
+    }
+    const uint64_t file_all = total();
+    uint64_t W = file_all;
+    bool upgrade = false;
+    if (!fits(W, floor_ctx)) {
+        if (!allow_requant) {
+            std::snprintf(why, sizeof(why),
+                          "no resident plan: file weights %.0f MB + KV + %.0f MB margin > budget %.0f MB and "
+                          "re-quantisation is off (FISH_GPU_REQUANT=0)",
+                          W / 1048576.0, arena / 1048576.0, budget / 1048576.0);
+            return decline();
+        }
+        if (!forced) {
+            for (Item& it : items) it.cur = it.opts.size() - 1;
+            upgrade = true;
+        }
+        W = total();
+        const uint64_t all_min = W;
+        // Step 4: fewer layers, all at their smallest format. Each step down
+        // also frees that layer's share of the KV cache.
+        while (lo < NL && !fits(W, floor_ctx)) { ++lo; W = total(); }
+        if (!fits(W, floor_ctx)) {
+            std::snprintf(why, sizeof(why), "no resident plan: even the output projection alone does not fit the budget %.0f MB",
+                          budget / 1048576.0);
+            return decline();
+        }
+        if (lo > 0 && verbose)
+            std::fprintf(stderr, "[fish/plan] all %d layers need %.0f MB at the smallest formats (+ KV + %.0f MB margin); "
+                                 "budget %.0f MB -> top %d layers on the GPU\n",
+                         NL, all_min / 1048576.0, arena / 1048576.0, budget / 1048576.0, NL - lo);
+    }
+    if (upgrade) {
+        const uint64_t limit = (budget - arena - kvpp() * static_cast<uint64_t>(floor_ctx)) / 17 * 16;
+        bool cached_only = have_cache;
+        // One step up: the next better format (with a cache, the next better
+        // one that is cached or the file's own bytes).
+        auto up = [&](Item& it) {
+            size_t to = it.cur;
+            while (to > 0) {
+                --to;
+                if (!cached_only || cached(it, it.opts[to].first)) break;
+                if (to == 0) return false;
+            }
+            if (to == it.cur) return false;
+            const uint64_t d = it.opts[to].second - it.opts[it.cur].second;
+            if (W + d > limit) return false;
+            it.cur = to;
+            W += d;
+            return true;
+        };
+        // With a cache, a tensor whose smallest format is not cached but a
+        // bigger cached one fits goes there first (no re-quantisation).
+        if (cached_only) {
+            for (Item& it : items) {
+                if (!active(it) || cached(it, it.opts[it.cur].first)) continue;
+                for (size_t k = it.cur; k-- > 0;) {
+                    if (!cached(it, it.opts[k].first)) continue;
+                    const uint64_t d = it.opts[k].second - it.opts[it.cur].second;
+                    if (W + d <= limit) { it.cur = k; W += d; }
+                    break;
+                }
+            }
+        }
+        // Layer order: ends first (lo, n-1, lo+1, n-2, ...), the output last.
+        auto rank = [&](int layer) {
+            if (layer >= NL) return 0;
+            const int d = std::min(layer - lo, NL - 1 - layer);
+            return 2 * d + (layer > (lo + NL) / 2 ? 1 : 0);
+        };
+        std::vector<Item*> order;
+        for (Item& it : items) if (active(it)) order.push_back(&it);
+        std::stable_sort(order.begin(), order.end(), [&](Item* a, Item* b) { return rank(a->layer) < rank(b->layer); });
+        auto pass = [&](std::initializer_list<int> roles, bool full) {
+            for (Item* it : order) {
+                if (std::find(roles.begin(), roles.end(), it->role) == roles.end()) continue;
+                if (full) { while (up(*it)) {} } else up(*it);
+            }
+        };
+        pass({kK, kV}, true);
+        for (int round = 0; round < 3; ++round) {
+            pass({kOut}, false);
+            pass({kD}, false);
+            pass({kQ, kO, kQKV}, false);
+            pass({kG, kU}, false);
+        }
+    }
+    int ctx = cfg_.n_ctx;
+    if (!fits(W, ctx)) {
+        const uint64_t room = budget > arena + W + W / 16 ? budget - arena - W - W / 16 : 0;
+        ctx = static_cast<int>(std::min<uint64_t>(static_cast<uint64_t>(cfg_.n_ctx), room / kvpp()));
+        ctx = std::max(floor_ctx, ctx / 256 * 256);
+    }
+
+    // Calibration (only when something is re-quantised): cached per model.
+    bool any_requant = false;
+    for (const Item& it : items) if (active(it)) any_requant |= it.opts[it.cur].first != CB::kDevFile;
+    // (Cache key "variant" above: bump it when a re-quantiser or kFQ3SCubic
+    // in src/gpu/requant.h changes.)
+    Importance imp;
+    double calib_s = 0;
+    bool calib_cached = false;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (any_requant) {
+        const std::string ifile = dir.empty() ? std::string() : dir + "/importance.v1.bin";
+        int ntok = 0;
+        calib_cached = importance_load(ifile, &imp, &ntok);
+        if (std::getenv("FISH_GPU_NO_IMPORTANCE")) { imp.clear(); calib_cached = true; }
+        else if (!calib_cached) {
+            int max_tok = 512;
+            if (const char* e = std::getenv("FISH_CALIB_TOKENS")) max_tok = std::max(16, std::atoi(e));
+            std::string cerr;
+            if (verbose) std::fprintf(stderr, "[fish/plan] calibrating on up to %d tokens (CPU, once; cached afterwards)\n", max_tok);
+            if (calibrate(&imp, max_tok, &cerr)) importance_save(ifile, imp, max_tok);
+            else if (verbose) std::fprintf(stderr, "[fish/plan] %s\n", cerr.c_str());
+        }
+        calib_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        // Re-quantising without importance is not an option (measured on
+        // Llama-3.2-1B: FQ3 +69% perplexity, FQ3S unusable; requant.h). The
+        // study switch FISH_GPU_NO_IMPORTANCE is the only way to get it.
+        if (imp.empty() && !std::getenv("FISH_GPU_NO_IMPORTANCE")) {
+            std::snprintf(why, sizeof(why), "resident placement needs re-quantisation but calibration failed; partial placement");
+            return decline();
+        }
+    }
+
+    // Upload: output first, then the layers from the last one down.
+    std::stable_sort(items.begin(), items.end(), [](const Item& a, const Item& b) { return a.layer > b.layer; });
+    const uint64_t resident0 = gpu->bytes_resident();
+    const uint64_t live0 = gpu->memory_free();
+    // Reserve, then check that the span's KV cache + arena still fit next to
+    // the reservation: WDDM lowers the reported budget by more than the bytes
+    // allocated (measured 8-14% more on the RTX 3050), and a span that does
+    // not fit is trimmed layer by layer after every tensor was uploaded (and
+    // possibly re-quantised) for nothing. Drop layers before uploading instead.
+    {
+        const uint64_t hr = vram_headroom_bytes(gpu->memory_total());
+        const uint64_t span_need = kvpp() * static_cast<uint64_t>(ctx) + (32ull << 20);
+        for (int tries = 0;; ++tries) {
+            gpu->reserve_device(W);
+            const uint64_t live1 = gpu->memory_free();
+            if (live1 >= span_need + hr || tries >= 3 || lo >= NL - 1) break;
+            gpu->release_reserve();
+            const double ratio = std::max(1.0, static_cast<double>(live0 > live1 ? live0 - live1 : 0) / std::max<uint64_t>(W, 1));
+            const int lo0 = lo;
+            while (lo < NL - 1 && static_cast<double>(W) * ratio + static_cast<double>(kvpp() * static_cast<uint64_t>(ctx) + (32ull << 20) + hr) >
+                                      static_cast<double>(live0)) {
+                ++lo;
+                W = total();
+            }
+            if (lo == lo0) { ++lo; W = total(); }
+            if (verbose)
+                std::fprintf(stderr, "[fish/plan] after reserving, live free %.0f MB < span %.0f MB + headroom %.0f MB "
+                                     "(driver overhead x%.2f): top %d layers instead\n",
+                             live1 / 1048576.0, (kvpp() * static_cast<double>(ctx) + (32ull << 20)) / 1048576.0, hr / 1048576.0,
+                             ratio, NL - lo);
+        }
+        any_requant = false;
+        for (const Item& it : items) if (active(it)) any_requant |= it.opts[it.cur].first != CB::kDevFile;
+    }
+    if (verbose)
+        std::fprintf(stderr, "[fish/plan] budget %.0f MB: weights %.0f MB (%d layers) + KV %.0f MB (ctx %d) + margin %.0f MB; live free %.0f MB\n",
+                     budget / 1048576.0, W / 1048576.0, NL - lo, kvpp() * static_cast<double>(ctx) / 1048576.0, ctx,
+                     arena / 1048576.0, live0 / 1048576.0);
+    const auto t1 = std::chrono::steady_clock::now();
+    for (const Item& it : items) {
+        if (!active(it)) continue;
+        const int f = it.opts[it.cur].first;
+        const float* w = nullptr;
+        std::string cache;
+        if (f != CB::kDevFile) {
+            auto im = imp.find(it.t->name);
+            if (im != imp.end() && im->second.size() == static_cast<size_t>(it.t->ne[0])) w = im->second.data();
+            // Study runs without importance must not read/write the cache.
+            if (!dir.empty() && !std::getenv("FISH_GPU_NO_IMPORTANCE"))
+                cache = dir + "/" + cache_file_name(it.t->name, fmt_names[f]);
+        }
+        if (!gpu->upload_as(it.t, f, w, cache)) {
+            const double done = (gpu->bytes_resident() - resident0) / 1048576.0;
+            const double fell = (live0 > gpu->memory_free() ? live0 - gpu->memory_free() : 0) / 1048576.0;
+            for (const Item& u : items) if (gpu->resident(u.t)) gpu->release(u.t);
+            std::snprintf(why, sizeof(why), "resident upload of %s failed after %.0f MB (live free fell by %.0f MB); partial placement",
+                          it.t->name.c_str(), done, fell);
+            return decline();
+        }
+    }
+    const double up_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+    calib_seconds_ = calib_s;
+    upload_seconds_ = up_s;
+    if (verbose)
+        std::fprintf(stderr, "[fish/plan] uploaded %.0f MB, live free fell by %.0f MB\n",
+                     (gpu->bytes_resident() - resident0) / 1048576.0,
+                     (live0 > gpu->memory_free() ? live0 - gpu->memory_free() : 0) / 1048576.0);
+    gpu_layers_ = NL - lo;
+    gpu_bytes_ = gpu->bytes_resident() - resident0;
+    for (int li = lo; li < NL; ++li) evict_layer(li);
+
+    int counts[4] = {0, 0, 0, 0};
+    for (const Item& it : items) if (active(it)) ++counts[it.opts[it.cur].first];
+    char buf[320];
+    std::snprintf(buf, sizeof(buf),
+                  "%s: %d/%d layers + output, %.0f MB weights (file %d, q4k %d, fq3 %d, fq3s %d tensors), "
+                  "ctx %d -> %d, KV %s, budget %.0f MB, calibration %s %.1f s, upload %.1f s",
+                  lo == 0 ? "resident" : "partial", NL - lo, NL, gpu_bytes_ / 1048576.0,
+                  counts[0], counts[1], counts[2], counts[3],
+                  cfg_.n_ctx, ctx, gpu_kv_q8_ ? "int8" : "f16", budget / 1048576.0,
+                  !any_requant ? "none" : calib_cached ? "cached" : imp.empty() ? "failed" : "ran",
+                  calib_s, up_s);
+    placement_note_ = buf;
+    if (verbose) std::fprintf(stderr, "[fish/plan] %s\n", buf);
+    cfg_.n_ctx = ctx;
+    return true;
 }
 
 // ---------------------------------------------------------------- placement
@@ -722,10 +1192,15 @@ void LlamaModel::place_layers() {
     // ---- GPU tier
     gpu_layers_ = 0;
     gpu_bytes_ = 0;
+    bool span_planned = false;
     ComputeBackend* gpu = gpu_backend();
+    placement_note_ = gpu ? "" : "no GPU backend (no Vulkan device, or FISH_GPU=0)";
     if (gpu) {
+        // Same rule as the backend's own ceiling: live free VRAM minus a
+        // headroom of max(256 MB, 5% of the heap) (FISH_VRAM_HEADROOM_MB).
         const uint64_t vfree = gpu->memory_free();
-        const uint64_t vram_budget = env_mb("FISH_VRAM_BUDGET_MB", vfree - vfree * 15 / 100);
+        const uint64_t headroom = vram_headroom_bytes(gpu->memory_total());
+        const uint64_t vram_budget = env_mb("FISH_VRAM_BUDGET_MB", vfree > headroom ? vfree - headroom : 0);
         int want = cfg_.n_layers;
         if (const char* v = std::getenv("FISH_GPU_LAYERS")) want = std::max(0, std::atoi(v));
         if (opts_.gpu_layers >= 0) want = std::min(want, opts_.gpu_layers);
@@ -745,17 +1220,35 @@ void LlamaModel::place_layers() {
         const bool requant = std::getenv("FISH_GPU_REQUANT") && std::atoi(std::getenv("FISH_GPU_REQUANT")) != 0;
         const double est = requant ? 0.70 : 1.0;
 
+        // Fully resident if at all possible (see plan_resident); the legacy
+        // FISH_GPU_REQUANT=1/2/3 modes and an explicit layer cap skip it.
+        const bool legacy_requant = requant && !(std::getenv("FISH_GPU_REQUANT") &&
+                                                 std::strcmp(std::getenv("FISH_GPU_REQUANT"), "auto") == 0);
+        placement_note_.clear();
+        if (span_wanted && opts_.allow_span && want >= cfg_.n_layers && !legacy_requant &&
+            plan_resident(gpu, vram_budget, arena)) {
+            span_planned = true;
+        } else {
+            gpu_kv_q8_ = false;   // a failed plan must not leave its KV choice behind
+            if (placement_note_.empty()) {
+                placement_note_ = cfg_.is_moe() ? "planner skipped: MoE (experts stay on the CPU)"
+                                : !span_wanted || !opts_.allow_span ? "planner skipped: spans off"
+                                : want < cfg_.n_layers ? "planner skipped: GPU layer cap (FISH_GPU_LAYERS / gpu_layers)"
+                                : "planner skipped: fixed FISH_GPU_REQUANT mode";
+            }
+        }
+
         const uint64_t resident0 = gpu->bytes_resident();
         // The output projection first: it is read on every token whatever the
         // layer split, and it is the single largest matmul in the model.
-        if (want > 0 && out_w_ && gpu->supports(out_w_->type) &&
+        if (!span_planned && want > 0 && out_w_ && gpu->supports(out_w_->type) &&
             static_cast<uint64_t>(out_w_->nbytes * est) + arena <= vram_budget) {
             gpu->upload(out_w_);
         }
         // Offload from the last layer backwards: with a partial offload the
         // CPU then runs the first layers while the GPU layers' weights already
         // sit on the device, and the output projection stays near the end.
-        for (int li = cfg_.n_layers - 1; li >= 0 && gpu_layers_ < want; --li) {
+        for (int li = cfg_.n_layers - 1; li >= 0 && gpu_layers_ < want && !span_planned; --li) {
             const LayerTensors& L = layers_[static_cast<size_t>(li)];
             const TensorInfo* big[] = {L.wq, L.wk, L.wv, L.wo, L.wqkv, L.wg, L.wu, L.wd};
             uint64_t need = 0;
@@ -783,7 +1276,13 @@ void LlamaModel::place_layers() {
             // (MoE layers keep their experts on the CPU, so those stay.)
             if (!cfg_.is_moe()) evict_layer(li);
         }
-        gpu_bytes_ = gpu->bytes_resident() - resident0;
+        if (!span_planned) {
+            gpu_bytes_ = gpu->bytes_resident() - resident0;
+            char b[200];
+            std::snprintf(b, sizeof(b), "; per-layer placement: %d/%d layers at file precision, budget %.0f MB (headroom %.0f MB)",
+                          gpu_layers_, cfg_.n_layers, vram_budget / 1048576.0, headroom / 1048576.0);
+            placement_note_ += b;
+        }
     }
 
     // ---- RAM tier
@@ -794,7 +1293,14 @@ void LlamaModel::place_layers() {
     }
     const uint64_t other = weights_bytes_ > cpu_bytes + gpu_bytes_ ? weights_bytes_ - cpu_bytes - gpu_bytes_ : 0;
     // Merged adapter embeddings/output are private memory on top of the file.
-    const uint64_t fixed = other + kv_bytes_ + owned_extra_bytes_;
+    // KV: only the CPU layers keep one in RAM when the GPU layers run as a
+    // span (alloc_cpu_kv); counting all of it pushed Phi-3-mini's CPU layers
+    // onto the disk-streaming tier at n_ctx 4096.
+    const bool span_likely = gpu_layers_ > 0 && !cfg_.is_moe() && opts_.allow_span &&
+        !(std::getenv("FISH_GPU_SPAN") && std::atoi(std::getenv("FISH_GPU_SPAN")) == 0);
+    const uint64_t kv_ram = static_cast<uint64_t>(span_likely ? cfg_.n_layers - gpu_layers_ : cfg_.n_layers) *
+                            cfg_.n_ctx * cfg_.kv_dim() * sizeof(float) * 2;
+    const uint64_t fixed = other + kv_ram + owned_extra_bytes_;
     if (avail == 0 || cpu_bytes + fixed <= ram_budget) {
         ram_layers_ = cfg_.n_layers - gpu_layers_;
         stream_ = false;

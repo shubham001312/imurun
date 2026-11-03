@@ -16,6 +16,7 @@
  *   - The backend may be called from any thread, one call at a time.
  */
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include "gguf.h"
 #include "ops.h"
@@ -51,6 +52,13 @@ public:
     // the re-quantiser, or null. cache_file: where the re-quantised bytes
     // are read from / written to so the next load skips the work ("" = none).
     enum DeviceFormat : int { kDevFile = 0, kDevQ4K = 1, kDevFQ3 = 2, kDevFQ3S = 3 };
+    // Hint before a batch of uploads totalling `bytes`: a backend may
+    // pre-allocate that much so per-allocation rounding does not eat VRAM.
+    virtual void reserve_device(uint64_t bytes) { (void)bytes; }
+    // Frees reserved blocks that hold no tensor yet (planner re-plans).
+    virtual void release_reserve() {}
+    // Load-time upload profile (cache hits, re-quantisation, copy seconds); reset clears it.
+    virtual std::string upload_profile(bool reset) { (void)reset; return std::string(); }
     virtual uint64_t device_bytes(const TensorInfo* t, int fmt) const {
         return fmt == kDevFile && t ? t->nbytes : 0;
     }
@@ -142,6 +150,10 @@ public:
         int rot_dim = 0;
         bool rope_neox = false;
         const SpanLayer* layers = nullptr;       // layer_end - layer_begin entries
+        // int8 KV cache (one f32 absmax per 32 values, 2.25 B per K+V element
+        // instead of 4) when the planner is VRAM-bound; a backend without it
+        // may keep f16. Requires kv_dim and head_dim multiples of 32.
+        bool kv_q8 = false;
     };
 
     virtual bool span_prepare(const SpanParams&) { return false; }
@@ -149,6 +161,30 @@ public:
     virtual void span_kv_truncate(int n_past) { (void)n_past; }
     virtual void span_release() {}
 };
+
+// VRAM kept free for other programs, applied by the backend to every
+// allocation and by the planner to its budget. Default max(256 MB, 5% of the
+// heap); FISH_VRAM_HEADROOM_PCT=p (0..90) sets a share of the heap, which a
+// host can pass without knowing the card's size; FISH_VRAM_HEADROOM_MB=m
+// (wins when both are set) sets it in MB. 256 MB is the measured floor below
+// which WDDM starts demoting weights to system memory (GPU.md).
+inline uint64_t vram_headroom_bytes(uint64_t heap_bytes) {
+    uint64_t h = heap_bytes / 20;
+    if (h < (256ull << 20)) h = 256ull << 20;
+    if (const char* e = std::getenv("FISH_VRAM_HEADROOM_PCT")) {
+        if (*e) {
+            const double pct = std::atof(e);
+            if (pct >= 0.0 && pct <= 90.0) h = static_cast<uint64_t>(static_cast<double>(heap_bytes) * pct / 100.0);
+        }
+    }
+    if (const char* e = std::getenv("FISH_VRAM_HEADROOM_MB")) {
+        if (*e) {
+            const long long mb = std::atoll(e);
+            if (mb >= 0) h = static_cast<uint64_t>(mb) << 20;
+        }
+    }
+    return h;
+}
 
 // The registered GPU backend, or nullptr (no GPU build, no device, or
 // FISH_GPU=0). Set once at startup; read freely afterwards.

@@ -20,6 +20,7 @@
 #include <fish/model.h>
 #include <fish/ops.h>
 #include <fish/quant.h>
+#include <fish/tokenizer.h>
 #if FISH_HAVE_VULKAN
 #include "gpu/vulkan_backend.h"
 #include "gpu/requant.h"
@@ -196,6 +197,11 @@ static Synthetic make_synthetic(GgmlType type, int n_in, int n_out, uint32_t see
 // FISH_GPU_REQUANT set: the backend uploads a re-quantised copy. Check
 // (a) the re-quantisation error against the GGUF weights and (b) the GPU
 // kernel against the CPU decode of the very same re-quantised bytes.
+// Tolerance of "GPU kernel == CPU decode of the same bytes": f32 activations
+// for decode (n_tok <= 4, matvec); for prefill the tensor-core kernel
+// (matmul_coop.comp) rounds activations to f16 (2^-11 relative), measured
+// up to ~4e-4 x max|y| on Llama-3.2-1B tensors, no measurable perplexity change.
+static double act_tol(int n_tok) { return n_tok <= 4 ? 1e-4 : 2e-3; }
 static void test_requant(ComputeBackend* gpu, const TensorInfo& t, int mode) {
     const int n_in = static_cast<int>(t.ne[0]), n_out = static_cast<int>(t.ne[1]);
     const bool to_fq3 = mode == 1 && t.type == GgmlType::Q4_K;
@@ -247,7 +253,67 @@ static void test_requant(ComputeBackend* gpu, const TensorInfo& t, int mode) {
         }
         std::snprintf(what, sizeof(what), "GPU %s kernel == CPU decode of the same bytes, n_tok=%d: max err %.3g (max |y| %.3g)",
                       dst, n_tok, worst, scale);
-        check(ok && worst <= 1e-4 * std::max(1.0, scale), what);
+        check(ok && worst <= act_tol(n_tok) * std::max(1.0, scale), what);
+    }
+    gpu->release(&t);
+}
+
+// Planner device formats (upload_as): the GPU FQ3S kernel against the CPU
+// decoder of the same bytes, n_tok 1 (matvec) and 37 (tiled), plus the
+// re-quantisation error of the format (unweighted fit, information only).
+static void test_devformat(ComputeBackend* gpu, const TensorInfo& t) {
+    const int n_in = static_cast<int>(t.ne[0]), n_out = static_cast<int>(t.ne[1]);
+    if (n_in % 256 || gpu->device_bytes(&t, ComputeBackend::kDevFQ3S) == 0) return;
+    std::printf("\ndevice format %s  %s -> FQ3S  [%d x %d]\n", t.name.c_str(), ggml_type_name(t.type), n_in, n_out);
+    auto q0 = Clock::now();
+    const bool up = gpu->upload_as(&t, ComputeBackend::kDevFQ3S, nullptr, std::string());
+    char what[220];
+    std::snprintf(what, sizeof(what), "upload_as FQ3S (%.0f ms, %.1f MB on device for %.1f MB in the file)",
+                  secs(q0, Clock::now()) * 1e3, gpu->bytes_resident() / 1e6, t.nbytes / 1e6);
+    check(up, what);
+    if (!up) return;
+    std::vector<uint8_t> qrow(static_cast<size_t>(n_in) / 256 * gpu::kFQ3SBlockBytes);
+    std::vector<float> orig(static_cast<size_t>(n_in)), back(static_cast<size_t>(n_in));
+    std::vector<float> wq(static_cast<size_t>(n_in) * n_out);
+    double se = 0, ss = 0;
+    for (int i = 0; i < n_out; ++i) {
+        dequant_row(t.type, t.data + static_cast<size_t>(i) * t.row_bytes(), orig.data(), static_cast<uint64_t>(n_in));
+        gpu::quantize_row_fq3s(orig.data(), n_in, qrow.data(), nullptr);
+        gpu::dequant_row_fq3s(qrow.data(), back.data(), n_in);
+        for (int k = 0; k < n_in; ++k) {
+            const double d = back[static_cast<size_t>(k)] - orig[static_cast<size_t>(k)];
+            se += d * d;
+            ss += static_cast<double>(orig[static_cast<size_t>(k)]) * orig[static_cast<size_t>(k)];
+        }
+        std::memcpy(wq.data() + static_cast<size_t>(i) * n_in, back.data(), sizeof(float) * n_in);
+    }
+    std::printf("        re-quantisation error: relative RMS %.2f%%\n", 100.0 * std::sqrt(se / std::max(ss, 1e-30)));
+    std::mt19937 rng(777);
+    std::normal_distribution<float> nd(0.0f, 1.0f);
+    for (int n_tok : {1, 37}) {
+        std::vector<float> x(static_cast<size_t>(n_tok) * n_in), got(static_cast<size_t>(n_tok) * n_out), ref(got.size());
+        for (float& v : x) v = nd(rng);
+        matmul_batch(GgmlType::F32, wq.data(), x.data(), nullptr, n_tok, n_in, n_out, ref.data());
+        const bool ok = gpu->matmul(&t, x.data(), nullptr, n_tok, n_in, n_out, got.data());
+        double worst = 0, scale = 0;
+        for (size_t j = 0; j < ref.size(); ++j) {
+            worst = std::max(worst, static_cast<double>(std::fabs(got[j] - ref[j])));
+            scale = std::max(scale, static_cast<double>(std::fabs(ref[j])));
+        }
+        std::snprintf(what, sizeof(what), "GPU FQ3S kernel == CPU decode of the same bytes, n_tok=%d: max err %.3g (max |y| %.3g)",
+                      n_tok, worst, scale);
+        check(ok && worst <= act_tol(n_tok) * std::max(1.0, scale), what);
+        if (n_tok == 1) {
+            // Decode kernel throughput over the device bytes (FISH_GPU_PROFILE=1).
+            const double dev_bytes = static_cast<double>(gpu->device_bytes(&t, ComputeBackend::kDevFQ3S));
+            gpu::vulkan_profile(nullptr, nullptr, nullptr, true);
+            for (int r = 0; r < 50; ++r) { x[0] += 1e-6f; gpu->matmul(&t, x.data(), nullptr, 1, n_in, n_out, got.data()); }
+            double kms = 0, wms = 0;
+            long subs = 0;
+            if (gpu::vulkan_profile(&kms, &wms, &subs, true) && subs > 0)
+                std::printf("        profile: FQ3S kernel %.3f ms/call (%.0f GB/s over %.1f MB)\n",
+                            kms / subs, dev_bytes / (kms / subs * 1e-3) / 1e9, dev_bytes / 1e6);
+        }
     }
     gpu->release(&t);
 }
@@ -307,6 +373,9 @@ static void run_kernel_tests(ComputeBackend* gpu, const std::string& path) {
     }
 #endif
     for (const TensorInfo* t : picks) test_tensor(gpu, *t);
+#if FISH_HAVE_VULKAN
+    for (const TensorInfo* t : picks) if (t->name.rfind("blk.0.", 0) == 0) test_devformat(gpu, *t);
+#endif
     check(gpu->bytes_resident() == 0, "every test upload released");
 
     // matmul_group: q/k/v and gate/up share one input and one submit.
@@ -362,7 +431,7 @@ static void run_kernel_tests(ComputeBackend* gpu, const std::string& path) {
             char what[200];
             std::snprintf(what, sizeof(what), "matmul_group %s.. x%d n_tok=%d: max err %.3g (max |y| %.3g)  %.3f ms vs %.3f ms as %d calls",
                           names[0], n, n_tok, worst, scale, secs(a, b) * 1e3 / reps, sep, n);
-            check(ran && worst <= 1e-4 * std::max(1.0, scale), what);
+            check(ran && worst <= act_tol(n_tok) * std::max(1.0, scale), what);
         }
         for (int i = 0; i < n; ++i) gpu->release(ts[i]);
     }
@@ -397,6 +466,13 @@ struct E2E {
     std::vector<std::vector<float>> logits;      // same points, when keep_logits
 };
 
+// Load context for the end-to-end runs: 512, or FISH_TEST_CTX (the planner
+// fits the device KV to it, so production behaviour needs the server's value).
+static int test_ctx() {
+    const char* e = std::getenv("FISH_TEST_CTX");
+    return e && std::atoi(e) > 0 ? std::atoi(e) : 512;
+}
+
 // forced: feed these tokens instead of the run's own argmax (teacher forcing),
 // so two runs are compared on identical inputs and a near-tie cannot cascade.
 static E2E run_e2e(const std::string& path, const char* label,
@@ -404,7 +480,7 @@ static E2E run_e2e(const std::string& path, const char* label,
     E2E r;
     std::string err;
     auto l0 = Clock::now();
-    auto model = LlamaModel::load(path, 512, &err);
+    auto model = LlamaModel::load(path, test_ctx(), &err);
     auto l1 = Clock::now();
     if (!model) { std::printf("  load failed: %s\n", err.c_str()); return r; }
     const LlamaConfig& c = model->config();
@@ -439,13 +515,15 @@ static E2E run_e2e(const std::string& path, const char* label,
 
     // Longer prefill for a throughput number (the 6-token prompt is latency-bound).
     {
-        std::vector<int32_t> longp(128, prompt[1]);
+        const int n_pf = std::getenv("FISH_TEST_PREFILL") ? std::atoi(std::getenv("FISH_TEST_PREFILL")) : 128;
+        std::vector<int32_t> longp(static_cast<size_t>(n_pf), prompt[1]);
         longp[0] = c.bos;
         auto q0 = Clock::now();
-        model->forward(longp.data(), static_cast<int>(longp.size()), 0);
+        const bool pf_ok = model->forward(longp.data(), static_cast<int>(longp.size()), 0);
         auto q1 = Clock::now();
-        r.prefill128_tps = 128 / secs(q0, q1);
-        std::printf("  prefill 128 tokens: %.3f s (%.1f tok/s)\n", secs(q0, q1), r.prefill128_tps);
+        r.prefill128_tps = n_pf / secs(q0, q1);
+        if (!pf_ok) std::printf("  PREFILL FORWARD FAILED\n");
+        std::printf("  prefill %d tokens: %.3f s (%.1f tok/s)\n", n_pf, secs(q0, q1), r.prefill128_tps);
         model->reset_kv();
     }
     auto p0 = Clock::now();
@@ -553,6 +631,109 @@ static void run_quality(const std::string& path, int n, double min_top1) {
     std::printf("\nquality summary: gpu %.2f tok/s vs cpu %.2f tok/s (teacher-forced decode)\n", g.decode_tps, c.decode_tps);
 }
 
+// ------------------------------------------------------------------ perplexity
+//
+// Held-out text (NOT the engine's calibration text), teacher-forced in chunks
+// of 64 with all logits: perplexity of the CPU path at file precision (the
+// reference: the Q4 file itself) vs the GPU placement, plus top-1 agreement
+// and KL(P_cpu || P_gpu) at every position.
+static const char* kHeldOut =
+    "The old bridge across the river had been closed for repairs since the spring floods. "
+    "Every morning the ferryman rowed the children to the school on the far bank, and every "
+    "afternoon he waited under the willow tree to bring them home again. He knew each of them "
+    "by name, and he knew which ones would trail their fingers in the cold water.\n\n"
+    "A compiler translates source code into machine instructions in several stages. The lexer "
+    "turns characters into tokens, the parser builds a syntax tree, semantic analysis checks "
+    "types and scopes, and the optimiser rewrites the intermediate representation before the "
+    "code generator selects instructions and allocates registers.\n\n"
+    "def fibonacci(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n\n"
+    "Suppose a shop sells notebooks for 4 dollars each and pens for 1.50 dollars. If Maria buys "
+    "three notebooks and four pens, she pays 12 + 6 = 18 dollars in total.\n\n"
+    "Q: What causes the seasons on Earth?\nA: The tilt of the Earth's axis, about 23.4 degrees. "
+    "When the northern hemisphere leans towards the Sun it receives more direct sunlight and "
+    "longer days, which is summer there, while the southern hemisphere has winter.\n\n"
+    "The committee agreed on three actions: publish the survey results by Thursday, invite the "
+    "regional managers to the review, and prepare a revised budget for the second quarter.\n";
+
+struct PplRun { bool ok = false; double nll = 0; int n = 0; std::vector<std::vector<float>> lp; double tps = 0; };
+
+static PplRun run_ppl_one(const std::string& path, const char* label) {
+    PplRun r;
+    std::string err;
+    auto l0 = Clock::now();
+    auto model = LlamaModel::load(path, test_ctx(), &err);
+    auto l1 = Clock::now();
+    if (!model) { std::printf("  load failed: %s\n", err.c_str()); return r; }
+    std::printf("\n[%s] loaded in %.2f s: gpu %d layers (%.0f MB), ctx %d\n", label, secs(l0, l1),
+                model->gpu_layers(), model->gpu_bytes() / 1048576.0, model->config().n_ctx);
+    if (!model->placement_note().empty()) std::printf("  %s\n", model->placement_note().c_str());
+#if FISH_HAVE_VULKAN
+    if (gpu_backend() && model->gpu_layers() > 0) std::printf("  %s\n", gpu::vulkan_describe().c_str());
+#endif
+    auto tok = Tokenizer::create(model->gguf(), &err);
+    if (!tok) { std::printf("  tokenizer: %s\n", err.c_str()); return r; }
+    std::vector<int32_t> ids = tok->encode(kHeldOut, true, false);
+    const int V = model->config().vocab;
+    const int n = std::min<int>(static_cast<int>(ids.size()), model->config().n_ctx);
+    for (int p0 = 0; p0 < n - 1; p0 += 64) {
+        const int m = std::min(64, n - p0);
+        if (!model->forward(ids.data() + p0, m, p0, true)) { std::printf("  forward failed at %d\n", p0); return r; }
+        for (int t = 0; t < m && p0 + t + 1 < n; ++t) {
+            const float* lg = model->logits_at(t);
+            double mx = -1e300;
+            for (int v = 0; v < V; ++v) mx = std::max(mx, static_cast<double>(lg[v]));
+            double z = 0;
+            for (int v = 0; v < V; ++v) z += std::exp(lg[v] - mx);
+            const double lz = std::log(z) + mx;
+            std::vector<float> lp(static_cast<size_t>(V));
+            for (int v = 0; v < V; ++v) lp[static_cast<size_t>(v)] = static_cast<float>(lg[v] - lz);
+            r.nll -= lp[static_cast<size_t>(ids[static_cast<size_t>(p0 + t + 1)])];
+            r.lp.push_back(std::move(lp));
+            ++r.n;
+        }
+    }
+    // Decode speed of this placement on the same model object.
+    model->reset_kv();
+    int32_t cur = ids[0];
+    model->forward(&cur, 1, 0);
+    auto d0 = Clock::now();
+    const int steps = 64;
+    for (int s = 1; s <= steps; ++s) { cur = model->argmax(); if (!model->forward(&cur, 1, s)) break; }
+    r.tps = steps / secs(d0, Clock::now());
+    std::printf("  %d positions, perplexity %.3f, decode %.2f tok/s\n", r.n, std::exp(r.nll / std::max(1, r.n)), r.tps);
+    r.ok = r.n > 0;
+    return r;
+}
+
+static void run_ppl(const std::string& path) {
+    const char* user_layers = std::getenv("FISH_GPU_LAYERS");
+    set_env("FISH_GPU_LAYERS", "0");
+    PplRun c = run_ppl_one(path, "ppl reference: cpu, file weights");
+    set_env("FISH_GPU_LAYERS", user_layers);
+    PplRun g = run_ppl_one(path, "ppl candidate: gpu placement");
+    if (!c.ok || !g.ok || c.n != g.n) { check(false, "perplexity runs"); return; }
+    int same = 0;
+    double kl = 0, klmax = 0;
+    for (int i = 0; i < c.n; ++i) {
+        const auto& a = c.lp[static_cast<size_t>(i)];
+        const auto& b = g.lp[static_cast<size_t>(i)];
+        size_t ia = 0, ib = 0;
+        double k = 0;
+        for (size_t v = 0; v < a.size(); ++v) {
+            if (a[v] > a[ia]) ia = v;
+            if (b[v] > b[ib]) ib = v;
+            k += std::exp(static_cast<double>(a[v])) * (a[v] - b[v]);
+        }
+        same += ia == ib;
+        kl += k;
+        klmax = std::max(klmax, k);
+    }
+    const double pc = std::exp(c.nll / c.n), pg = std::exp(g.nll / g.n);
+    std::printf("\nppl summary: %d positions | perplexity cpu/file %.3f, gpu %.3f (%+.2f%%) | top-1 agreement %.1f%% | "
+                "KL mean %.4f max %.3f nats | decode gpu %.2f tok/s, cpu %.2f tok/s\n",
+                c.n, pc, pg, 100.0 * (pg / pc - 1.0), 100.0 * same / c.n, kl / c.n, klmax, g.tps, c.tps);
+}
+
 int main(int argc, char** argv) {
     std::string path = argc > 1 ? argv[1] : "models/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
     bool e2e = true, cpu_compare = true, kernels = true;
@@ -562,6 +743,32 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--no-kernels")) kernels = false;
         if (!std::strcmp(argv[i], "--no-cpu-compare")) cpu_compare = false;
         if (!std::strcmp(argv[i], "--quality") && i + 1 < argc) quality = std::atoi(argv[++i]);
+        if (!std::strcmp(argv[i], "--fq3s-scan")) {
+            // Plain FQ3S round-trip error of every re-quantisable tensor (study).
+            std::string err;
+            auto g = GgufFile::open(path, &err);
+            if (!g) return 1;
+            for (const auto& t : g->tensors()) {
+                if (t.ne.size() != 2 || t.ne[0] % 256) continue;
+                const int n_in = static_cast<int>(t.ne[0]), n_out = static_cast<int>(t.ne[1]);
+                std::vector<float> a(static_cast<size_t>(n_in)), b(a.size());
+                std::vector<uint8_t> q(static_cast<size_t>(n_in) / 256 * gpu::kFQ3SBlockBytes);
+                double se = 0, ss = 0, worst_row = 0;
+                for (int r = 0; r < n_out; r += std::max(1, n_out / 512)) {
+                    dequant_row(t.type, t.data + static_cast<size_t>(r) * t.row_bytes(), a.data(), static_cast<uint64_t>(n_in));
+                    gpu::quantize_row_fq3s(a.data(), n_in, q.data(), nullptr);
+                    gpu::dequant_row_fq3s(q.data(), b.data(), n_in);
+                    double rse = 0, rss = 0;
+                    for (int k = 0; k < n_in; ++k) { const double d = b[k] - a[k]; rse += d * d; rss += static_cast<double>(a[k]) * a[k]; }
+                    se += rse; ss += rss;
+                    worst_row = std::max(worst_row, std::sqrt(rse / std::max(rss, 1e-30)));
+                }
+                std::printf("%-28s %-5s rel RMS %6.2f%%  worst row %6.2f%%\n", t.name.c_str(), ggml_type_name(t.type),
+                            100.0 * std::sqrt(se / std::max(ss, 1e-30)), 100.0 * worst_row);
+            }
+            return 0;
+        }
+        if (!std::strcmp(argv[i], "--ppl")) { run_ppl(path); std::printf("\n%s\n", failures ? "PPL FAILED" : "PPL DONE"); return failures ? 1 : 0; }
     }
     if (quality > 0) {
         run_quality(path, quality, 95.0);

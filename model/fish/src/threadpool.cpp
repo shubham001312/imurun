@@ -71,9 +71,16 @@ ThreadPool& ThreadPool::instance() {
 ThreadPool::ThreadPool() {
     const int n = default_threads();
     workers_.reserve(static_cast<size_t>(n > 0 ? n - 1 : 0));
+    limit_.store(std::max(1, n), std::memory_order_relaxed);
     for (int i = 1; i < n; ++i) {
-        workers_.emplace_back([this] { worker_loop(); });
+        workers_.emplace_back([this, i] { worker_loop(i); });
     }
+}
+
+void ThreadPool::set_active_threads(int n) {
+    // Only between jobs: run_job holds the caller until every worker is done,
+    // and the generation loop is the only caller.
+    limit_.store(std::max(1, std::min(n, size())), std::memory_order_relaxed);
 }
 
 ThreadPool::~ThreadPool() {
@@ -88,7 +95,7 @@ ThreadPool::~ThreadPool() {
     }
 }
 
-void ThreadPool::worker_loop() {
+void ThreadPool::worker_loop(int index) {
     lower_priority();
     int seen = 0;
     for (;;) {
@@ -104,7 +111,7 @@ void ThreadPool::worker_loop() {
             grain = grain_;
         }
 
-        if (job) {
+        if (job && index < limit_.load(std::memory_order_relaxed)) {
             int begin;
             while ((begin = next_.fetch_add(grain, std::memory_order_relaxed)) < total) {
                 (*job)(begin, std::min(total, begin + grain));
@@ -145,9 +152,9 @@ void ThreadPool::parallel_range(int n, const std::function<void(int, int)>& fn, 
     if (grain <= 0) {
         // Aim for ~8 chunks per thread so the tail stays balanced without
         // paying an atomic per item.
-        grain = std::max(1, n / (size() * 8));
+        grain = std::max(1, n / (active_threads() * 8));
     }
-    if (workers_.empty() || n <= grain) {
+    if (workers_.empty() || active_threads() <= 1 || n <= grain) {
         fn(0, n);
         return;
     }
@@ -156,14 +163,14 @@ void ThreadPool::parallel_range(int n, const std::function<void(int, int)>& fn, 
 
 void ThreadPool::parallel_for(int n, const std::function<void(int)>& fn) {
     if (n <= 0) return;
-    if (n == 1 || workers_.empty()) {
+    if (n == 1 || workers_.empty() || active_threads() <= 1) {
         for (int i = 0; i < n; ++i) fn(i);
         return;
     }
     const std::function<void(int, int)> ranged = [&](int b, int e) {
         for (int i = b; i < e; ++i) fn(i);
     };
-    run_job(ranged, n, std::max(1, n / (size() * 8)));
+    run_job(ranged, n, std::max(1, n / (active_threads() * 8)));
 }
 
 } // namespace fish

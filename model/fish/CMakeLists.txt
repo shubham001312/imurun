@@ -19,11 +19,9 @@ option(FISH_BUILD_TESTS  "Build the C++ acceptance tests" ON)
 # ---------------------------------------------------------------------------
 # Core engine sources.
 #
-# The older skeleton files (engine.cpp, hardware_probe.cpp, layer_planner.cpp,
-# resident_window.cpp, prefetcher.cpp, expert_streamer.cpp, adapter_mgr.cpp,
-# compression_policy.cpp, platform.cpp) are superseded by model/specs/c_api and
-# are deliberately not compiled; keeping dead code in the binary only makes the
-# import surface larger and the library harder to certify.
+# (The pre-2026-10 skeleton modules - engine, platform, hardware_probe,
+# layer_planner, ... - were never compiled and were deleted on 2026-11-03;
+# model/fish/doc/*.md other than README.md still describe that old design.)
 # ---------------------------------------------------------------------------
 set(FISH_CORE
     src/gguf.cpp
@@ -33,6 +31,7 @@ set(FISH_CORE
     src/ops.cpp
     src/threadpool.cpp
     src/model.cpp
+    src/calib.cpp
     src/tokenizer.cpp
     src/sampler.cpp
     src/specs.cpp
@@ -80,7 +79,7 @@ if(FISH_VULKAN)
         message(STATUS "FISH: Vulkan headers not found (install the Vulkan SDK or set VULKAN_SDK) - GPU backend disabled")
     else()
         set(FISH_VK_ENABLED ON)
-        set(_vk_kernels matvec matmul_tiled)
+        set(_vk_kernels matvec matmul_tiled matmul_coop)   # coop: tensor cores, used when the device has them
         set(_vk_types F32 F16 Q4_0 Q8_0 Q4_K Q5_K Q6_K FQ3 FQ3S)   # FQ3 / FQ3S: re-quantised 3-bit (src/gpu/requant.h)
         foreach(_k IN LISTS _vk_kernels)
             foreach(_t IN LISTS _vk_types)
@@ -88,7 +87,8 @@ if(FISH_VULKAN)
             endforeach()
         endforeach()
         # Layer-span kernels (one variant each, no weight type).
-        set(_vk_span span_rmsnorm span_add span_rope span_kv_store span_attention span_act_mul)
+        set(_vk_span span_rmsnorm span_add span_rope span_kv_store span_attention span_act_mul
+                     span_kv_store_q8 span_attention_q8)
         list(APPEND FISH_VK_SHADER_NAMES ${_vk_span})
 
         set(_glslc_ok FALSE)

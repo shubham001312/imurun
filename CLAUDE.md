@@ -100,11 +100,15 @@ scope, write it down in the matching `*-REQUESTS.md` file instead of editing.
 
 ## Where things are not yet real (do not claim them)
 
-- GPU compute: a Vulkan backend runs the layer projections and the output
-  projection on the GPU for as many layers as fit the VRAM budget
-  (`docs/engine/GPU.md`, tested on NVIDIA only). Attention, norms, RoPE, the KV
-  cache and MoE experts are still on the CPU, so decode is bounded by per-layer
-  round trips; whole-layer GPU execution is the next step (`docs/ROADMAP.md`).
+- GPU compute (2026-11-03): the Vulkan backend runs whole-layer spans (attention,
+  norms, RoPE, KV cache in VRAM) for as many top layers as fit, re-quantising the
+  GPU copies when the file precision does not fit (`docs/engine/GPU.md`). Measured on
+  the RTX 3050 4 GB: 1B 84-100 tok/s, Phi-3 ~40 tok/s fully resident, 8B 16-19 tok/s
+  with 28 of 32 layers resident at ~3.25 bpw (perplexity +7 % vs file precision;
+  `FISH_GPU_REQUANT=0` keeps full precision at ~7 tok/s). The first load of a model
+  calibrates and re-quantises (8B: ~150 s once, then cached in `~/.imurun/cache/fish`,
+  warm load 3-4 s). Not yet: 30 tok/s on the 8B (needs all 32 layers + faster kernels),
+  MoE experts on the GPU, AMD/Intel/Apple testing (NVIDIA only so far).
 - "Layer streaming" today = mmap + prefetch of the next layer + eviction of
   layers behind a 3-layer window when the model exceeds the RAM budget. There
   is no expert-level cache yet.

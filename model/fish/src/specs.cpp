@@ -428,7 +428,15 @@ ExecutionPlan SpecsEngine::plan(const ModelProfile& m, const PlanRequest& req) c
     }
     const uint64_t free_ram = hw.ram_available_bytes > 0 ? hw.ram_available_bytes
                                                          : hw.ram_total_bytes / 2;
-    const uint64_t budget = free_ram > reserve ? free_ram - reserve : free_ram / 2;
+    uint64_t budget = free_ram > reserve ? free_ram - reserve : free_ram / 2;
+    // FISH_RAM_BUDGET_MB (set by the host's resource governor at every load,
+    // and used by place_layers / the adapter merge) is the one number in
+    // charge when present, so the context choice cannot eat the user's
+    // headroom either (docs/engine/REQUESTS.md R2).
+    if (const char* e = std::getenv("FISH_RAM_BUDGET_MB")) {
+        const long long mb = std::atoll(e);
+        if (mb > 0) budget = static_cast<uint64_t>(mb) << 20;
+    }
     p.ram_budget_bytes = budget;
 
     // ---- context: shrink until the KV cache fits a quarter of the budget

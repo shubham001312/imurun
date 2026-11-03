@@ -31,6 +31,8 @@ namespace gpu {
     X(vkGetPhysicalDeviceQueueFamilyProperties)   \
     X(vkGetPhysicalDeviceMemoryProperties)        \
     X(vkGetPhysicalDeviceMemoryProperties2)       \
+    X(vkGetPhysicalDeviceFeatures2)               \
+    X(vkGetPhysicalDeviceProperties2)             \
     X(vkEnumerateDeviceExtensionProperties)       \
     X(vkCreateDevice)                             \
     X(vkGetDeviceProcAddr)

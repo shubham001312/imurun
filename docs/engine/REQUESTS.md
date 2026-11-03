@@ -6,7 +6,14 @@ predate this file stay in `docs/engine/GPU.md` ("Requests to the engine owner").
 
 ## From the resources owner (2026-11-03, `docs/resources/README.md`)
 
-### R1. Change the thread count per generation (P1)
+### R1. Change the thread count per generation (P1) — DONE 2026-11-03
+
+Done: `fish_set_threads(ctx, n)` (ABI 4) sets how many pool threads take part
+in the following jobs (1..pool size; the pool is still created once from
+`FISH_THREADS`, workers above the limit wake and return without work).
+`fish_stats.n_threads` and `fish_specs_json().threads` report the active
+count, `pool_threads` the pool size. Takes the context lock, so it never
+changes a running generation.
 
 **Why.** The resource governor lowers IMURUN's CPU threads when the user's own
 programs get busy and raises them back when the host is idle (owner: "always
@@ -26,7 +33,11 @@ generation with the governor's target (`_begin_generation`); `/api/resources`
 reports `imurun.engineAppliesTarget` = true once it is there. No ABI struct
 change is needed.
 
-### R2. Let the specs planner's context choice honour `FISH_RAM_BUDGET_MB` (P2)
+### R2. Let the specs planner's context choice honour `FISH_RAM_BUDGET_MB` (P2) — DONE 2026-11-03
+
+Done: `SpecsEngine::plan()` uses `FISH_RAM_BUDGET_MB` as its RAM budget when
+it is set (n_ctx "KV fits a quarter of the budget" and the resident/windowed
+choice), the same number `place_layers()` uses.
 
 `place_layers()` and the adapter merge use `FISH_RAM_BUDGET_MB`, which the
 governor now sets to `min(total - OS reserve - headroom, free now - headroom)`
@@ -36,7 +47,15 @@ so on a machine whose RAM is already full it can still pick a context whose
 KV cache eats into the user's headroom. Using the same budget there keeps one
 number in charge.
 
-### R3. VRAM headroom as a share, and live VRAM in the stats (P2)
+### R3. VRAM headroom as a share, and live VRAM in the stats (P2) — DONE 2026-11-03
+
+Done, both: (a) `FISH_VRAM_HEADROOM_PCT=p` (0..90, share of the device heap;
+`FISH_VRAM_HEADROOM_MB` wins when both are set), one rule
+(`vram_headroom_bytes()`, `backend.h`) for the backend and the planner;
+(b) ABI 4 `fish_stats.vram_total` / `vram_free` (live, read at every
+`fish_get_stats`) / `vram_headroom`, from Vulkan on any vendor; Python:
+`stats()["placement"]["vram_total_bytes"|"vram_free_bytes"|"vram_headroom_bytes"]`.
+`fish_specs_json().hardware.vram_*` already came from the Vulkan backend.
 
 The governor keeps 25 % of a <=4 GB card free (20 % up to 8 GB, 15 % above)
 and passes it as `FISH_VRAM_HEADROOM_MB`, which needs the card's size. It
