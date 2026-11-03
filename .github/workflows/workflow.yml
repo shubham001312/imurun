@@ -122,9 +122,14 @@ jobs:
           python -m build --wheel --outdir dist/
           twine check dist/*
           ls -la dist/
-      - name: Smoke-install on ${{ matrix.os }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Smoke-install on ${{ matrix.os }} (fresh venv + npm launcher)
         shell: bash
-        run: python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-${{ matrix.tag }}.whl" --expect-engine
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-${{ matrix.tag }}.whl"             --expect-engine --npm "$(ls "$RUNNER_TEMP"/imurun-*.tgz)"
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.platform }}

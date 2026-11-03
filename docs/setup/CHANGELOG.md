@@ -1,5 +1,45 @@
 # Setup / packaging changelog
 
+## 0.3.0 (unreleased) — 2026-11-03: one command installs and runs everything
+
+### Added
+- **Automatic setup on every start.** `start.py` / `imurun` call `install.quick_check()`
+  (state file + `find_spec` + `stat`; 20 ms measured, no engine load, no heavy imports).
+  When something is missing (first run, new version, missing package, changed engine),
+  it runs `install.py --here --auto` with the same interpreter and then continues. Only a
+  core-package failure stops it. `IMURUN_SKIP_SETUP=1` / `--skip-setup` turn it off.
+  (`start.py` `ensure_installed`, `run_install_step`)
+- **`install.py` installs everything** (`run_setup`): core packages (fatal); pywebview
+  on Windows/macOS; voice (`requirements-voice.txt`, best-effort); the engine (found,
+  else downloaded from the release, else built from `model/fish` with CMake + Ninja when
+  the toolchain is present, else instructions), then loaded with ctypes and its ABI
+  read (`probe_engine`); a GPU runtime report (Vulkan loader + vendor driver, file
+  lookups only: `gpu_report`); tuning only with `--tuning` (separate venv). New flags:
+  `--force`, `--no-voice`, `--tuning`, `--no-build`, `--build-tools` (Windows winget
+  toolchain), `--auto`, `--doctor`.
+- **`~/.imurun/install-state.json`**: one entry per interpreter, holding the versions,
+  the engine path/size/mtime/ABI/source, the voice/window/tuning results and the GPU
+  report.
+- **`imurun doctor`** and **`imurun install [--force ...]`** subcommands (`imurun/cli.py`).
+- CI **`install-smoke`** job on Windows, Linux and macOS (`ci.yml`). It builds a wheel
+  with that commit's engine, installs it into a fresh venv outside the checkout, starts
+  `imurun --no-open`, checks `/health`, `/`, the state file and `imurun doctor`, then
+  installs the npm tarball into a scratch prefix and runs it. The release workflow's
+  wheel jobs run the same script with `--npm`.
+
+### Changed
+- An installed copy now auto-installs missing core packages instead of exiting with a
+  message. A checkout run inside a venv does the same instead of asking. A checkout
+  run with a system Python creates `.venv` without asking.
+- Voice is installed by default (it was `--voice` opt-in). It is skipped under `CI` /
+  `IMURUN_SKIP_OPTIONAL=1` / `IMURUN_NO_VOICE=1`.
+- The install log follows `IMURUN_DATA_ROOT` (`<data root>/logs/install.log`).
+- npm launcher: when the version is missing from PyPI, it now says so instead of
+  "check your internet connection".
+- `docs/setup/README.md`: per-OS command table matching imutechz.in/imu, a status
+  note (PyPI/npm still serve 0.1.11), what gets installed and when, the state file,
+  force reinstall, the installed layout, and new troubleshooting entries.
+
 ## 0.3.0 — 2026-11-02: `pip install imurun`, `npx imurun`, CI and release pipeline
 
 ### Added

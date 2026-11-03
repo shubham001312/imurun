@@ -10,7 +10,9 @@
  *   2. creates ~/.imurun/venv if it is missing or broken,
  *   3. installs imurun==<this package's version> into it when the installed
  *      version differs (so npm and PyPI stay in lock step),
- *   4. runs `python -m imurun <args>` from that venv and passes its exit code on.
+ *   4. runs `python -m imurun <args>` from that venv and passes its exit code on;
+ *      on its first run `imurun` installs the rest itself (voice, engine check,
+ *      GPU check; see docs/setup/README.md), recorded in ~/.imurun/install-state.json.
  *
  * Environment:
  *   IMURUN_PYTHON=<path>     use this interpreter to create the venv
@@ -157,10 +159,17 @@ function pipInstall(py) {
     if (wheel) return `${s}[${extra}]`;
     return s.replace(/^imurun==/, `imurun[${extra}]==`);
   };
-  const pip = (target) =>
-    run(py, ["-m", "pip", "install", "--upgrade", "--disable-pip-version-check", target], {
-      stdio: "inherit",
+  // stdout streams (progress); stderr is captured so a known failure can be
+  // explained, and echoed unchanged.
+  let lastErr = "";
+  const pip = (target) => {
+    const r = run(py, ["-m", "pip", "install", "--upgrade", "--disable-pip-version-check", target], {
+      stdio: ["inherit", "inherit", "pipe"],
     });
+    lastErr = r.stderr || "";
+    if (lastErr) process.stderr.write(lastErr);
+    return r;
+  };
   say(`installing ${wheel ? base : `imurun ${VERSION}`} into ${venvDir()} ...`);
   let r = pip(spec(base, wantWindow ? "window" : ""));
   if (r.status !== 0 && wantWindow) {
@@ -173,6 +182,13 @@ function pipInstall(py) {
     r = run(py, ["-m", "pip", "install", "--force-reinstall", "--no-deps", "--disable-pip-version-check", base], {
       stdio: "inherit",
     });
+  }
+  if ((r.error || r.status !== 0) && !wheel && /No matching distribution found for imurun/i.test(lastErr)) {
+    say(`imurun ${VERSION} is not on PyPI (yet). This npm launcher needs the matching Python release.`);
+    say("  If you just installed it, the release may still be uploading: try again in a few minutes.");
+    say("  Otherwise install a built wheel directly:  set IMURUN_WHEEL=<path to imurun-*.whl>  and rerun,");
+    say("  or use the source checkout (run.bat / ./run.sh). Releases: https://github.com/shubham001312/imurun/releases");
+    process.exit(1);
   }
   if (r.error || r.status !== 0) {
     say("pip could not install IMURUN. Check your internet connection or proxy (HTTPS_PROXY),");

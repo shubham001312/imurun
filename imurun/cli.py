@@ -6,6 +6,11 @@ and ``model`` importable from there, and hands over to ``start.main`` with
 the user's arguments: ``imurun --no-open --port 8800`` is
 ``python start.py --no-open --port 8800``.
 
+Subcommands (everything else goes to start.py):
+    imurun doctor [--port N]       Python, engine (ABI), GPU runtime, dirs, port
+    imurun install [--force ...]   run the installer into this interpreter
+                                   (install.py --here; --no-voice, --tuning, ...)
+
 Only the standard library is imported here, so a broken environment still
 produces a message instead of a traceback.
 """
@@ -61,6 +66,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     _prepend_path(root)
+
+    if args and args[0] in ("doctor", "install"):
+        import install  # noqa: PLC0415 - stdlib only, lives next to start.py
+
+        if args[0] == "doctor":
+            port = 8732
+            if "--port" in args[1:]:
+                try:
+                    port = int(args[args.index("--port") + 1])
+                except (IndexError, ValueError):
+                    pass
+            return install.main(["--doctor", "--port", str(port)])
+        return install.main(["--here", *args[1:]])
 
     import start  # noqa: PLC0415 - must come after the path is set
 

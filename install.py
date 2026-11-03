@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
-"""IMURUN one-command installer (Windows / macOS / Linux).
+"""IMURUN one-command installer (Windows / macOS / Linux). Idempotent.
 
-    python install.py              # create/repair .venv and install everything needed
+    python install.py              # create/repair .venv, then install everything below into it
     python install.py --here       # install into the interpreter running this script
+    python install.py --force      # redo every step (same as `imurun install --force`)
     python install.py --no-window  # skip the optional native-window package (pywebview)
+    python install.py --no-voice   # skip the voice packages (~250 MB)
+    python install.py --tuning     # also set up the fine-tuning venv (torch, 2-5 GB; opt-in)
+    python install.py --no-build   # never compile the engine from source
+    python install.py --build-tools  # Windows: winget-install MinGW-w64 + CMake + Ninja first
     python install.py --dev        # also install requirements-dev.txt
-    python install.py --voice      # also install requirements-voice.txt (server STT/TTS)
     python install.py --check      # only report what is missing, change nothing
-    python install.py --verbose    # stream raw pip output instead of the spinner
+    python install.py --doctor     # the `imurun doctor` report
+    python install.py --verbose    # stream raw pip / build output instead of the spinner
+
+Steps (only step 1 can fail the install; the rest are best-effort and reported):
+  1. core packages (requirements.txt)          4. FISH engine: found / downloaded from the
+  2. pywebview (Windows/macOS by default)         GitHub release / built from model/fish
+  3. voice (requirements-voice.txt)            5. GPU runtime check (Vulkan loader + driver)
+  (6. tuning venv, only with --tuning)
+What was done is recorded per interpreter in ~/.imurun/install-state.json;
+``start.py`` / ``imurun`` call ``quick_check`` on every start (a few ms, no
+engine load) and run ``install.py --here --auto`` when something is missing.
 
 Standard library only: this file must run before any dependency is installed.
 ``start.py`` imports the helpers below, so keep them free of side effects.
-
-The FISH engine (a C++ shared library) is NOT built here; this script only
-detects it (and the build tools) and prints build instructions.
-``download_engine`` fetches a prebuilt library from the GitHub release when
-asked (``imurun --get-engine``), checked against the release's SHA256SUMS.
 """
 from __future__ import annotations
 
@@ -39,7 +48,6 @@ VENV = ROOT / ".venv"
 REQUIREMENTS = ROOT / "requirements.txt"
 REQUIREMENTS_DEV = ROOT / "requirements-dev.txt"
 REQUIREMENTS_VOICE = ROOT / "requirements-voice.txt"
-LOG_DIR = Path.home() / ".imurun" / "logs"
 
 # import name -> pip distribution name. Keep in sync with requirements.txt.
 REQUIRED_MODULES: dict[str, str] = {
@@ -535,8 +543,9 @@ def _log_path() -> Path:
     global _LOG_PATH
     if _LOG_PATH is None:
         try:
-            LOG_DIR.mkdir(parents=True, exist_ok=True)
-            _LOG_PATH = LOG_DIR / "install.log"
+            log_dir = data_root() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _LOG_PATH = log_dir / "install.log"
         except OSError:
             import tempfile  # noqa: PLC0415 - never write into an installed package
 
@@ -857,6 +866,556 @@ def report_engine() -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Engine: load check, prebuilt download, source build
+# --------------------------------------------------------------------------- #
+# Oldest ABI the bindings accept, and the one they were written against
+# (model/fish_native.py EXPECTED_ABI). Older libraries load with fewer features.
+ENGINE_ABI_MIN = 1
+ENGINE_ABI_EXPECTED = 3
+
+
+def _file_sig(path: Path) -> dict:
+    try:
+        st = path.stat()
+        return {"size": st.st_size, "mtime": int(st.st_mtime)}
+    except OSError:
+        return {}
+
+
+def probe_engine(path: Path | None) -> dict:
+    """Load the library with ctypes and read its ABI (no model is loaded).
+
+    Costs a few milliseconds; the result is cached in the state file so
+    ``quick_check`` never has to load the library on a normal start.
+    """
+    if path is None:
+        return {"ok": False, "path": None, "error": "not found"}
+    info: dict = {"ok": False, "path": str(path), **_file_sig(path)}
+    try:
+        import ctypes  # noqa: PLC0415
+
+        lib = ctypes.CDLL(str(path))
+        abi = 1
+        if hasattr(lib, "fish_abi_version"):
+            lib.fish_abi_version.restype = ctypes.c_int
+            abi = int(lib.fish_abi_version())
+        info["abi"] = abi
+        if hasattr(lib, "fish_version"):
+            lib.fish_version.restype = ctypes.c_char_p
+            info["fish_version"] = (lib.fish_version() or b"").decode("utf-8", "replace")
+        if abi < ENGINE_ABI_MIN:
+            info["error"] = f"ABI {abi} is older than {ENGINE_ABI_MIN}; rebuild the engine"
+        else:
+            info["ok"] = True
+            if abi < ENGINE_ABI_EXPECTED:
+                info["warning"] = (f"ABI {abi} < {ENGINE_ABI_EXPECTED}: chat works, LoRA adapters "
+                                   "need a newer engine build")
+    except OSError as exc:
+        info["error"] = f"cannot load: {exc}"
+    return info
+
+
+def engine_source_dir() -> Path | None:
+    """model/fish when the C++ sources are present (a checkout or unpacked sdist)."""
+    src = ROOT / "model" / "fish"
+    return src if (src / "CMakeLists.txt").is_file() else None
+
+
+def _toolchain_env() -> dict[str, str]:
+    """PATH plus the places winget puts WinLibs/CMake/Ninja (no new terminal needed)."""
+    env = dict(os.environ)
+    if sys.platform != "win32":
+        return env
+    extra: list[str] = []
+    local = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    links = local / "Microsoft" / "WinGet" / "Links"
+    if links.is_dir():
+        extra.append(str(links))
+    pkgs = local / "Microsoft" / "WinGet" / "Packages"
+    if pkgs.is_dir():
+        for d in sorted(pkgs.glob("BrechtSanders.WinLibs*")):
+            if (d / "mingw64" / "bin").is_dir():
+                extra.append(str(d / "mingw64" / "bin"))
+        extra.extend(str(d) for d in sorted(pkgs.glob("Ninja-build.Ninja*")))
+    cmake_dir = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "CMake" / "bin"
+    if cmake_dir.is_dir():
+        extra.append(str(cmake_dir))
+    if extra:
+        env["PATH"] = os.pathsep.join([*extra, env.get("PATH", "")])
+    return env
+
+
+def _which(name: str, env: dict[str, str] | None = None) -> str | None:
+    return shutil.which(name, path=(env or _toolchain_env()).get("PATH"))
+
+
+WINDOWS_TOOLCHAIN_IDS = ["BrechtSanders.WinLibs.POSIX.UCRT", "Kitware.CMake", "Ninja-build.Ninja"]
+
+
+def install_build_tools_windows() -> bool:
+    """winget install of the MinGW-w64 + CMake + Ninja toolchain (explicit opt-in)."""
+    if sys.platform != "win32" or not shutil.which("winget"):
+        ui.fail("winget is not available; install the build tools by hand (hints above).")
+        return False
+    ok = True
+    for pkg in WINDOWS_TOOLCHAIN_IDS:
+        ui.info(f"winget install -e --id {pkg}")
+        proc = subprocess.run(["winget", "install", "-e", "--id", pkg, "--accept-package-agreements",
+                               "--accept-source-agreements"])
+        # 0x8A15002B: already installed.
+        ok = ok and proc.returncode in (0, -1978335189, 2316632107)
+    return ok
+
+
+def build_engine(verbose: bool = False) -> Path | None:
+    """Configure + build model/fish with CMake/Ninja and put the library in place.
+
+    Only possible where the C++ sources exist (a checkout): the result goes to
+    <repo>/bin, where the bindings look first. Returns the library path, or
+    None after printing why.
+    """
+    src = engine_source_dir()
+    if src is None:
+        return None
+    env = _toolchain_env()
+    cxx = "clang++" if sys.platform == "darwin" else "g++"
+    missing = [n for n in ("cmake", "ninja") if not _which(n, env)]
+    if not (_which(cxx, env) or (sys.platform.startswith("linux") and _which("clang++", env))):
+        missing.append(cxx)
+    if missing:
+        ui.warn("Cannot build the FISH engine here: missing " + ", ".join(missing))
+        return None
+    build = src / "build"
+    dest_dir = user_engine_dir() if INSTALLED else ROOT / "bin"
+    name = engine_library_names()[0]
+    jobs = str(max(1, (os.cpu_count() or 2) - 1))
+    configure = ["cmake", "-G", "Ninja", "-S", str(src), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release"]
+    if sys.platform == "win32":
+        configure += ["-DCMAKE_C_COMPILER=gcc", "-DCMAKE_CXX_COMPILER=g++"]
+    steps = [
+        ("Configuring the FISH engine (CMake)", configure),
+        ("Building the FISH engine (Ninja, a few minutes)", ["ninja", "-C", str(build), "-j", jobs, "fish"]),
+    ]
+    log_path = _log_path()
+    for label, cmd in steps:
+        with open(log_path, "a", encoding="utf-8", errors="replace") as log:
+            log.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(cmd)}\n")
+            log.flush()
+            with Spinner(label) as sp:
+                try:
+                    proc = subprocess.run(cmd, env=env, stdout=None if verbose else log,
+                                          stderr=subprocess.STDOUT, timeout=3600)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    sp.done(f"{label}: {exc}", ok=False)
+                    return None
+                if proc.returncode != 0:
+                    sp.done(f"{label} failed (exit {proc.returncode}); log: {log_path}", ok=False)
+                    return None
+                sp.done(label)
+    built = build / name
+    if not built.is_file():
+        ui.fail(f"The build finished but {built} is missing.")
+        return None
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    target = dest_dir / name
+    try:
+        shutil.copy2(built, target)
+    except OSError as exc:
+        ui.fail(f"Could not copy the engine to {target}: {exc}")
+        ui.hint("On Windows a running IMURUN locks bin/fish.dll: stop it and retry.")
+        return None
+    return target
+
+
+def ensure_engine(*, auto: bool, allow_build: bool = True, verbose: bool = False) -> dict:
+    """Find the engine; else download the prebuilt one; else build it; else explain.
+
+    Never raises: a missing engine is not fatal (the UI starts in its
+    'provisioning' state and says what to do).
+    """
+    lib = find_engine_library()
+    source = "found"
+    if lib is None and engine_asset_name() is not None:
+        with Spinner("Downloading the prebuilt FISH engine") as sp:
+            try:
+                lib = download_engine(timeout=20)
+                source = "downloaded"
+                sp.done(f"Downloaded the FISH engine {ui.c(str(lib), 'grey')}")
+            except RuntimeError as exc:
+                sp.done(f"No prebuilt engine downloaded ({str(exc)[:160]})", ok=False)
+    if lib is None and allow_build and engine_source_dir() is not None:
+        asked_no = (auto and os.environ.get("IMURUN_AUTO_BUILD") != "1"
+                    and not ui.ask("Build the FISH engine from source now (a few minutes)?"))
+        lib = None if asked_no else build_engine(verbose=verbose)
+        source = "built" if lib else source
+    info = probe_engine(lib)
+    info["source"] = source if lib else "missing"
+    info["platform"] = f"{sys.platform}-{platform.machine().lower()}"
+    if info.get("ok"):
+        extra = f" ABI {info.get('abi')}" + (f", {info['fish_version']}" if info.get("fish_version") else "")
+        ui.ok(f"FISH engine {ui.c(str(lib), 'grey')}{ui.c(extra, 'grey')}")
+        if info.get("warning"):
+            ui.warn(info["warning"])
+    elif lib is not None:
+        ui.fail(f"FISH engine at {lib} does not work: {info.get('error')}")
+    else:
+        report_engine()
+        if engine_source_dir() is not None:
+            if all(present for _, present, _ in build_tools()):
+                ui.hint("The build tools are present: `python install.py` (without --no-build) builds it.")
+            elif sys.platform == "win32":
+                ui.hint("Install the toolchain with winget:  python install.py --build-tools")
+    return info
+
+
+# --------------------------------------------------------------------------- #
+# GPU runtime check (Vulkan loader + vendor driver): file lookups only, no
+# driver is loaded, so it is cheap and cannot hang.
+# --------------------------------------------------------------------------- #
+def _vendor_from_name(name: str) -> str | None:
+    low = name.lower()
+    if low.startswith("nv") or "nvidia" in low:
+        return "NVIDIA"
+    if "amd" in low or "radeon" in low:
+        return "AMD"
+    if "intel" in low or low.startswith("igvk") or "iris" in low:
+        return "Intel"
+    if "moltenvk" in low:
+        return "Apple (MoltenVK)"
+    if "lvp" in low or "lavapipe" in low:
+        return "lavapipe (software)"
+    return None
+
+
+def gpu_report() -> dict:
+    """What the engine's Vulkan backend needs (loader + a GPU driver), found or not."""
+    found: dict = {"loader": None, "drivers": [], "vendors": []}
+    if sys.platform == "win32":
+        sysdir = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+        if (sysdir / "vulkan-1.dll").is_file():
+            found["loader"] = str(sysdir / "vulkan-1.dll")
+        try:
+            import winreg  # noqa: PLC0415
+
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Khronos\Vulkan\Drivers") as key:
+                i = 0
+                while True:
+                    try:
+                        found["drivers"].append(winreg.EnumValue(key, i)[0])
+                    except OSError:
+                        break
+                    i += 1
+        except (ImportError, OSError):
+            pass
+        # Modern drivers register their ICDs under the display adapter key
+        # instead; the vendor DLLs in System32 are a cheap second signal.
+        for dll, vendor in (("nvapi64.dll", "NVIDIA"), ("nvoglv64.dll", "NVIDIA"),
+                            ("amdvlk64.dll", "AMD"), ("atiadlxx.dll", "AMD"),
+                            ("igvk64.dll", "Intel"), ("igdumdim64.dll", "Intel")):
+            if (sysdir / dll).is_file() and vendor not in found["vendors"]:
+                found["vendors"].append(vendor)
+        hint = ("install or update the GPU driver from NVIDIA / AMD / Intel; it ships the "
+                "Vulkan runtime (vulkan-1.dll)")
+    elif sys.platform == "darwin":
+        dirs = [Path("/usr/local/lib"), Path("/opt/homebrew/lib")]
+        if os.environ.get("VULKAN_SDK"):
+            dirs.insert(0, Path(os.environ["VULKAN_SDK"]) / "lib")
+        for d in dirs:
+            for n in ("libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib"):
+                if (d / n).exists():
+                    found["loader"] = found["loader"] or str(d / n)
+                    if "MoltenVK" in n:
+                        found["drivers"].append(str(d / n))
+        hint = "brew install molten-vk vulkan-loader   (or the LunarG Vulkan SDK)"
+    else:
+        for d in ("/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64",
+                  "/usr/lib", "/usr/local/lib"):
+            if (Path(d) / "libvulkan.so.1").exists():
+                found["loader"] = str(Path(d) / "libvulkan.so.1")
+                break
+        for d in ("/usr/share/vulkan/icd.d", "/etc/vulkan/icd.d", "/usr/local/share/vulkan/icd.d"):
+            if Path(d).is_dir():
+                found["drivers"].extend(str(f) for f in sorted(Path(d).glob("*.json")))
+        if Path("/proc/driver/nvidia/version").exists():
+            found["vendors"].append("NVIDIA")
+        hint = ("sudo apt install libvulkan1 mesa-vulkan-drivers   (NVIDIA: its proprietary "
+                "driver; Fedora: sudo dnf install vulkan-loader mesa-vulkan-drivers)")
+    for drv in found["drivers"]:
+        vendor = _vendor_from_name(Path(drv).name)
+        if vendor and vendor not in found["vendors"]:
+            found["vendors"].append(vendor)
+    real = [v for v in found["vendors"] if not v.startswith("lavapipe")]
+    found["usable"] = bool(found["loader"] and real)
+    found["hint"] = None if found["usable"] else hint
+    return found
+
+
+def report_gpu(info: dict) -> None:
+    if info.get("loader"):
+        ui.ok(f"Vulkan loader {ui.c(str(info['loader']), 'grey')}")
+    else:
+        ui.warn("Vulkan loader not found - the engine will run on the CPU only")
+    if info.get("vendors"):
+        ui.ok("GPU driver: " + ", ".join(info["vendors"]))
+    else:
+        ui.warn("No GPU driver with Vulkan support found")
+    if info.get("hint"):
+        ui.hint("For GPU offload: " + info["hint"])
+    ui.hint("GPU offload is tested on NVIDIA only (docs/engine/GPU.md); the CPU path always works.")
+
+
+# --------------------------------------------------------------------------- #
+# Install state (~/.imurun/install-state.json) and the fast start-up check
+# --------------------------------------------------------------------------- #
+STATE_SCHEMA = 1
+
+
+def state_path() -> Path:
+    return data_root() / "install-state.json"
+
+
+def _env_key() -> str:
+    """One entry per interpreter: a checkout .venv and a pip install share ~/.imurun."""
+    return os.path.normcase(os.path.abspath(sys.executable))
+
+
+def read_state() -> dict:
+    import json  # noqa: PLC0415
+
+    try:
+        data = json.loads(state_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) and data.get("schema") == STATE_SCHEMA else {}
+
+
+def env_state() -> dict:
+    return (read_state().get("envs") or {}).get(_env_key()) or {}
+
+
+def write_env_state(entry: dict) -> Path | None:
+    import json  # noqa: PLC0415
+
+    data = read_state() or {}
+    data["schema"] = STATE_SCHEMA
+    data.setdefault("envs", {})[_env_key()] = entry
+    path = state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        ui.warn(f"Could not write {path}: {exc}")
+        return None
+    return path
+
+
+def frontend_index() -> Path:
+    return ROOT / "frontend" / "design-lab" / "index.html"
+
+
+def quick_check() -> list[str]:
+    """Reasons the install step has to run; [] when everything is in place.
+
+    Standard library only, no engine load, no heavy imports: one JSON read,
+    four find_spec lookups and a few stat() calls (a few milliseconds).
+    """
+    reasons: list[str] = []
+    miss = missing_modules()
+    if miss:
+        reasons.append("missing Python packages: " + ", ".join(miss))
+    if not frontend_index().is_file():
+        reasons.append(f"frontend assets missing ({frontend_index()})")
+    st = env_state()
+    if not st:
+        reasons.append("first run in this Python environment")
+        return reasons
+    version = app_version()
+    if st.get("imurun") != version:
+        reasons.append(f"IMURUN changed ({st.get('imurun')} -> {version})")
+    eng = st.get("engine") or {}
+    lib = find_engine_library()
+    if lib is not None:
+        if str(lib) != eng.get("path") or _file_sig(lib) != {k: eng.get(k) for k in ("size", "mtime")}:
+            reasons.append("the engine library is new or changed (checking it)")
+    elif eng.get("source") != "missing":
+        reasons.append("the engine library disappeared")
+    return reasons
+
+
+def _dist_versions(dists: list[str]) -> dict[str, str]:
+    from importlib import metadata  # noqa: PLC0415
+
+    out = {}
+    for d in dists:
+        try:
+            out[d] = metadata.version(d)
+        except metadata.PackageNotFoundError:
+            out[d] = ""
+    return out
+
+
+def install_voice(python: str, verbose: bool = False) -> dict:
+    """Best-effort: server speech (requirements-voice.txt). Never fatal."""
+    if not REQUIREMENTS_VOICE.is_file():
+        return {"ok": False, "detail": "requirements-voice.txt not found"}
+    if sys.version_info[:2] > MAX_TESTED_PY:
+        return {"ok": False, "detail": f"skipped: no voice wheels for Python {sys.version.split()[0]}"}
+    ok = run_pip(python, ["install", "-r", str(REQUIREMENTS_VOICE)],
+                 "Installing voice (speech-to-text + text-to-speech, ~250 MB)", verbose=verbose)
+    if not ok:
+        ui.warn("Voice is optional: IMURUN works without it (/api/voice/* answers 503 with the reason).")
+    return {"ok": ok, "detail": "installed" if ok else "pip failed (see install.log)"}
+
+
+def install_tuning(python: str) -> dict:
+    """Opt-in: the training stack goes into its own venv (python -m services.tuning.setup)."""
+    ui.info("Setting up the tuning venv (torch + transformers, 2-5 GB) ...")
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(ROOT), env.get("PYTHONPATH", "")) if p)
+    try:
+        data_root().mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run([python, "-m", "services.tuning.setup"], cwd=str(data_root()), env=env)
+    except OSError as exc:
+        return {"ok": False, "detail": str(exc)}
+    if proc.returncode != 0:
+        ui.warn("Tuning setup failed; chat is unaffected. Retry with: imurun install --tuning")
+    return {"ok": proc.returncode == 0, "detail": "installed" if proc.returncode == 0
+            else f"setup failed (exit {proc.returncode})"}
+
+
+def run_setup(*, python: str, window: bool, voice: bool, tuning: bool, force: bool,
+              auto: bool, build: bool, verbose: bool) -> int:
+    """Install / repair everything into ``python`` (the running interpreter) and record it.
+
+    Only the core packages are fatal; window, voice, engine, GPU and tuning
+    are reported and recorded but never stop the app from starting.
+    """
+    prev = {} if force else env_state()
+    version_changed = prev.get("imurun") != app_version()
+    total = 6 if tuning else 5
+    ui.step(1, total, "Python packages")
+    if force or missing_modules():
+        try:
+            pip_install(python, window=False, upgrade_pip=False, verbose=verbose)
+        except SystemExit:
+            ui.fail("Step 1 (Python packages) failed: the required packages could not be installed.")
+            return 1
+    still = missing_modules()
+    if still:
+        ui.fail(f"Step 1 (Python packages) failed: still missing {', '.join(still)}")
+        return 1
+    core = _dist_versions(list(REQUIRED_MODULES.values()))
+    ui.ok("Core packages: " + ", ".join(f"{k} {v}" for k, v in core.items()))
+
+    ui.step(2, total, "Native window (optional)")
+    have_window = not missing_modules(None, {WINDOW_MODULE[0]: WINDOW_MODULE[1]})
+    if window and not have_window and (force or version_changed or not prev.get("window_tried")):
+        have_window = run_pip(python, ["install", WINDOW_REQUIREMENT], "Installing pywebview",
+                              verbose=verbose)
+        if not have_window:
+            ui.warn("pywebview is optional - IMURUN opens in your browser instead.")
+    ui.ok("pywebview installed (native window)" if have_window else "pywebview not installed (browser UI)")
+
+    ui.step(3, total, "Voice (optional)")
+    voice_state = prev.get("voice") or {}
+    if not missing_modules(None, {"faster_whisper": "faster-whisper", "piper": "piper-tts", "av": "av"}):
+        voice_state = {"ok": True, "detail": "installed"}
+        ui.ok("Voice packages present")
+    elif not voice:
+        voice_state = {"ok": False, "detail": "skipped (--no-voice, IMURUN_NO_VOICE=1 or CI)"}
+        ui.info("Voice skipped (--no-voice, IMURUN_NO_VOICE=1 or CI); add it later: imurun install --force")
+    elif force or version_changed or not voice_state:
+        voice_state = install_voice(python, verbose=verbose)
+    else:
+        ui.info(f"Voice not installed ({voice_state.get('detail')}); retry: imurun install --force")
+
+    ui.step(4, total, "FISH engine")
+    engine = ensure_engine(auto=auto, allow_build=build, verbose=verbose)
+
+    ui.step(5, total, "GPU runtime")
+    gpu = gpu_report()
+    report_gpu(gpu)
+
+    tuning_state = prev.get("tuning") or {"ok": False,
+                                          "detail": "not installed (opt-in: imurun install --tuning)"}
+    if tuning:
+        ui.step(6, total, "Tuning (opt-in)")
+        tuning_state = install_tuning(python)
+
+    entry = {
+        "imurun": app_version(),
+        "python": sys.version.split()[0],
+        "python_exe": sys.executable,
+        "app_root": str(ROOT),
+        "layout": "installed" if INSTALLED else "checkout",
+        "platform": os_label(),
+        "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "core": core,
+        "window": have_window,
+        "window_tried": bool(window or prev.get("window_tried")),
+        "voice": voice_state,
+        "tuning": tuning_state,
+        "engine": engine,
+        "gpu": gpu,
+    }
+    path = write_env_state(entry)
+    if path:
+        ui.hint(f"Recorded in {path}")
+    return 0
+
+
+def doctor(port: int = 8732) -> int:
+    """`imurun doctor`: a short, read-only report of this machine and install."""
+    ui.banner(f"doctor {ui.sym['dot']} {os_label()}")
+    ui.ok(f"IMURUN {app_version()} ({'installed package' if INSTALLED else 'source checkout'})")
+    ui.hint(f"app files: {ROOT}")
+    py_ok = MIN_PY <= sys.version_info[:2] <= MAX_TESTED_PY
+    (ui.ok if py_ok else ui.warn)(f"Python {sys.version.split()[0]} {ui.c(sys.executable, 'grey')}")
+    miss = missing_modules()
+    (ui.ok if not miss else ui.fail)("core packages " + ("ok" if not miss else "missing: " + ", ".join(miss)))
+    have_ui = frontend_index().is_file()
+    (ui.ok if have_ui else ui.fail)(f"frontend {ui.c(str(frontend_index().parent), 'grey')}")
+    lib = find_engine_library()
+    info = probe_engine(lib)
+    if info.get("ok"):
+        ui.ok(f"engine {ui.c(str(lib), 'grey')} ABI {info.get('abi')} {info.get('fish_version', '')}")
+        if info.get("warning"):
+            ui.warn(info["warning"])
+    elif lib:
+        ui.fail(f"engine {lib}: {info.get('error')}")
+    else:
+        ui.fail("engine not found (" + " / ".join(engine_library_names()) + ")")
+        for line in engine_build_instructions().splitlines():
+            ui.hint(line)
+    report_gpu(gpu_report())
+    root = data_root()
+    ui.ok(f"home dir {ui.c(str(root), 'grey')}")
+    models = root / "models" if INSTALLED else ROOT / "models"
+    count = len(list(models.glob("*.gguf"))) if models.is_dir() else 0
+    ui.ok(f"models dir {ui.c(str(models), 'grey')} ({count} .gguf)")
+    st = env_state()
+    if st:
+        ui.ok(f"install state {ui.c(str(state_path()), 'grey')} ({st.get('imurun')}, {st.get('installed_at')})")
+        ui.hint(f"voice: {(st.get('voice') or {}).get('detail', '?')}; "
+                f"tuning: {(st.get('tuning') or {}).get('detail', '?')}")
+    else:
+        ui.warn("no install state yet (the first `imurun` start creates it)")
+    try:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", port))
+        ui.ok(f"port {port} is free")
+    except OSError:
+        ui.warn(f"port {port} is in use (IMURUN already running? use --port N)")
+    reasons = quick_check()
+    if reasons:
+        ui.info("the next start runs the install step: " + "; ".join(reasons))
+    ui.line()
+    return 0 if not miss and have_ui else 1
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def os_label() -> str:
@@ -894,19 +1453,47 @@ def _check(args: argparse.Namespace, target: Path | None) -> int:
     return 0 if not miss else 1
 
 
+def _auto_policy() -> dict[str, bool]:
+    """What an automatic (start-time) setup may do without asking.
+
+    CI and IMURUN_SKIP_OPTIONAL=1 keep it to the core packages + the checks,
+    so test runs never download 250 MB of voice wheels or compile the engine.
+    """
+    lean = bool(os.environ.get("CI")) or os.environ.get("IMURUN_SKIP_OPTIONAL") == "1"
+    return {
+        "voice": not lean and os.environ.get("IMURUN_NO_VOICE") != "1",
+        "build": not lean and (os.environ.get("IMURUN_AUTO_BUILD") == "1"
+                               or (sys.stdin is not None and sys.stdin.isatty())),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Install IMURUN's Python dependencies.")
+    parser = argparse.ArgumentParser(
+        description="Install everything IMURUN needs on this machine (idempotent).")
     parser.add_argument("--here", action="store_true",
-                        help="install into the current interpreter instead of .venv")
+                        help="install into the current interpreter instead of .venv "
+                             "(always the case for an installed copy)")
     parser.add_argument("--python", default=None, help="base interpreter used to create .venv")
     win = parser.add_mutually_exclusive_group()
     win.add_argument("--window", action="store_true", help="install pywebview (native window)")
     win.add_argument("--no-window", action="store_true", help="do not install pywebview")
     parser.add_argument("--dev", action="store_true", help="also install requirements-dev.txt")
-    parser.add_argument("--voice", action="store_true",
-                        help="also install requirements-voice.txt (faster-whisper, piper-tts)")
+    parser.add_argument("--voice", action="store_true", help=argparse.SUPPRESS)  # default now
+    parser.add_argument("--no-voice", action="store_true", help="skip the voice packages (~250 MB)")
+    parser.add_argument("--tuning", action="store_true",
+                        help="also set up the fine-tuning venv (torch, 2-5 GB; opt-in)")
+    parser.add_argument("--no-build", action="store_true",
+                        help="never compile the FISH engine from source")
+    parser.add_argument("--build-tools", action="store_true",
+                        help="Windows: winget-install MinGW-w64 + CMake + Ninja, then build the engine")
+    parser.add_argument("--force", action="store_true",
+                        help="redo every step even if the state file says it is done")
+    parser.add_argument("--auto", action="store_true",
+                        help="non-interactive run started by `imurun`/start.py (no final box)")
     parser.add_argument("--check", action="store_true", help="only report status; install nothing")
-    parser.add_argument("--verbose", action="store_true", help="show raw pip output")
+    parser.add_argument("--doctor", action="store_true", help="print the `imurun doctor` report")
+    parser.add_argument("--port", type=int, default=8732, help=argparse.SUPPRESS)
+    parser.add_argument("--verbose", action="store_true", help="show raw pip / build output")
     parser.add_argument("--quiet-if-ok", action="store_true",
                         help="exit silently with 0 when everything is already installed")
     args = parser.parse_args(argv)
@@ -914,63 +1501,71 @@ def main(argv: list[str] | None = None) -> int:
     if sys.version_info < MIN_PY:
         ui.fail(f"IMURUN needs Python {MIN_PY[0]}.{MIN_PY[1]}+; this is {sys.version.split()[0]}.")
         return 1
+    if args.doctor:
+        return doctor(args.port)
 
-    if args.here or in_venv():
-        target: Path | None = Path(sys.executable)
-    else:
-        target = venv_python() if venv_healthy() else None
+    # An installed copy has no project .venv: it always installs into the
+    # interpreter pip put it in (a venv, pipx, or the npm launcher's venv).
+    here = args.here or INSTALLED or in_venv()
+    target: Path | None = Path(sys.executable) if here else (venv_python() if venv_healthy() else None)
 
-    if args.quiet_if_ok and target is not None and not missing_modules(target):
+    if args.quiet_if_ok and here and not quick_check():
         return 0
 
-    ui.banner(f"setup {ui.sym['dot']} {os_label()} {ui.sym['dot']} Python {sys.version.split()[0]}")
-
+    if not args.auto:
+        ui.banner(f"setup {ui.sym['dot']} {os_label()} {ui.sym['dot']} Python {sys.version.split()[0]}")
     if args.check:
         return _check(args, target)
 
+    if not here:
+        # Source checkout started with a system Python: create/repair .venv,
+        # then run this installer again from inside it, so every step (and
+        # the state entry) belongs to the interpreter that will run IMURUN.
+        if target is None:
+            target = create_venv(find_base_python(args.python))
+        else:
+            ui.ok(f"Using {ui.c(str(target), 'grey')}")
+        rest = [a for a in (argv if argv is not None else sys.argv[1:]) if a != "--here"]
+        return subprocess.call([str(target), str(Path(__file__).resolve()), "--here", *rest])
+
+    if args.build_tools:
+        if sys.platform == "win32":
+            install_build_tools_windows()
+        else:
+            for name, present, how in build_tools():
+                ui.line(f"      {ui.c(ui.sym['ok'] if present else ui.sym['fail'], 'green' if present else 'red')}"
+                        f" {name}  {'' if present else ui.c(how, 'grey')}")
+
+    policy = _auto_policy() if args.auto else {"voice": True, "build": True}
     window = args.window or (not args.no_window and window_supported_by_default())
-    total = 4
     started = time.monotonic()
-
-    ui.step(1, total, "System check")
-    ui.ok(f"{os_label()}")
-    ui.ok(f"Python {sys.version.split()[0]} {ui.c(sys.executable, 'grey')}")
-    if network_ok():
-        ui.ok("Internet connection to pypi.org")
-    else:
-        ui.warn("Cannot reach pypi.org - package downloads may fail")
-
-    ui.step(2, total, "Python environment")
-    if target is None:
-        target = create_venv(find_base_python(args.python))
-    else:
-        ui.ok(f"Using {ui.c(str(target), 'grey')}")
-
-    ui.step(3, total, "Packages")
-    try:
-        pip_install(target, window=window, dev=args.dev, verbose=args.verbose, voice=args.voice)
-    except SystemExit:
+    if args.dev and REQUIREMENTS_DEV.exists():
+        run_pip(sys.executable, ["install", "-r", str(REQUIREMENTS_DEV)], "Installing dev tools",
+                verbose=args.verbose)
+    rc = run_setup(python=sys.executable, window=window,
+                   voice=policy["voice"] and not args.no_voice, tuning=args.tuning,
+                   force=args.force, auto=args.auto,
+                   build=(policy["build"] or args.build_tools) and not args.no_build,
+                   verbose=args.verbose)
+    if rc != 0:
         ui.line()
-        ui.fail("Setup did not finish. Fix the problem above and run the installer again.")
-        return 1
-    miss = missing_modules(target)
-    if miss:
-        ui.fail(f"Still missing after install: {', '.join(miss)}")
-        return 1
-
-    ui.step(4, total, "FISH engine")
-    report_engine()
+        ui.fail("Setup did not finish. Fix the problem above and run it again "
+                "(imurun install, or python install.py).")
+        return rc
+    if args.auto:
+        ui.ok(f"Setup done ({time.monotonic() - started:.0f}s)")
+        ui.line()
+        return 0
 
     ui.line()
-    if sys.platform == "win32":
-        run = "run.bat"
-        alt = r".venv\Scripts\python start.py"
+    if INSTALLED or not in_venv():
+        run, alt = "imurun", "python -m imurun"
+    elif sys.platform == "win32":
+        run, alt = "run.bat", r".venv\Scripts\python start.py"
     elif sys.platform == "darwin":
-        run = "./run.command   (or double-click it in Finder)"
-        alt = ".venv/bin/python start.py"
+        run, alt = "./run.command   (or double-click it in Finder)", ".venv/bin/python start.py"
     else:
-        run = "./run.sh"
-        alt = ".venv/bin/python start.py"
+        run, alt = "./run.sh", ".venv/bin/python start.py"
     ui.box(
         f"{ui.sym['ok']} IMURUN is ready  ({time.monotonic() - started:.0f}s)",
         [

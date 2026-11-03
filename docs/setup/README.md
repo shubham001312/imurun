@@ -13,11 +13,44 @@ C++ shared library (`fish.dll` / `libfish.so` / `libfish.dylib`).
 
 ## Install as a package (pip or npm)
 
+These are the commands on https://imutechz.in/imu (checked 2026-11-03). They are the
+only ones a user needs; each ends with the single `imurun` command on PATH.
+
+| OS | pip | npm | Source checkout |
+|---|---|---|---|
+| Windows | `pip install imurun`, then `imurun` | `npx imurun` or `npm i -g imurun && imurun` | `run.bat` |
+| macOS | `pip3 install imurun`, then `imurun` | same | `./run.command` |
+| Linux | `pipx install imurun` (or `pip install imurun` inside a venv), then `imurun` | same | `./run.sh` |
+
 ```
 pip install imurun                 # the `imurun` command
-pip install "imurun[window]"       # + native window (pywebview)
+pip install "imurun[window]"       # + native window (pywebview); the first run adds it on Win/macOS anyway
+pipx install imurun                # same, in its own venv (recommended on Linux / PEP 668 distros)
 npx imurun                         # npm launcher (or: npm i -g imurun && imurun)
+pip install -U imurun              # upgrade (also from the old 0.1.x CLI, see below)
 ```
+
+> **Status 2026-11-03: these commands do not install this app yet.** PyPI and npm
+> still serve `imurun` **0.1.11** (Oct 2026), the earlier Bun/TypeScript CLI that
+> downloads `imurun-windows-x64.exe` etc. from the v0.1.11 GitHub release. 0.3.0 (this
+> app) has never been released. So `pip install imurun` gives 0.1.11, and the 0.3.0
+> npm launcher fails with `No matching distribution found for imurun==0.3.0` (it now
+> says that the version is not on PyPI yet). Everything below was verified by
+> building the wheel and the npm tarball from this repository and installing them
+> into fresh environments outside the checkout. It becomes true for PyPI/npm users
+> once the `v0.3.0` tag is pushed and the release workflow publishes
+> (`docs/setup/RELEASE.md`). Until then use `pip install <path>/imurun-0.3.0-*.whl`,
+> `IMURUN_WHEEL=<wheel> npx <path>/imurun-0.3.0.tgz`, or the source checkout.
+
+| Command | What it does |
+|---|---|
+| `imurun` | start. The first run installs whatever is missing (next section), then opens the window or the browser |
+| `imurun --no-open --port 8800` | server only, on another port (every `start.py` flag works) |
+| `imurun --version` | prints `imurun 0.3.0` |
+| `imurun doctor [--port N]` | Python, core packages, frontend, engine (loads it and prints the ABI), Vulkan loader + GPU driver, home dir, models dir, install state, port free |
+| `imurun install [--force] [--no-voice] [--tuning] [--no-build]` | runs the installer into this interpreter (= `python install.py --here ...`) |
+| `imurun --get-engine` | downloads the prebuilt engine for this OS from the matching GitHub release |
+| `python -m imurun ...` | the same, when the `Scripts`/`bin` folder is not on PATH |
 
 `imurun` takes the same flags as `start.py` (table below) plus `--version` and
 `--get-engine`. It works from any directory.
@@ -71,6 +104,79 @@ shows the venv and the Python it would use.
 
 Building the packages yourself and cutting a release: `docs/setup/RELEASE.md`.
 
+## What gets installed, and when (automatic setup)
+
+`install.py` installs everything IMURUN needs into **the interpreter that runs it**:
+the project `.venv` in a checkout, or the venv / pipx venv / npm venv of an installed
+copy. It is idempotent: when you run it again, finished steps are skipped.
+
+| Step | What | If it fails |
+|---|---|---|
+| 1. Core packages | `requirements.txt` (aiohttp, httpx, huggingface_hub, pyyaml) | **fatal**: setup stops and names step 1 |
+| 2. Native window | `pywebview` on Windows/macOS (Linux: opt-in with `--window`, needs GTK/Qt) | browser UI instead |
+| 3. Voice | `requirements-voice.txt` (faster-whisper, av, piper-tts, numpy; ~250 MB) | `/api/voice/*` answers 503 with the reason |
+| 4. FISH engine | found (bundled `imurun/bin/`, `bin/`, `model/fish/build/`, `~/.imurun/bin/`); else downloaded from release `v<version>` (SHA256-checked); else, in a checkout with cmake + ninja + g++/clang++, **built** from `model/fish` into `bin/`; else build instructions. The library is then loaded with ctypes and its ABI is read | the app starts in "provisioning" state and says what to do |
+| 5. GPU runtime check | Vulkan loader (`System32\vulkan-1.dll` / `libvulkan.so.1` / `libvulkan.1.dylib` or MoltenVK) and a vendor driver (Windows: Khronos registry ICDs + NVIDIA/AMD/Intel driver DLLs; Linux: `/usr/share/vulkan/icd.d/*.json`, `/proc/driver/nvidia`; macOS: MoltenVK in the Homebrew/SDK paths). Report only: it never loads a driver | CPU only; it prints what to install |
+| 6. Tuning (opt-in, `--tuning`) | `python -m services.tuning.setup`: torch + transformers in a **separate** venv `~/.imurun/tuning/venv` (2-5 GB) | chat is unaffected |
+
+Tuning is never automatic, because it is large and the tuning channel requires the
+user's consent. On Windows only, `python install.py --build-tools` runs
+`winget install -e --id BrechtSanders.WinLibs.POSIX.UCRT` / `Kitware.CMake` /
+`Ninja-build.Ninja` and then builds the engine. The WinGet `Links` folder and the
+WinLibs `mingw64\bin` folder are added to PATH for the build, so no new terminal is
+needed.
+
+**State file.** The result goes to `~/.imurun/install-state.json` (or
+`$IMURUN_DATA_ROOT/install-state.json`), with one entry per interpreter path: IMURUN
+version, Python version, core package versions, the window, voice and tuning results,
+the engine (path, size, mtime, ABI, fish version, source: `found`, `downloaded`,
+`built` or `missing`) and the GPU report.
+
+**Every start** (`imurun`, `start.py`, `run.*`) first runs `install.quick_check()`. It
+checks that the core modules are importable (`find_spec`), that
+`frontend/design-lab/index.html` exists, that this interpreter has a state entry for
+the current version, and that the engine file is unchanged (path + size + mtime). It
+took 20 ms in a fresh venv on Windows. It never loads the engine, never imports
+torch/whisper, and changes no thread or GPU setting. If any check fails (first run,
+upgrade, deleted package, new engine build), start runs `install.py --here --auto`
+with the same interpreter, shows the progress on the console, and then continues.
+Only a step-1 failure stops it. A missing engine that was already reported does not
+re-run setup on every start.
+
+**Automatic runs are leaner than manual ones.** With `--auto`, the engine is built
+only after a yes in a terminal (or with `IMURUN_AUTO_BUILD=1`). With `CI` set or
+`IMURUN_SKIP_OPTIONAL=1`, voice and the engine build are skipped. Other switches:
+`IMURUN_NO_VOICE=1`, and `IMURUN_SKIP_SETUP=1` / `--skip-setup` (no automatic step
+at all).
+
+**Force a reinstall:** `imurun install --force` (installed copy) or
+`python install.py --force` (checkout). This redoes every step and rewrites the state
+entry. `imurun install --tuning` adds the tuning venv later.
+
+Tested on Windows 11 x64 (Python 3.12, NVIDIA RTX 3050): a fresh venv from the wheel
+(with and without a bundled engine), pipx, the npm launcher, and an unpacked sdist
+used as a checkout. The macOS and Linux branches (Vulkan paths, `python3.x` lookup,
+`libfish.so`/`.dylib`) were written from the docs and the code. Only the CI
+`install-smoke` jobs exercise them; nobody has run them by hand.
+
+### Installed layout
+
+```
+<venv>/Scripts/imurun(.exe)  (bin/imurun)   console script -> imurun.cli:main
+<venv>/Lib/site-packages/imurun/            never written after install
+    __init__.py cli.py __main__.py          launcher
+    start.py install.py window.py requirements*.txt
+    services/**  model/*.py  frontend/design-lab/**  docs/connectors/**
+    bin/fish.dll | libfish.so | libfish.dylib    (platform wheels only)
+~/.imurun/                                  (or IMURUN_DATA_ROOT)
+    install-state.json  settings/  secrets/  sessions/  runtime/api.json
+    models/             model downloads for an installed copy
+    bin/                engine from --get-engine
+    logs/install.log    pip and build output
+    venv/               only for the npm launcher
+    voice/  tuning/     voice models; tuning venv and runs
+```
+
 ## Quick start
 
 | OS      | First run and every later run           |
@@ -82,8 +188,9 @@ Building the packages yourself and cutting a release: `docs/setup/RELEASE.md`.
 On the first run the launcher:
 1. looks for Python 3.11 to 3.14. If there is none, it installs Python 3.12
    (Windows: `winget`; macOS: Homebrew; Linux: apt/dnf/pacman after asking you);
-2. runs `install.py`, which creates `.venv`, installs the packages (and pywebview on
-   Windows/macOS), and checks for the FISH engine;
+2. runs `install.py`, which creates `.venv` and installs everything listed in
+   "What gets installed" above (packages, pywebview on Windows/macOS, voice, the
+   engine: found, downloaded or built, and the GPU check);
 3. starts `start.py` from `.venv`.
 
 Later runs go straight to step 3. Launcher arguments are passed to `start.py`, for
@@ -107,8 +214,9 @@ python -m pip install -r requirements-dev.txt   # + test tools
 ```
 
 `install.py` options: `--here` (use the current interpreter, no venv), `--python PATH`
-(base interpreter for the venv), `--window` / `--no-window`, `--dev`, `--verbose`
-(raw pip output instead of the animated progress). The pip log is written to
+(base interpreter for the venv), `--window` / `--no-window`, `--no-voice`, `--tuning`,
+`--no-build`, `--build-tools`, `--force`, `--dev`, `--check`, `--doctor`, `--verbose`
+(raw pip/build output instead of the animated progress). The pip and build log is
 `~/.imurun/logs/install.log`.
 
 ## start.py options
@@ -122,6 +230,7 @@ python -m pip install -r requirements-dev.txt   # + test tools
 | `--browser` | open the default browser |
 | `--no-open` | server only; open `http://127.0.0.1:<port>/` yourself |
 | `--bootstrap` / `--install` | install the dependencies first (see above; `--bootstrap` is source-checkout only) |
+| `--skip-setup` | skip the automatic install step (also `IMURUN_SKIP_SETUP=1`) |
 | `--version` | print `imurun <version>` and exit |
 | `--get-engine` | download the prebuilt engine for this OS into `~/.imurun/bin` and exit |
 
@@ -156,6 +265,38 @@ ninja -C build
 
 ## Troubleshooting
 
+### `pip install imurun` gives a different program (0.1.x: `imurun models`, `imurun run`)
+
+That is the old 0.1.x CLI from PyPI/npm (see the status note above). Check with
+`pip show imurun`: it shows `Version: 0.1.11` and the summary "local-first AI coding
+agent". Once 0.3.0 is published, `pip install -U imurun` (or `npm i -g imurun@latest`)
+replaces it. The npm launcher always installs exactly its own version, so a stale 0.1.x
+in `~/.imurun/venv` is replaced automatically.
+
+### `'imurun' is not recognized` / `command not found: imurun`
+
+pip put the script in a folder that is not on PATH. pip prints a warning that names
+it: `%APPDATA%\Python\Python312\Scripts` for `--user` installs on Windows,
+`~/.local/bin` on Linux/macOS. Use `python -m imurun`, add that folder to PATH, or
+install with `pipx install imurun` (`pipx ensurepath` fixes PATH).
+
+### `externally-managed-environment` (Debian/Ubuntu/Fedora, Homebrew Python)
+
+The system Python refuses `pip install`. Use `pipx install imurun`, or
+`python3 -m venv ~/.venvs/imurun && ~/.venvs/imurun/bin/pip install imurun`, or
+`npx imurun` (it creates its own venv).
+
+### Works on one machine, not on another
+
+Run `imurun doctor` on the failing machine. Common causes:
+- No engine for that OS/CPU. Only the Windows x64, Linux x64 (glibc 2.28+) and macOS
+  arm64 wheels carry one. Other platforms get the pure wheel and need
+  `imurun --get-engine` or a source build.
+- Python 3.15+ (no aiohttp wheels).
+- A `.venv` copied from another PC (see below).
+- A `git clone`: it has no `bin/fish.dll`. `python install.py` downloads or builds it.
+- Port 8732 already in use.
+
 ### `ModuleNotFoundError: No module named 'aiohttp'`
 
 ```
@@ -173,8 +314,9 @@ Python that does not exist here.
 
 **Fix:** run `python install.py`, or `run.bat` / `./run.sh`, or
 `python -m pip install -r requirements.txt`. `start.py` now detects this itself.
-It switches to a healthy `.venv` automatically, or prints these instructions (and
-offers to install when run in a terminal) instead of a traceback.
+It switches to a healthy `.venv` automatically. Otherwise it runs `install.py`: into
+the active venv, or, with a system Python in a checkout, into a new `.venv`. It prints
+these instructions only if that fails or `IMURUN_SKIP_SETUP=1` is set.
 
 ### Stale `.venv` copied from another computer
 

@@ -115,3 +115,38 @@ passes it on through `FISH_LIBRARY`, so this works today. Searching
 `install.find_engine_library`) would make the bindings work the same way when
 something other than `start.py` uses them.
 
+
+## 12. `tests/test_launcher.py`: opt the spawned server out of optional setup (owner: tests/) — 2026-11-03
+
+`start.py` now runs `install.py --here --auto` on the first start for an interpreter
+with no entry in `<IMURUN_DATA_ROOT>/install-state.json`. In CI this is lean
+(`CI` set: core check, engine probe and GPU report only). A local `pytest` run with a
+fresh `.pytest-imurun-home`, however, would install the voice packages into the dev
+venv if they are missing. Request: add `"IMURUN_SKIP_OPTIONAL": "1"` (or
+`"IMURUN_SKIP_SETUP": "1"` to skip the step entirely) to the env in `_spawn`, plus one
+test that the first start writes `install-state.json`.
+
+## 13. imutechz.in/imu (outside the repo, owner: website) — 2026-11-03
+
+The site's commands (`pip install imurun`, `pip install "imurun[window]"`,
+`npx imurun`, `npm i -g imurun && imurun`, `run.bat` / `./run.command` / `./run.sh`,
+`python install.py [--check]`, `imurun --get-engine`) match the repo. Two problems:
+(a) it says prebuilt engine wheels exist for Windows x64, Linux x64 and macOS arm64,
+but PyPI/npm still serve 0.1.11 (the old CLI) and GitHub release v0.3.0 does not
+exist. This holds until tag `v0.3.0` is pushed. (b) It does not mention the new
+`imurun doctor`, `imurun install --force`, the automatic first-run setup, or
+`~/.imurun/install-state.json` (docs/setup/README.md, "What gets installed").
+
+## 14. `services/server/api.py`: a client that hangs up mid-reply prints a traceback (owner: services/server) — 2026-11-03
+
+Reported by the owner (many of these in the console):
+`ConnectionAbortedError: [WinError 10053]` from `self.wfile.write(body)` in
+`_reply` (line ~430), surfaced through `socketserver.process_request_thread`
+-> `handle_error`. It is the browser (or the UI's poller) closing the
+connection before the response was written: harmless, but the default
+`BaseServer.handle_error` prints the full stack for each one. Suggested fix:
+wrap the body writes in `_reply` / `_html` / the SSE writer in
+`try: ... except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError): return`,
+and override `handle_error` on the server class to ignore those three types
+(log anything else through the logger, not stderr). Filed by the engine
+agent, which may not edit `services/`.

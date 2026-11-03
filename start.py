@@ -9,6 +9,12 @@ Single entry point to start the server (Windows / macOS / Linux).
     python start.py --bootstrap     # create/repair .venv, install deps, then start
     python start.py --version       # print the version
     python start.py --get-engine    # download the prebuilt FISH engine for this OS
+    python start.py --skip-setup    # do not run the automatic install step
+
+Every start runs install.quick_check() (a few ms: state file, find_spec,
+stat; no engine load). When something is missing (first run, new version,
+missing package, changed engine) it runs `install.py --here --auto` with the
+same interpreter, then continues; only a core-package failure stops it.
 
 `pip install imurun` installs the same thing as the `imurun` command
 (imurun/cli.py), with this file bundled inside the package. In that installed
@@ -85,49 +91,71 @@ def _reexec(python):
             continue
 
 
-def _ask(question):
-    if not sys.stdin or not sys.stdin.isatty():
-        return False
-    return install.ui.ask(question, default=True)
-
-
 def _want_window(args):
     """Install pywebview during setup unless the user clearly does not want it."""
     return args.window or (not args.browser and not args.no_open and install.window_supported_by_default())
 
 
-def _bootstrap_venv(window):
-    """Create or repair .venv, install requirements into it, re-exec from it."""
-    py = install.venv_python()
-    if not install.venv_healthy():
-        py = install.create_venv(install.find_base_python())
-    install.pip_install(py, window=window)
-    _reexec(py)
+def _setup_disabled():
+    return os.environ.get("IMURUN_SKIP_SETUP", "0") == "1"
+
+
+def run_install_step(args, reasons, *, here=True):
+    """Run install.py (same interpreter, non-interactive) with progress on the console.
+
+    Returns True when it finished; the caller re-checks what it needs. Only a
+    failure to install the core packages stops IMURUN (install.py exits 1 and
+    names the failing step); optional parts are reported and recorded.
+    """
+    ui = install.ui
+    ui.info("Setting up IMURUN: " + "; ".join(reasons))
+    cmd = [sys.executable, str(Path(install.__file__).resolve()), "--auto",
+           "--window" if _want_window(args) else "--no-window"]
+    if here:
+        cmd.append("--here")
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    try:
+        rc = subprocess.call(cmd, env=env)
+    except OSError as exc:
+        ui.fail(f"Could not run the installer ({exc}).")
+        return False
+    importlib.invalidate_caches()
+    return rc == 0
+
+
+def _bootstrap_venv(args):
+    """Create or repair .venv, install everything into it, re-exec from it."""
+    if not run_install_step(args, ["creating the project .venv"], here=False):
+        install.ui.fail("Setup failed; see the step above. Retry with:  python install.py")
+        sys.exit(2)
+    _reexec(install.venv_python())
 
 
 def ensure_dependencies(args):
-    """Return normally only when every required package can be imported."""
+    """Return normally only when every required package can be imported.
+
+    Missing packages are installed automatically (install.py, non-interactive)
+    unless IMURUN_SKIP_SETUP=1.
+    """
     missing = install.missing_modules()
     if install.INSTALLED:
-        # pip installed us: the dependencies come from pip, and there is no
-        # project .venv to create or switch to (it would land in site-packages).
+        # pip installed us: there is no project .venv to create or switch to
+        # (it would land in site-packages); install into this interpreter.
         if args.bootstrap:
             install.ui.warn("--bootstrap only applies to a source checkout; ignoring it.")
         if not missing:
             return
-        _print_missing(missing)
-        if args.install:
-            pkgs = [install.REQUIRED_MODULES.get(m, m) for m in missing]
-            install.run_pip(sys.executable, ["install", *pkgs], "Installing missing packages")
-            importlib.invalidate_caches()
+        if not _setup_disabled():
+            run_install_step(args, ["missing Python packages: " + ", ".join(missing)])
             if not install.missing_modules():
                 return
+        _print_missing(install.missing_modules())
         sys.exit(2)
     if args.bootstrap and not install.in_venv() and os.environ.get(REEXEC_ENV) != "1":
         # Explicit request: always run from the project venv.
         if install.venv_healthy() and not install.missing_modules(install.venv_python()):
             _reexec(install.venv_python())
-        _bootstrap_venv(window=_want_window(args))
+        _bootstrap_venv(args)
     if not missing:
         return
 
@@ -139,29 +167,43 @@ def ensure_dependencies(args):
         elif install.VENV.exists() and not install.missing_modules(install.venv_python()):
             _reexec(install.venv_python())
 
-    _print_missing(missing)
+    if _setup_disabled():
+        _print_missing(missing)
+        sys.exit(2)
 
-    # 2. Explicit flag: install into the running interpreter and continue.
-    if args.install or args.bootstrap:
-        install.pip_install(sys.executable, window=args.window, upgrade_pip=False)
-        importlib.invalidate_caches()
+    # 2. Inside a venv (the project .venv, or one the user made), or --install:
+    #    install into the running interpreter and continue.
+    if install.in_venv() or sys.prefix != sys.base_prefix or args.install:
+        run_install_step(args, ["missing Python packages: " + ", ".join(missing)])
         still = install.missing_modules()
         if still:
-            install.ui.fail(f"Still missing after install: {', '.join(still)}")
+            _print_missing(still)
             sys.exit(2)
         return
 
-    # 3. Interactive first run: offer to set everything up.
+    # 3. A system Python in a checkout: create .venv, install, run from it.
     if os.environ.get(REEXEC_ENV) != "1":
-        if install.in_venv():
-            if _ask("Install the requirements into this virtual environment now?"):
-                install.pip_install(sys.executable, window=_want_window(args))
-                importlib.invalidate_caches()
-                if not install.missing_modules():
-                    return
-        elif _ask("Create .venv and install the requirements now?"):
-            _bootstrap_venv(window=_want_window(args))
+        _bootstrap_venv(args)
+    _print_missing(missing)
     sys.exit(2)
+
+
+def ensure_installed(args):
+    """Fast check on every start; run the install step only when something is missing.
+
+    install.quick_check costs a few ms when all is in place (state file +
+    find_spec + stat; no engine load, no heavy imports).
+    """
+    if _setup_disabled() or args.skip_setup:
+        return
+    reasons = install.quick_check()
+    if not reasons:
+        return
+    if not run_install_step(args, reasons):
+        if install.missing_modules():
+            install.ui.fail("Setup failed at step 1 (Python packages); IMURUN cannot start.")
+            sys.exit(2)
+        install.ui.warn("Setup reported a problem (above); starting anyway.")
 
 
 def _import_server():
@@ -300,7 +342,10 @@ def wait_forever():
 # Main
 # --------------------------------------------------------------------------- #
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="IMURUN - Local AI Chat with FISH Engine")
+    parser = argparse.ArgumentParser(
+        description="IMURUN - Local AI Chat with FISH Engine",
+        epilog="commands:  imurun doctor   (check this machine)    "
+               "imurun install [--force] [--no-voice] [--tuning]   (re-run setup)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"Server port (default: {DEFAULT_PORT})")
     parser.add_argument("--model", type=str, help="Model path (overrides config)")
@@ -315,6 +360,8 @@ def parse_args(argv=None):
                        help="create/repair .venv, install requirements and run from it")
     setup.add_argument("--install", action="store_true",
                        help="pip install missing requirements into the current Python")
+    parser.add_argument("--skip-setup", action="store_true",
+                        help="do not run the automatic install step (also: IMURUN_SKIP_SETUP=1)")
     parser.add_argument("--get-engine", action="store_true",
                         help="download the prebuilt FISH engine for this OS into ~/.imurun/bin and exit")
     parser.add_argument("--version", action="version", version=f"imurun {install.app_version()}")
@@ -357,6 +404,7 @@ def main(argv=None):
                  f"this is {sys.version.split()[0]}.")
 
     ensure_dependencies(args)
+    ensure_installed(args)
 
     # Set model path via env if provided
     if args.model:
