@@ -162,6 +162,7 @@ class Scheduler:
         clock: Callable[[], float] = time.time,
         tick_seconds: float = 60.0,
         hardware: Callable[[], feasibility.Hardware] | None = None,
+        resources=None,
     ) -> None:
         self.paths = paths.ensure()
         self.settings = settings
@@ -177,6 +178,9 @@ class Scheduler:
         self.clock = clock
         self.tick_seconds = tick_seconds
         self.hardware = hardware or (lambda: feasibility.probe_hardware(self.paths.root))
+        # services/resources governor: CPU threads for the trainer and the disk
+        # headroom (None = the process default governor).
+        self.resources = resources
         self.manifest = data_mod.Manifest(paths.manifest)
         self.registry = registry_mod.Registry(paths.registry)
         self._lock = threading.RLock()
@@ -416,6 +420,47 @@ class Scheduler:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(current), encoding="utf-8")
 
+    def _governor(self):
+        if self.resources is not None:
+            return self.resources
+        try:
+            from ..resources import get_governor
+
+            return get_governor()
+        except Exception:  # noqa: BLE001 - tuning works without a governor
+            return None
+
+    def _train_threads(self) -> int:
+        """The trainer's CPU threads: the leftover of the shared budget
+        (docs/resources/README.md). 0 = the trainer's own default."""
+        gov = self._governor()
+        if gov is None:
+            return 0
+        try:
+            return int(gov.tuning_threads())
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _release_threads(self) -> None:
+        gov = self._governor()
+        if gov is not None:
+            try:
+                gov.release_tuning()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _disk_guard(self, path: Path, need_bytes: int, what: str) -> None:
+        """Refuse a step that would eat into the disk headroom."""
+        gov = self._governor()
+        if gov is None:
+            return
+        try:
+            check = gov.check_disk(path, need_bytes, what)
+        except Exception:  # noqa: BLE001
+            return
+        if not check.ok:
+            raise _Failed(check.message)
+
     def _check_cancel(self, job: Job) -> None:
         if job.cancel_requested:
             raise _Cancelled()
@@ -465,6 +510,8 @@ class Scheduler:
                 if not job.confirm_download:
                     raise _Failed(f"the original weights ({plan.download_gb:.1f} GB from {base.repo}) are "
                                   "not downloaded; start a job by hand once and confirm the download")
+                self._disk_guard(base_dir, int(plan.download_gb * (1024 ** 3)),
+                                 f"downloading the original weights of {base.repo}")
                 self._set(job, phase=25, message=f"downloading {base.repo} ({plan.download_gb:.1f} GB)")
 
                 def dl_progress(message, pct, eta):
@@ -488,6 +535,7 @@ class Scheduler:
                 "learning_rate": float(job.overrides.get("learning_rate") or 2e-4),
                 "lora": {"r": 16, "alpha": 32, "dropout": 0.05, "targets": list(base.targets)},
                 "init_adapter": self.registry.latest_adapter(job.parent),
+                "cpu_threads": self._train_threads(),
                 "deadline": self.clock() + max_hours * 3600,
                 "resume": True,
             }
@@ -528,10 +576,17 @@ class Scheduler:
                     busy = bool(self.is_busy())
                 except Exception:  # noqa: BLE001
                     busy = False
-                self._control(job, pause=busy)
+                if busy:
+                    self._control(job, pause=True)
+                else:
+                    threads = self._train_threads()
+                    self._control(job, pause=False, **({"threads": threads} if threads else {}))
                 return ""
 
-            result = self.backend.train(config, run_dir, on_event, tick)
+            try:
+                result = self.backend.train(config, run_dir, on_event, tick)
+            finally:
+                self._release_threads()
             if result.get("status") == "cancelled" or job.cancel_requested:
                 raise _Cancelled()
             job.result = result
@@ -550,6 +605,9 @@ class Scheduler:
             # ---------------- exporting
             self._check_cancel(job)
             quant = str(job.overrides.get("quant") or cfg["quant"]).upper()
+            # Merged copy + f16 GGUF + the quantised file: about 2.2x the
+            # original weights (the same estimate as the feasibility gate).
+            self._disk_guard(run_dir, int(_tree_bytes(base_dir) * 2.2), f"exporting the tuned model ({quant})")
             self._set(job, "exporting", phase=0, message=f"exporting GGUF ({quant})")
             parent_info = (self.catalogue or _catalogue()).get(job.parent)
             parent_filename = getattr(parent_info, "filename", f"{job.parent}.gguf")
@@ -662,6 +720,20 @@ class Scheduler:
 
 class _Cancelled(Exception):
     pass
+
+
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    try:
+        for item in Path(path).rglob("*"):
+            try:
+                if item.is_file():
+                    total += item.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return total
+    return total
 
 
 class _Failed(Exception):

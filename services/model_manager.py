@@ -621,6 +621,29 @@ class ModelManager:
             )
         return sources
 
+    def _disk_refusal(self, model_info: ModelInfo, part_path: Path) -> str:
+        """A user-facing refusal when the download would eat into the disk
+        headroom, else "". Never raises (an unmeasured disk is not a refusal)."""
+        try:
+            from .resources import get_governor
+
+            partial = part_path.stat().st_size if part_path.exists() else 0
+            need = max(0, int(model_info.size_bytes or 0) - partial)
+            self.models_dir.mkdir(parents=True, exist_ok=True)
+            check = get_governor().check_disk(self.models_dir, need, f"downloading {model_info.name}")
+            return "" if check.ok else check.message
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def disk_status(self) -> dict:
+        """Free space where models are stored, with the headroom IMURUN keeps."""
+        try:
+            from .resources import get_governor
+
+            return get_governor().check_disk(self.models_dir, 0, "nothing").view()
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": True, "message": f"disk not measured ({exc})"}
+
     async def download_model(
         self,
         model_id: str,
@@ -677,6 +700,21 @@ class ModelManager:
                 speed_bps=0,
                 eta_seconds=None,
                 error=f"No download source is configured for {model_info.name}.",
+            )
+            return
+
+        # Disk headroom (docs/resources/README.md): the download must leave
+        # max(10 GB, 10 % of the drive) free for the user's own files.
+        refusal = self._disk_refusal(model_info, part_path)
+        if refusal:
+            yield DownloadProgress(
+                model_id=model_id,
+                status="error",
+                downloaded_bytes=part_path.stat().st_size if part_path.exists() else 0,
+                total_bytes=model_info.size_bytes,
+                speed_bps=0,
+                eta_seconds=None,
+                error=refusal,
             )
             return
 

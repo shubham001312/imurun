@@ -60,7 +60,16 @@ class TuningService:
             selected_model=self.selected_model,
             renderer_for=self.renderer_for,
             tick_seconds=tick_seconds,
+            resources=getattr(server, "_governor", None),
         )
+        governor = getattr(server, "_governor", None)
+        if governor is not None:
+            # The trainer's CPU is IMURUN's own load, not the user's.
+            def trainer_pids(backend=self.scheduler.backend):
+                proc = getattr(backend, "proc", None)
+                return [proc.pid] if proc is not None and proc.poll() is None else []
+
+            governor.add_pids(trainer_pids)
         try:
             registry_mod.register_all(self.scheduler.registry)
         except Exception:  # noqa: BLE001 - a broken registry must not stop the server

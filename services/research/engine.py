@@ -242,7 +242,15 @@ class ResearchEngine:
         fetch_end = end - 0.5
         fetch_timeout = min(config.fetch_timeout(), fetch_end - time.monotonic())
         if targets and fetch_timeout >= 1.0:
-            page_futures = {pool.submit(fetch_page, fetcher, hit.url, fetch_timeout): hit for hit in targets}
+            # Pages are cleaned in this process (CPU work): at most
+            # config.fetch_concurrency() at once, from the resource budget.
+            gate = threading.BoundedSemaphore(config.fetch_concurrency())
+
+            def bounded_fetch(url: str) -> Page:
+                with gate:
+                    return fetch_page(fetcher, url, fetch_timeout)
+
+            page_futures = {pool.submit(bounded_fetch, hit.url): hit for hit in targets}
             pending = set(page_futures)
             while pending:
                 remaining = fetch_end - time.monotonic()

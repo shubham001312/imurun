@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import threading
-import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -35,6 +34,9 @@ class MachineProfile:
     disk_free: int
     gpu: GpuInfo
     errors: tuple[str, ...] = ()
+    # Added with services/resources (2026-11-03); defaults keep old callers working.
+    logical_cores: int = 0
+    disk_total: int = 0
 
 
 def _run(command: list[str], timeout: float) -> subprocess.CompletedProcess:
@@ -100,37 +102,17 @@ def _memory() -> tuple[int, int]:
 
 
 def _physical_cores() -> int:
+    """Physical cores. Uses services.resources.counters (kernel32 topology on
+    Windows, /proc/cpuinfo on Linux, sysctl on macOS). The PowerShell CIM
+    query used before took more than the whole 3 s deadline on a loaded
+    Windows laptop, so the profile reported 1 core and skipped disk and GPU."""
     global _PHYSICAL_CORES
     if _PHYSICAL_CORES is not None:
         return _PHYSICAL_CORES
-    value = 0
     try:
-        if sys.platform == "win32":
-            out = _run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum",
-                ],
-                3.0,
-            )
-            value = int(out.stdout.strip())
-        elif sys.platform == "darwin":
-            value = int(_run(["sysctl", "-n", "hw.physicalcpu"], 2.0).stdout.strip())
-        else:
-            pairs: set[tuple[str, str]] = set()
-            physical = core = None
-            with open("/proc/cpuinfo", "r", encoding="ascii") as fh:
-                for line in fh:
-                    if line.startswith("physical id"):
-                        physical = line.split(":")[1].strip()
-                    elif line.startswith("core id"):
-                        core = line.split(":")[1].strip()
-                    elif not line.strip() and physical is not None and core is not None:
-                        pairs.add((physical, core))
-                        physical = core = None
-            value = len(pairs)
+        from ..resources.counters import cores
+
+        value = int(cores()[0])
     except Exception:  # noqa: BLE001 - fall back to logical cores
         value = 0
     _PHYSICAL_CORES = value if value > 0 else (os.cpu_count() or 1)
@@ -231,10 +213,11 @@ def probe(
     """Probe the machine. Injectable parts exist so tests can prove the
     failure and timeout paths without breaking the real one."""
     errors: list[str] = []
-    stop = time.monotonic() + max(0.0, deadline)
 
+    # Each part gets its own deadline: one slow part (a GPU query through
+    # PowerShell can take seconds) must not starve the parts after it.
     def remaining() -> float:
-        return max(0.0, stop - time.monotonic())
+        return max(0.0, deadline)
 
     total = available = 0
     try:
@@ -249,10 +232,11 @@ def probe(
         errors.append(f"cpu: {exc}")
 
     target = model_dir or path or os.path.expanduser("~/.imurun")
-    free = 0
+    free = disk_total = 0
     try:
         usage = _within(remaining(), lambda: (disk or shutil.disk_usage)(_existing(target)))  # type: ignore[misc]
         free = int(usage.free)  # type: ignore[attr-defined]
+        disk_total = int(getattr(usage, "total", 0) or 0)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"disk: {exc}")
 
@@ -269,4 +253,6 @@ def probe(
         disk_free=free,
         gpu=card,  # type: ignore[arg-type]
         errors=tuple(errors),
+        logical_cores=os.cpu_count() or cores,
+        disk_total=disk_total,
     )

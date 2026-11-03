@@ -18,12 +18,22 @@ update when it lands.
    queue with a byte budget instead of relying on the OS page cache;
    `MADV_DONTNEED` after use on Linux. Then expert-level prefetch for MoE after
    routing.
-6. **GPU**: Vulkan compute (works on NVIDIA/AMD/Intel/Android) for the matmuls,
-   keeping the same int8 activation format; CUDA later. This is the real
-   "VRAM arena" from the original design.
+6. **GPU** (Vulkan, in place: spans, device KV f16/int8, residency planner with
+   importance-weighted FQ3/FQ3S re-quantisation, tensor-core prefill; `docs/engine/GPU.md`).
+   Next, in order of value on a 4 GB card:
+   a. **Prefill kernel**: `matmul_coop.comp` reaches ~1 TFLOPS. Coalesced activation
+      loads, double-buffered slabs and a wider K per barrier are needed for the
+      >= 1,000 tok/s an 8B needs for a 2 s cold TTFT on 2k tokens.
+   b. **Stream CPU-layer weights through the GPU for prefill batches** when the
+      model is only partly resident (CPU prefill is ~6-10 tok/s on the 8B, PCIe
+      ~12 GB/s moves a layer in ~10 ms).
+   c. **Multi-slot prefix cache** (2-3 sequences, LRU, KV stash per slot) so a side
+      generation does not evict the conversation (server request 2026-11-03).
+   d. **Sub-3-bpw quality**: codebook/lattice formats (IQ3-class) and QAT-LoRA from the
+      tuning channel (`docs/tuning/REQUESTS.md` T1).
+   e. Grow-on-demand device KV instead of a fixed context.
 7. Speculative decoding with a tiny draft model; `deepseek2` (MLA) and `gemma3`.
-8. **LoRA adapter at load** (`docs/tuning/REQUESTS.md` E1, in progress
-   2026-11-02): merge the tuning channel's 22 MB adapter GGUF into the
+8. **LoRA adapter at load** (`docs/tuning/REQUESTS.md` E1, done 2026-11-02): merge the tuning channel's 22 MB adapter GGUF into the
    quantised weights at load so a run no longer needs an 800 MB merged file.
 
 ## Server and bindings (`services`, `model/*.py`)

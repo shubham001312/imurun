@@ -194,8 +194,12 @@ def train(config: dict, run_dir: Path) -> dict:
         raise RuntimeError("the plan needs CUDA but torch.cuda.is_available() is False in the tuning venv")
     bf16 = bool(use_gpu and torch.cuda.is_bf16_supported())
     if not use_gpu:
-        threads = max(1, (os.cpu_count() or 2) - 1)
-        torch.set_num_threads(threads)
+        # The server's resource governor hands over the leftover of the shared
+        # CPU budget (physical cores minus the user's headroom minus chat and
+        # voice); without it, physical-ish cores minus one - never every
+        # logical CPU (docs/resources/README.md).
+        threads = int(config.get("cpu_threads") or 0) or max(1, (os.cpu_count() or 2) // 2 - 1)
+        torch.set_num_threads(max(1, threads))
 
     tokenizer = AutoTokenizer.from_pretrained(base_dir)
     if tokenizer.pad_token is None:
@@ -341,6 +345,9 @@ def train(config: dict, run_dir: Path) -> dict:
                  loss=last.get("loss"), lr=last.get("learning_rate"),
                  eta_s=(state.max_steps - done) / rate if rate > 0 else None, tok_s=tok_s)
             wanted = read_control(run_dir)
+            want_threads = int(wanted.get("threads") or 0)
+            if want_threads > 0 and not use_gpu and want_threads != torch.get_num_threads():
+                torch.set_num_threads(want_threads)   # the governor lowered/raised our share
             if wanted.get("cancel"):
                 control.should_training_stop = True
                 raise KeyboardInterrupt

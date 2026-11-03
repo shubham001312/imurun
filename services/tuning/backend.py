@@ -81,6 +81,8 @@ class SubprocessBackend:
             stdout=subprocess.PIPE, stderr=log, text=True, encoding="utf-8", errors="replace",
             env=env, cwd=str(run_dir), creationflags=_flags(), preexec_fn=_preexec(),
         )
+        # The resource governor counts the trainer's CPU as IMURUN's own.
+        self.proc = proc
         lines: queue.Queue = queue.Queue()
 
         def pump():

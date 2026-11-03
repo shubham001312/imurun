@@ -70,6 +70,13 @@ DEFAULTS: dict[str, dict] = {
         "cacheLimitGb": 40,
         "transcriptDays": 30,
         "logDays": 7,
+        # Resource governor (services/resources, docs/resources/README.md):
+        # balanced | performance (half the headroom) | gentle (double) | custom.
+        "headroom": "balanced",
+        # custom only: per-resource headroom percentages {cpu, ram, vram, disk}.
+        "custom": {},
+        # Lower IMURUN's threads while other programs are busy.
+        "dynamic": True,
     },
     # --- tuning channel (services/tuning, docs/tuning/README.md) -------------
     # Off by default; validated by services/tuning/scheduler.validate_settings.

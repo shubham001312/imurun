@@ -58,6 +58,19 @@ def max_pages() -> int:
     return _int("IMURUN_RESEARCH_PAGES", 4, 0, 10)
 
 
+def fetch_concurrency() -> int:
+    """Pages fetched and cleaned at the same time. IMURUN_RESEARCH_FETCH_CONCURRENCY
+    overrides; otherwise the resource governor's share (docs/resources/README.md)."""
+    if os.getenv("IMURUN_RESEARCH_FETCH_CONCURRENCY", "").strip():
+        return _int("IMURUN_RESEARCH_FETCH_CONCURRENCY", 4, 1, 16)
+    try:
+        from ..resources import get_governor
+
+        return max(1, int(get_governor().research_concurrency()))
+    except Exception:  # noqa: BLE001 - research works without a governor
+        return 4
+
+
 def max_page_bytes() -> int:
     return 2 * 1024 * 1024
 
