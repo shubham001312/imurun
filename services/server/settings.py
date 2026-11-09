@@ -102,9 +102,10 @@ DEFAULTS: dict[str, dict] = {
     # Server-side voice (services/voice, docs/voice/README.md); the first four
     # keys are the shell's browser-voice settings (frontend API-REQUESTS #4).
     "voice": copy.deepcopy(VOICE_DEFAULTS),
-    # Web search providers (see services/tools/builtin/web_search.py). Keys are
-    # write-only through the API: GET returns a mask, never the value, and the
-    # server exports them to the environment the search tool reads.
+    # Legacy developer-only search keys (services/research/sources/keyed.py).
+    # Web search needs no key and the UI no longer shows this section (product
+    # rule, 2026-11-09). Kept so stored values still load; write-only through
+    # the API: GET returns a mask, never the value.
     "search": {
         "provider": "",            # "" = auto: first key present, else keyless
         "IMURUN_BRAVE_API_KEY": "",

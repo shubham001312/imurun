@@ -171,7 +171,6 @@
       { kind: 'Settings', label: 'Permissions', hint: 'what tools may do', run: function () { IM.shell.openSettings('permissions'); } },
       { kind: 'Settings', label: 'Tools', hint: 'schemas and manual runs', run: function () { IM.shell.openSettings('tools'); } },
       { kind: 'Settings', label: 'Agent', hint: 'steps per reply', run: function () { IM.shell.openSettings('agent'); } },
-      { kind: 'Settings', label: 'Web search', hint: 'web search keys', run: function () { IM.shell.openSettings('search'); } },
       { kind: 'Settings', label: 'Apps (connectors)', hint: 'OAuth apps, connect, test, tools', run: function () { IM.shell.openSettings('connectors'); } },
       { kind: 'Settings', label: 'MCP servers', hint: 'add, connect, discovered tools', run: function () { IM.shell.openSettings('mcp'); } },
       { kind: 'Settings', label: 'Fine-tuning', hint: 'teach the local model from your ratings', run: function () { IM.shell.openSettings('tuning'); } },
@@ -548,11 +547,11 @@
       return Object.assign({ type: 'tool.result', turn_id: T, call_id: id, tool: tool, ok: ok, decision: 'allow', depth: 0, step: 1, latency_ms: 640 }, extra || {});
     }
     var SOURCES = [
-      { title: 'Python 3.14.0 release notes', url: 'https://docs.python.org/3/whatsnew/3.14.html', domain: 'docs.python.org', provider: 'brave',
+      { title: 'Python 3.14.0 release notes', url: 'https://docs.python.org/3/whatsnew/3.14.html', domain: 'docs.python.org', provider: 'browser:duckduckgo',
         snippet: 'Python 3.14 is the latest stable release, with template strings, deferred annotations and a free-threaded build.' },
-      { title: 'Python Release Python 3.14.0', url: 'https://www.python.org/downloads/release/python-3140/', domain: 'python.org', provider: 'brave',
+      { title: 'Python Release Python 3.14.0', url: 'https://www.python.org/downloads/release/python-3140/', domain: 'python.org', provider: 'browser:duckduckgo',
         snippet: 'Download installers for Windows, macOS and source tarballs.' },
-      { title: 'What is new in CPython', url: 'https://realpython.com/python314-new-features/', domain: 'realpython.com', provider: 'brave' }
+      { title: 'What is new in CPython', url: 'https://realpython.com/python314-new-features/', domain: 'realpython.com', provider: 'browser:duckduckgo' }
     ];
 
     label('Searching the web right now (the query, then "Found N sources")');

@@ -2,14 +2,12 @@
 
 ``WebSearchTool`` is :class:`services.research.tool.ResearchTool`: the model
 (or the planner, for the pre-fetch) writes the queries; keyless sources
-(public SearXNG, Wikipedia, news RSS, direct sites and registries, the
-embedded-browser helper) are searched in parallel, the best pages are fetched
-and cleaned, passages are ranked and returned as a Context block with
-numbered sources. No API key is required.
-
-Keyed providers still work and are used first when configured:
-``IMURUN_BRAVE_API_KEY``, ``IMURUN_SERPER_API_KEY``, ``IMURUN_TAVILY_API_KEY``,
-``IMURUN_SEARXNG_URL`` (optionally ``IMURUN_SEARCH_PROVIDER`` to choose).
+(the embedded-browser helper, Mwmbl, public SearXNG, Wikipedia, DuckDuckGo
+Instant Answers, and by topic Stack Exchange / GitHub / Hacker News / arXiv /
+OpenAlex / endoflife.date / news RSS / direct registries) are searched in
+parallel, the best pages are fetched and cleaned, passages are ranked and
+returned as a Context block with numbered sources. No API key, ever (product
+rule); ``research/sources/keyed.py`` is a developer-only environment path.
 
 This module keeps the old helper names (``current_provider``, ``as_sources``,
 ``_search_*``) for callers and tests. See docs/research/README.md.

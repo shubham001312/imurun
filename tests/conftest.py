@@ -19,6 +19,9 @@ if not os.environ.get("IMURUN_BIN_DIR"):
     import tempfile
 
     os.environ["IMURUN_BIN_DIR"] = tempfile.mkdtemp(prefix="imurun-test-bin-")
+# The embedded-browser search helper is on by default in the app; a test must never
+# start a real (hidden) WebView. Tests that need it pass their own fake helper.
+os.environ.setdefault("IMURUN_BROWSER_SEARCH", "0")
 # The agent issue log (services/response/issues.py) never lands in the real data root.
 if not os.environ.get("IMURUN_ISSUES_LOG"):
     import tempfile

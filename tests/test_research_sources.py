@@ -173,16 +173,27 @@ def test_direct_registry_hits_are_clean_text():
 
 
 # ---------------------------------------------------------------- browser helper
-def test_browser_search_is_honestly_unavailable(monkeypatch, tmp_path):
+def test_browser_search_is_on_by_default_and_honestly_unavailable(monkeypatch, tmp_path):
+    from services.research import config
+
     monkeypatch.delenv("IMURUN_BROWSER_SEARCH", raising=False)
+    assert config.browser_search_enabled()  # the owner's call (2026-11-09); tests/conftest.py sets 0
+    monkeypatch.setenv("IMURUN_BROWSER_SEARCH", "0")
     ok_flag, why = BrowserSearchSource().available()
-    assert not ok_flag and "IMURUN_BROWSER_SEARCH" in why
+    assert not ok_flag and "IMURUN_BROWSER_SEARCH=0" in why
     monkeypatch.setenv("IMURUN_BROWSER_SEARCH", "1")
     window = tmp_path / "window.py"
     window.write_text("print('no helper here')\n")
     ok_flag, why = BrowserSearchSource(script=window).available()
-    assert not ok_flag and "not implemented yet" in why
+    assert not ok_flag and "no --search-helper mode" in why
     assert not helper_supported(window)
+    # No pywebview (headless Linux, CI): unavailable with the reason, the other sources still run.
+    import importlib.util
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "webview" else real(name, *a))
+    ok_flag, why = BrowserSearchSource().available()
+    assert not ok_flag and "pywebview is not installed" in why
 
 
 def test_browser_helper_protocol_end_to_end():
@@ -219,5 +230,7 @@ def test_browser_helper_wrong_protocol_is_refused():
 
 def test_real_window_script_marker_is_detected():
     window = Path(__file__).resolve().parent.parent / "window.py"
-    # Today window.py has no helper; when the launcher owner adds it this flips.
-    assert helper_supported(window) == ("--search-helper" in window.read_text(encoding="utf-8"))
+    assert helper_supported(window)
+    source = window.read_text(encoding="utf-8")
+    # The spec's limits, kept in the real helper: private mode, hidden window, read-only scripts.
+    assert "private_mode=True" in source and "hidden=True" in source and "_watch_parent(parent" in source

@@ -94,9 +94,15 @@ def planner_max_tokens() -> int:
 
 
 def browser_search_enabled() -> bool:
-    """Search through the embedded browser helper. Off unless asked for (see
-    docs/research/BROWSER-SEARCH.md for why)."""
-    return _flag("IMURUN_BROWSER_SEARCH", False)
+    """Search through the embedded browser helper (the main whole-web route
+    without a key). On by default since 2026-11-09 (the product owner's call,
+    docs/research/BROWSER-SEARCH.md); IMURUN_BROWSER_SEARCH=0 switches it off."""
+    return _flag("IMURUN_BROWSER_SEARCH", True)
+
+
+def browser_idle_seconds() -> float:
+    """The hidden helper process exits after this long without a search."""
+    return _float("IMURUN_BROWSER_SEARCH_IDLE", 600.0, 30.0, 86400.0)
 
 
 def searxng_public_enabled() -> bool:

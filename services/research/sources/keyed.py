@@ -1,9 +1,9 @@
-"""Keyed search providers - used when the user configured one, never required.
+"""Keyed search providers - a developer-only path, never required.
 
-Brave, Serper and Tavily need an API key; SearXNG needs the address of an
-instance you run or trust (``IMURUN_SEARXNG_URL``). The keys come from the
-environment (the Settings screen exports them, ``services/server/settings.py``)
-and are never logged or written anywhere by this module.
+Product rule (2026-11-09): web search never asks the user for a key, so this
+is not in the UI or the user docs. A developer can still set Brave / Serper /
+Tavily keys or an own SearXNG address in the environment; the keys are never
+logged or written anywhere by this module.
 
 These functions moved here from ``tools/builtin/web_search.py`` (which
 re-exports them) and keep their old return shape ``[{title, url, snippet}]``.

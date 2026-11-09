@@ -56,13 +56,20 @@ TIER1 = {"wikipedia.org", "britannica.com", "reuters.com", "apnews.com", "bbc.co
          "python.org", "docs.python.org", "developer.mozilla.org", "github.com", "who.int", "un.org",
          "europa.eu", "nature.com", "science.org", "nasa.gov", "pypi.org", "npmjs.com", "nodejs.org",
          "rust-lang.org", "kernel.org", "w3.org", "ietf.org", "imf.org", "worldbank.org", "pmindia.gov.in",
-         "gov.uk", "whitehouse.gov", "nih.gov", "cdc.gov"}
+         "gov.uk", "whitehouse.gov", "nih.gov", "cdc.gov",
+         # official documentation
+         "learn.microsoft.com", "docs.rs", "go.dev", "golang.org", "docs.oracle.com", "kotlinlang.org",
+         "typescriptlang.org", "postgresql.org", "sqlite.org", "docs.docker.com", "kubernetes.io",
+         "git-scm.com", "react.dev", "djangoproject.com", "numpy.org", "pytorch.org", "isocpp.org"}
 TIER2 = {"nytimes.com", "theguardian.com", "washingtonpost.com", "aljazeera.com", "npr.org", "cnn.com",
          "bloomberg.com", "ft.com", "economist.com", "wsj.com", "thehindu.com", "hindustantimes.com",
          "indianexpress.com", "timesofindia.indiatimes.com", "ndtv.com", "stackoverflow.com",
          "stackexchange.com", "arstechnica.com", "theverge.com", "techcrunch.com", "nature.com",
          "espn.com", "cricbuzz.com", "espncricinfo.com", "cnbc.com", "forbes.com", "dw.com", "france24.com",
-         "abc.net.au", "cbc.ca", "lemonde.fr", "spiegel.de", "nikkei.com", "scmp.com", "medium.com"}
+         "abc.net.au", "cbc.ca", "lemonde.fr", "spiegel.de", "nikkei.com", "scmp.com", "medium.com",
+         # Q&A with voting, scholarly catalogues, curated release data
+         "superuser.com", "askubuntu.com", "serverfault.com", "mathoverflow.net", "arxiv.org", "doi.org",
+         "openalex.org", "endoflife.date", "cppreference.com", "rust-lang.github.io"}
 LOW = {"pinterest.com", "facebook.com", "instagram.com", "tiktok.com", "x.com", "twitter.com",
        "quora.com", "answers.com", "scribd.com", "slideshare.net", "linkedin.com"}
 
@@ -253,7 +260,10 @@ def dedupe_hits(hits: list[Hit]) -> list[Hit]:
     return [by_url[k] for k in order]
 
 
-SOURCE_WEIGHT = {"direct": 1.0, "wikipedia": 0.9, "pypi": 1.0, "npm": 1.0, "github": 1.0}
+# How much a source's ranking is worth when choosing pages to fetch (unknown 0.7).
+SOURCE_WEIGHT = {"direct": 1.0, "wikipedia": 0.9, "pypi": 1.0, "npm": 1.0, "github": 1.0,
+                 "browser:duckduckgo": 0.9, "browser:bing": 0.9, "keyed": 0.9, "brave": 0.9, "serper": 0.9,
+                 "tavily": 0.9, "searxng": 0.8, "mwmbl": 0.7, "hackernews": 0.6}
 
 
 def fetch_order(hits: list[Hit], plan: Plan) -> list[Hit]:

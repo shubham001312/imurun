@@ -12,10 +12,10 @@ come and go, rate-limit (HTTP 429) or put a bot challenge in front (Anubis
   for ``FAIL_TTL`` (10 minutes); a healthy one is remembered.
 
 A challenge page is a refusal: it is reported, never worked around.
-Measured from the development machine on 2026-11-01: none of the public
-instances below answered JSON to an honest client (all 429 or challenge),
-so this source is best-effort. Your own instance (``IMURUN_SEARXNG_URL``) is
-the reliable SearXNG path (``keyed.py``).
+Measured from the development machine: 2026-11-01, 0 of 40 public
+instances answered JSON to an honest client (all 429 or challenge);
+2026-11-09, 1 of 77 searx.space instances (51 answered 429, the rest a
+challenge page, HTML or 403). So this source is best-effort.
 """
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ from ..types import Hit, Plan
 from . import Source, SourceError
 
 INSTANCES = (
+    # 2026-11-09: the only one of 77 searx.space instances that served JSON to an honest client.
+    "https://search.lumy.live",
     "https://searx.be",
     "https://search.sapti.me",
     "https://searx.tiekoetter.com",
@@ -139,6 +141,8 @@ def parse_results(payload: Any, query: str, instance: str) -> list[Hit]:
 
 class SearxngPublicSource(Source):
     name = "searxng_public"
+    # Usually refused (see above): never let it hold the search phase open long.
+    timeout_cap = 4.0
 
     def __init__(self, pool: InstancePool | None = None, parallel: int = PARALLEL) -> None:
         self._pool = pool

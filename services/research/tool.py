@@ -26,9 +26,8 @@ if TYPE_CHECKING:
     from ..tools.base import ToolResult
 
 BLOCKED_HINT = (
-    "The keyless search sources refused or failed, so the web could not be searched. "
-    "Optional: set IMURUN_BRAVE_API_KEY, IMURUN_TAVILY_API_KEY, IMURUN_SERPER_API_KEY or "
-    "IMURUN_SEARXNG_URL in Settings for a keyed provider."
+    "Every search source refused or failed, so the web could not be searched right now. "
+    "Try again in a few minutes."
 )
 
 
