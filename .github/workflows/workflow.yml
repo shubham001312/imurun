@@ -1,6 +1,11 @@
-# IMURUN: release. Triggered by pushing a tag v<version> (e.g. v0.3.0).
+# IMURUN: release. Runs on its own when main gets a version that has no
+# v<version> tag yet: bump `version` in pyproject.toml + package.json, merge,
+# and this workflow tests, builds, tags, releases and publishes it. Pushing a
+# tag v<version> by hand still works too, and "Run workflow" builds and checks
+# everything (dry run, default) or, with dry_run unticked, releases.
 #
-#   check     tag == pyproject.toml version == package.json version
+#   check     tag == pyproject.toml version == package.json version; decides
+#             whether this run releases (main: only when v<version> is new)
 #   test      pytest on Linux, Windows, macOS
 #   engine    FISH library per OS (engine.yml)
 #   wheels    one wheel per OS with its engine bundled, each smoke-installed
@@ -13,7 +18,8 @@
 #             every distribution attached
 #   pypi      PyPI, by trusted publishing (OIDC; no token stored anywhere)
 #   npm       the npm launcher (package.json + npm/imurun.js), after PyPI so
-#             `npx imurun` can install the matching imurun==<version> at once
+#             `npx imurun` can install the matching imurun==<version> at once;
+#             then marks the old 0.1.x CLI deprecated on npm
 #
 # The file name (workflow.yml) and the environment name (pypi) are what the
 # PyPI trusted publisher for the `imurun` project was registered with in
@@ -24,6 +30,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -34,13 +41,23 @@ on:
 permissions:
   contents: read
 
+# One release at a time. A queued run re-checks the tag, so two quick merges
+# cannot publish the same version twice.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      build: ${{ steps.gate.outputs.build }}
+      publish: ${{ steps.gate.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the gate checks that a release commit is on main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -59,9 +76,45 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
               fh.write(f"version={py}\n")
           EOF
+      - id: gate
+        name: Release or not
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          build=true; publish=false
+          # Publishing (and signing) only ever happens for code on main: a tag
+          # must point at a commit of main, a manual real run must be on main.
+          on_main() {
+            git fetch --quiet origin main &&
+              git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+          }
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF_TYPE" in
+            push:tag)
+              if on_main; then publish=true
+              else echo "::error::tag $GITHUB_REF_NAME is not on main - refusing to publish"; exit 1; fi ;;
+            workflow_dispatch:*)
+              if [ "$DRY_RUN" = "false" ]; then
+                if [ "$GITHUB_REF" = "refs/heads/main" ]; then publish=true
+                else echo "::error::real releases run from main only ($GITHUB_REF)"; exit 1; fi
+              fi ;;
+            push:branch)
+              # exit 0: tag exists, 2: no such tag, anything else: lookup failed
+              # (stop rather than guess - a wrong "not tagged" would re-release).
+              rc=0; git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null || rc=$?
+              case $rc in
+                0) echo "v$VERSION is already tagged - nothing to release"; build=false ;;
+                2) echo "v$VERSION is not tagged yet - releasing it"; publish=true ;;
+                *) echo "could not list tags (git exit $rc)"; exit 1 ;;
+              esac ;;
+          esac
+          echo "build=$build publish=$publish"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
   test:
     needs: check
+    if: needs.check.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -81,11 +134,26 @@ jobs:
 
   engine:
     needs: check
+    if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: read
+      id-token: write   # Azure Artifact Signing login by OIDC (when configured)
     uses: ./.github/workflows/engine.yml
+    with:
+      sign: ${{ needs.check.outputs.publish == 'true' }}
+    secrets:   # only the signing credentials, never NPM_TOKEN & co.
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
 
   wheels:
     name: wheel (${{ matrix.platform }})
     needs: [check, engine]
+    if: needs.check.outputs.build == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -138,6 +206,7 @@ jobs:
 
   sdist:
     needs: check
+    if: needs.check.outputs.build == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -161,10 +230,13 @@ jobs:
 
   release:
     needs: [check, test, wheels, sdist]
-    if: ${{ github.ref_type == 'tag' && !inputs.dry_run }}
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write          # Sigstore signing certificate for the attestations
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -180,21 +252,32 @@ jobs:
       - name: Checksums
         run: |
           cd assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
-      - name: Create or update the GitHub Release
+      - name: Build provenance attestations (verifiable identity of every file)
+        # Anyone can check that a file was built by this repository's release
+        # workflow:  gh attestation verify <file> -R shubham001312/imurun
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f  # v3.2.0
+        with:
+          subject-path: |
+            assets/*
+            dist/*
+      - name: Create or update the GitHub Release (and the tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.check.outputs.version }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME exists - replacing its assets"
-            gh release upload "$GITHUB_REF_NAME" assets/* dist/* --clobber
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists - replacing its assets"
+            gh release upload "$TAG" assets/* dist/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" --title "IMURUN $GITHUB_REF_NAME" --generate-notes \
+            # --target creates the tag on this commit when it does not exist
+            # (a release from main); a pushed tag is used as it is.
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "IMURUN $TAG" --generate-notes \
               assets/* dist/*
           fi
 
   pypi:
     needs: [check, release]
-    if: ${{ github.ref_type == 'tag' && !inputs.dry_run }}
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -211,11 +294,12 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          attestations: true    # PEP 740 provenance: PyPI shows the files as built by workflow.yml
           skip-existing: true   # a re-run after a partial upload finishes the job
 
   npm:
     needs: [check, pypi]
-    if: ${{ github.ref_type == 'tag' && !inputs.dry_run }}
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -244,5 +328,13 @@ jobs:
           # Works with an NPM_TOKEN secret, or without one when a trusted
           # publisher for this repository + workflow.yml is configured on
           # npmjs.com (npm >= 11.5 exchanges the OIDC credential itself).
-          npm install -g "npm@>=11.5"
+          npm install -g npm@11.21.2   # exact: this job holds NODE_AUTH_TOKEN
           npm publish --access public --provenance
+      - name: Deprecate the old 0.1.x CLI on npm
+        # Needs NPM_TOKEN (trusted publishing covers `publish` only). Best effort:
+        # a failure here never fails the release.
+        continue-on-error: true
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm deprecate "imurun@<0.2.0" "imurun 0.1.x is the retired TypeScript CLI. Install the current app: npm i -g imurun@latest"

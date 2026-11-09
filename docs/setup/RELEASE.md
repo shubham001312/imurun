@@ -69,6 +69,26 @@ Also create the GitHub environment **`npm`** (Settings → Environments).
 - Actions must be allowed to run third-party actions: `msys2/setup-msys2`,
   `pypa/gh-action-pypi-publish`, plus the `actions/*` ones.
 
+### 4. Code signing and provenance (publisher identity)
+
+Without a signature, Windows Smart App Control / SmartScreen can block or flag the engine
+(`fish.dll`) as coming from an "unknown publisher", and macOS Gatekeeper can call a downloaded
+`libfish.dylib` the work of an "unidentified developer". The release pipeline handles each part
+automatically once the credentials exist. Each part is skipped (with a warning) until then, so
+releases never block on it.
+
+| What | Status | What you need to do |
+|---|---|---|
+| **Build provenance** (Sigstore, SLSA) for every release file: wheels, sdist, engine libraries, `SHA256SUMS.txt` | **automatic, free** (`actions/attest-build-provenance`) | nothing. Verify with `gh attestation verify <file> -R shubham001312/imurun` |
+| **PyPI attestations** (PEP 740): PyPI shows each file as built by `workflow.yml` | **automatic** with trusted publishing | nothing |
+| **npm provenance** | automatic (`npm publish --provenance`) | nothing |
+| **Windows Authenticode** on `fish.dll` | runs when configured | an [Azure Artifact Signing](https://learn.microsoft.com/azure/artifact-signing/) account (identity-validated; paid monthly), an app registration with a federated credential for this repo (OIDC). Repository **variables** `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`; **secrets** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
+| **macOS Developer ID + notarization** on `libfish.dylib` | runs when configured; otherwise ad-hoc signed (loads, but no identity) | an Apple Developer Program membership. Export the "Developer ID Application" certificate as .p12. **Variables** `APPLE_SIGNING_IDENTITY` (e.g. `Developer ID Application: ImuTechz (TEAMID)`), `APPLE_TEAM_ID`; **secrets** `APPLE_CERT_P12` (base64 of the .p12), `APPLE_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_PASSWORD` (an app-specific password) |
+
+Buying the Windows and Apple identities is the only part that cannot be automated, because
+both vendors validate who you are. The release and engine workflows do the rest:
+`engine.yml` signs and verifies, and `workflow.yml` attests.
+
 ## Git: state of this folder and first push
 
 This folder **is already a git repository** (remote
@@ -125,18 +145,24 @@ git push -u origin main
    python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-win_amd64.whl" --expect-engine
    npm pack --dry-run
    ```
-4. Commit, tag, push:
-   ```
-   git commit -am "release: vX.Y.Z"
-   git tag vX.Y.Z
-   git push origin main vX.Y.Z
-   ```
+4. Commit and merge (or push) to `main`. **That is the release.** On every push to `main`,
+   the Release workflow's `check` job asks whether `vX.Y.Z` is already tagged. If it is,
+   nothing else runs. If it is not, the full pipeline runs, and the `release` job creates
+   the tag on that commit together with the GitHub Release. The tag is created with
+   `GITHUB_TOKEN`, so it does not start a second run. A failed release leaves no tag, and
+   the next push to `main` tries again. Releases never overlap (`concurrency: release`).
+   Pushing a tag yourself still works (`git tag vX.Y.Z && git push origin vX.Y.Z`), and so
+   does **Actions → Release → Run workflow**: a dry run by default, or a real release with
+   `dry_run` unticked.
+   > Merging a version bump publishes to PyPI and npm, and a PyPI version can never be
+   > uploaded again. Bump the version only in the commit that is meant to ship.
 5. Watch **Actions → Release**. Jobs, in order:
-   `check` (tag = pyproject = package.json) → `test` (pytest on Ubuntu, Windows, macOS)
+   `check` (tag = pyproject = package.json; release or not) → `test` (pytest on Ubuntu, Windows, macOS)
    and `engine` (MinGW / manylinux GCC / clang) → `wheels` (one per OS, each
    smoke-installed into a fresh venv on its own OS and started with
    `--no-open`, until `/health` answers) and `sdist` → `release` (GitHub Release +
-   assets + `SHA256SUMS.txt`) → `pypi` → `npm`.
+   assets + `SHA256SUMS.txt`) → `pypi` → `npm` (then `npm deprecate imurun@<0.2.0`,
+   best effort, needs `NPM_TOKEN`).
 6. Verify from a clean machine or venv:
    ```
    pip install --upgrade imurun && imurun --version

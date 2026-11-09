@@ -12,6 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Tests (and the start.py subprocesses some of them launch) must never set up the
+# `imurun` command in the developer's real ~/.local/bin or shell profile.
+os.environ["IMURUN_NO_PATH"] = "1"
+if not os.environ.get("IMURUN_BIN_DIR"):
+    import tempfile
+
+    os.environ["IMURUN_BIN_DIR"] = tempfile.mkdtemp(prefix="imurun-test-bin-")
+
 
 def pytest_configure(config):
     # Registered here (not in pyproject.toml, which is the setup owner's) so

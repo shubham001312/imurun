@@ -2,6 +2,89 @@
 
 The API contract itself is documented in `services/server/doc/README.md`.
 
+## 2026-11-09 — `/v1` request bodies hardened like `/api/*`
+
+- `services/server/openai_api.py` `_read_body`: a negative Content-Length is now a 400. A read
+  timeout is a 408 in the OpenAI error shape. A body cut short gets no reply. `NaN`, `Infinity`
+  and overflowing numbers anywhere in the JSON are a 400, matching the rules `api.py` got the same
+  day. Before this, `{"metadata": {"x": NaN}}` was accepted. Test:
+  `tests/test_openai_api.py::test_non_finite_numbers_and_bad_lengths_are_400` (fails on the old
+  reader).
+
+## 2026-11-09 — bugs found driving the running server end to end
+
+Found by running `python start.py --no-open` headless (provisioning state, then the
+CPU engine with Llama 3.2 1B) and probing every main route.
+
+- **Provisioning state said "ready" and accepted turns** (`model/fish_client.py`
+  `SyncFishModelClient.configured`). Without an engine library the client falls back to
+  the HTTP engine (`model/fish/src/server.cpp`), and `configured` was
+  `bool(server_url)`, which is always true (default `http://127.0.0.1:8731`). So
+  `/api/status` reported `runtime: "ready"`, `engine.available: true`, and
+  `POST /api/turns` answered 200 instead of `503 model_unavailable`; the turn then failed
+  ("Cannot connect to host 127.0.0.1:8731"). Now the HTTP engine counts as configured only
+  when its `/fish/health` answers (cached 5 s). Test: `tests/test_fish_http_backend.py`.
+- **HTTP engine: every turn after the first failed with "Event loop is closed"**
+  (`model/fish_client.py`). The aiohttp session was cached, but each synchronous call and
+  each streamed turn runs on its own short-lived event loop, and a session is bound to the
+  loop that created it. Each request now opens and closes its own session.
+- **Malformed requests dropped the connection with a traceback, or hung**
+  (`services/server/api.py`). `Content-Length: -5` raised in `rfile.read`;
+  `{"maxSteps": 1e309}` became `inf` and `POST /api/agent` raised `OverflowError`; a body
+  shorter than its `Content-Length` held the handler thread forever. Now: a negative length
+  is `400 invalid content length`; `NaN`, `Infinity` and out-of-range numbers are
+  `400 invalid json` for every route; request reads time out after `REQUEST_TIMEOUT`
+  (60 s) with `408 request timed out`; and any other unexpected exception in a route is a
+  JSON `500 {"error": "internal error"}` logged with its path (never the query or headers)
+  instead of a dropped connection.
+- **A JSON `null` text field became the text "None"** (`services/server/api.py`):
+  `{"first_command": null}` created a session named "None" (also queued prompts, rename,
+  skills, clients, persona). `null` now counts as missing, so those requests get their
+  usual 400. Tests: `tests/test_api_bad_requests.py`.
+- **`POST /api/models/download` never finalised the download generator**
+  (`services/server/api.py`): the route returned from inside `async for` and closed its
+  event loop without `shutdown_asyncgens()`, so `ModelManager.download_model`'s cleanup
+  (open `.part` file, HTTP response) never ran; the log showed "Task was destroyed but it
+  is pending!" after every download request. Now finalised before the loop closes.
+- **The tool workspace and the notes / facts stores ignored `IMURUN_DATA_ROOT`**
+  (`services/tools/workspace.py` `default_workspace`, `services/tools/notes_tool.py`):
+  they hard-coded `~/.imurun`, so a server on another data root reported
+  `workspace: ~/.imurun/workspace` on `GET /api/permissions` and kept notes in the real
+  home folder. They now use `services.paths.data_root()`. Test: `tests/test_data_root_paths.py`.
+- **A download could never finish when the HF metadata call failed**
+  (`services/model_manager.py` `_download_from_source`). The exact size came only from
+  `HfApi.repo_info`; when that failed (rate limit, API outage) the catalogue size was used,
+  and nine FISH-compatible entries were round approximations (checked today with HEAD and
+  a 4-byte Range on every source: all 23 sources live, `GGUF` magic, but e.g. Qwen2.5 7B
+  4.5e9 vs 4 683 074 240 served). A bigger file was deleted as "more bytes than expected"
+  and re-downloaded up to six times; a smaller one was "resumed" past its end; a valid
+  `.part` larger than the catalogue size was deleted before asking. Now the size comes from
+  the response (`Content-Length` / `Content-Range`), only an exact size may delete or skip
+  a `.part`, and a 416 whose total equals the bytes on disk counts as complete. The nine
+  catalogue sizes are corrected to the served values. Test: `tests/test_download_served_size.py`.
+- **Selecting a model file that will not load left it as "the model"**
+  (`model/fish_native.py` `FishNativeClient.select`). With no previous model to restore,
+  the broken path stayed in `_model_path`, so `/api/status` said `runtime: "ready"` with
+  `selected_model` = the broken file, and every turn was accepted (200) only to fail with
+  "not a GGUF file". Now the client is left with no model: status says provisioning and a
+  turn gets `503 model_unavailable / no_model`. `POST /api/models/select` answers such a
+  file with **422** `{error: <engine message>, reason: "load_failed"}` instead of 500
+  (`services/server/turns.py` `_select_model`, `api.py`). Tests:
+  `tests/test_fish_adapter_binding.py`, `tests/test_api_bad_requests.py`.
+- **`GET /api/stack/status` reported a file as the stack root** (`services/server/stack.py`
+  `locate_root`): with no `docker-compose.yml` anywhere it returned `stack.py` itself, so
+  `root` was `.../services/server/stack.py` and `compose_file`
+  `.../stack.py/docker-compose.yml`. Now its folder. Test: `tests/test_stack_root.py`.
+- **After the first launch that selected a model, every later launch showed no model
+  downloaded** (`services/config.py` `resolve_model_path`, called by the warm start). It
+  created the process-wide model manager on `<data root>/models`; in a source checkout the
+  models live in `<repo>/models` (`services.paths.models_dir()`). So on the second start
+  the warm start found nothing (`warm_start.state` stayed `idle`), `GET /api/models` listed
+  every model as not downloaded and `POST /api/models/select` answered 404 for the whole
+  session. It now uses the default manager. Measured on restart: warm start loads the 1B
+  with no user action, `downloaded: true`. Installed copies were not affected (`start.py`
+  pins the manager to the data root first). Test: `tests/test_last_model_resolve.py`.
+
 ## 2026-11-03 — resource governor (resources owner)
 
 - `/api/resources` governor view grows `gpu` (detected with fallbacks, engine placement

@@ -147,6 +147,13 @@ function installedVersion(py) {
   return r.status === 0 ? (r.stdout || "").trim() : null;
 }
 
+/** Version in a wheel or sdist file name (imurun-0.3.0-py3-none-any.whl,
+ *  imurun-0.3.0.tar.gz), or null when the name does not follow that form. */
+function distVersion(file) {
+  const m = /^imurun-([^-]+?)(?:-.+\.whl|\.tar\.gz|\.zip)$/i.exec(path.basename(file));
+  return m ? m[1] : null;
+}
+
 function pipInstall(py) {
   const wheel = process.env.IMURUN_WHEEL;
   const base = wheel ? path.resolve(wheel) : `imurun==${VERSION}`;
@@ -212,14 +219,20 @@ function main() {
   if (!venvWorks(dir)) createVenv(dir);
   const py = venvPython(dir);
   const have = installedVersion(py);
-  const wanted = process.env.IMURUN_WHEEL ? null : VERSION;
-  if (process.env.IMURUN_REINSTALL === "1" || !have || (wanted && have !== wanted)) {
+  // With IMURUN_WHEEL the wanted version is the wheel's own (from its file
+  // name), not this launcher's; if the name does not tell, install anyway
+  // rather than keep running whatever is already in the venv.
+  const wheel = process.env.IMURUN_WHEEL;
+  const wanted = wheel ? distVersion(wheel) : VERSION;
+  if (process.env.IMURUN_REINSTALL === "1" || !have || !wanted || have !== wanted) {
     pipInstall(py);
   }
 
   // Ctrl+C reaches the child directly (same console / process group); the
   // launcher only waits for it and passes the exit status on.
-  const child = spawn(py, ["-m", "imurun", ...args], { stdio: "inherit" });
+  // -P: keep the current directory off sys.path, so running `imurun` inside an
+  // untrusted folder cannot import that folder's imurun/ or json.py (Python 3.11+).
+  const child = spawn(py, ["-P", "-m", "imurun", ...args], { stdio: "inherit" });
   const ignore = () => {};
   process.on("SIGINT", ignore);
   process.on("SIGTERM", () => child.kill("SIGTERM"));

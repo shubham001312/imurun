@@ -1,5 +1,71 @@
 # Setup / packaging changelog
 
+## 2026-11-09 — packaging no longer ships stale files
+
+- `setup.py`: `build_py` now empties the copied part of the package (`services/`,
+  `model/`, `frontend/`, `docs/`, `bin/`, `start.py`, `install.py`, `window.py`,
+  `requirements*.txt`, `LICENSE`) in `build/lib/imurun/` before copying again.
+  setuptools reuses `build/lib` between builds and only adds to it, so after one
+  `pip install .` / `python -m build` in a checkout, every later wheel also carried files
+  that had since been deleted from the repo. It also carried the engine library from an
+  earlier build, even with `IMURUN_BUNDLE_ENGINE=0`. Reproduced: a deleted
+  `services/zz_stale.py` and `bin/fish.dll` both showed up in the next pure wheel. Now the
+  second build matches a clean one (289 files).
+- `start.py`: SIGTERM, SIGHUP and Ctrl+Break now take the same clean path as Ctrl+C. Before
+  this, `kill`, systemd or launchd stopped the process without `server.stop()`, and
+  `runtime/api.json` was left with a dead port and token. Verified: after `kill -TERM` the log
+  ends with "Stopped.", `api.json` is gone and the port is closed.
+- **Security review fixes** (independent review of the setup and CI changes; no Critical findings):
+  - The `imurun` launcher and the npm launcher run `python -P -m imurun`. Without `-P`, typing
+    `imurun` inside an untrusted folder imported that folder's `imurun/` or `json.py`. A test
+    reproduces the attack and fails without `-P`.
+  - The Windows launcher never leaves an empty `PYTHONPATH` entry, which would put the cwd on
+    `sys.path`. Its folder is always under the user profile, never next to a relocated data root.
+  - A launcher folder that every user, or a shared group, can write to is refused.
+  - The launcher write is atomic and never follows a planted symlink.
+  - Paths are shell-quoted (sh, fish), and `%` is escaped for cmd. The `.cmd` file is written
+    in the OEM code page, and a non-string registry `Path` value is left alone.
+  - Release: tags and manual runs publish and sign only when the commit is on `main`.
+    `engine.yml` no longer narrows the token, so the Azure OIDC login can work. Only the signing
+    secrets are passed to it (no more `secrets: inherit`). Actions that run with signing
+    credentials are pinned by commit SHA, and npm is pinned to an exact version in the job that
+    holds `NODE_AUTH_TOKEN`.
+- **Certificates.** HTTPS (model downloads, `--get-engine`, connectors) is verified against the
+  OS trust store via `truststore` (new dependency, injected at start by `start.py` / `install.py`).
+  This fixes "unable to get local issuer certificate" behind corporate proxies and on the
+  python.org macOS build. Checked here: the httpx and urllib contexts become truststore contexts
+  with `CERT_REQUIRED`, GitHub and Hugging Face requests succeed, and a local self-signed server
+  is still rejected. `IMURUN_NO_TRUSTSTORE=1` opts out; `imurun doctor` reports the source.
+- **Publisher identity.** The release attests every file with Sigstore build provenance
+  (`gh attestation verify`) and uploads PEP 740 attestations to PyPI. `engine.yml` signs
+  `fish.dll` (Azure Artifact Signing) and `libfish.dylib` (Developer ID + notarization) when the
+  credentials are configured; otherwise the dylib is ad-hoc signed and the run warns. The
+  macOS quarantine flag on a browser-downloaded engine is now named in the load error.
+- **`imurun` works from any new terminal, however it was installed** (`install.ensure_command`,
+  run by the first-run setup and recorded as `command` in `install-state.json`). Before this,
+  `pip install` into a venv, `pip install --user` on Windows, `npx imurun` and a checkout
+  all left `imurun` off PATH in a new terminal. If `imurun` does not already run this
+  interpreter, setup writes a marked launcher (`~/.local/bin/imurun`; Windows:
+  `~/.imurun/cmd/imurun.cmd`) and adds its folder to the user PATH (shell rc block / HKCU
+  `Path`). A command that is on PATH only because a venv is activated does not count.
+  Foreign files are never overwritten. `IMURUN_NO_PATH=1` and CI skip the PATH change;
+  `IMURUN_BIN_DIR` moves the launcher. `imurun doctor` reports it. The CI smoke install now
+  runs the launcher too. Verified on Linux: after a fresh wheel install and first run,
+  a new login shell and a new interactive bash both resolve `imurun` → `imurun 0.3.0`.
+  The Windows branch is written but has not been run yet.
+- `.github/workflows/workflow.yml`: **releases are automatic.** A push to `main` whose
+  `pyproject.toml` version has no `v<version>` tag yet runs the whole pipeline and then
+  creates the tag and the GitHub Release, publishes to PyPI (trusted publishing, already
+  registered for `workflow.yml`, checked against the provenance of 0.1.11), and publishes
+  to npm. Every other push to `main` stops after `check`. The tag lookup fails closed: an
+  error stops the run instead of releasing again. The npm job also marks `imurun@<0.2.0`
+  deprecated. The 0.1.x yank on PyPI stays manual, because PyPI has no API for it.
+- `npm/imurun.js`: with `IMURUN_WHEEL=<wheel>`, the launcher compares the version in the
+  wheel's file name with the one in the venv and installs when they differ. Before this, an
+  existing install, for example the old 0.1.11 in `~/.imurun/venv`, was kept and run
+  (reproduced: `imurun --version` printed `0.1.11`). When the file name gives no version,
+  it always installs.
+
 ## 2026-11-03 — data folder created up front
 
 - `install.py`: `HOME_DIRS` + `ensure_home_layout()` create the whole `~/.imurun` tree

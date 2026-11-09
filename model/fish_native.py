@@ -651,6 +651,12 @@ class FishNativeClient:
                     if not self.load() and prev_adapter is not None:
                         self._adapter_path = None
                         self.load()
+                else:
+                    # Nothing to go back to: do not keep a file that will not
+                    # load as "the model" (configured would say ready and every
+                    # turn would be accepted only to fail on it).
+                    self._model_path = None
+                    self._adapter_path, self._adapter_scale = None, 1.0
                 self._error = failure
                 return False
 

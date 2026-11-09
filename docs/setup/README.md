@@ -38,7 +38,7 @@ pip install -U imurun              # upgrade (also from the old 0.1.x CLI, see b
 > says that the version is not on PyPI yet). Everything below was verified by
 > building the wheel and the npm tarball from this repository and installing them
 > into fresh environments outside the checkout. It becomes true for PyPI/npm users
-> once the `v0.3.0` tag is pushed and the release workflow publishes
+> once 0.3.0 reaches `main` and the release workflow publishes it on its own
 > (`docs/setup/RELEASE.md`). Until then use `pip install <path>/imurun-0.3.0-*.whl`,
 > `IMURUN_WHEEL=<wheel> npx <path>/imurun-0.3.0.tgz`, or the source checkout.
 
@@ -268,6 +268,77 @@ ninja -C build
 - macOS: `xcode-select --install`, `brew install cmake ninja`.
 - Linux: `sudo apt install build-essential cmake ninja-build`.
 
+## Use IMURUN from other apps (OpenAI-compatible API, OpenClaw)
+
+IMURUN serves an OpenAI-compatible API on the same loopback server, so any app
+that takes "a base URL plus an API key" can use the local model. Open
+**Settings > Use by API**: it shows the three values, each with a Copy button,
+plus ready-to-paste curl, Python and OpenClaw snippets.
+
+| Value | Example |
+|---|---|
+| Base URL | `http://127.0.0.1:8732/v1` (the port is `--port`, default 8732) |
+| API key | `sk-imurun-...` (masked until "Show"; Copy copies the real key) |
+| Model id | the chosen model's file name without `.gguf`, e.g. `Llama-3.2-1B-Instruct-Q4_K_M` (`GET /v1/models`) |
+
+- The key is **persistent**: it lives in `<data root>/secrets/openai_api_key`
+  (`~/.imurun` unless `IMURUN_DATA_ROOT` is set; file `0600`, folder `0700` on
+  macOS/Linux) and survives restarts. **Regenerate key** replaces it at once; apps
+  using the old key get `401` until you paste the new one. The per-run shell token
+  (Settings > API) is a different thing and changes every start.
+- Endpoints: `GET /v1/models`, `POST /v1/chat/completions` (`messages`, `stream`,
+  `max_tokens`, `temperature`, `top_p`, `stop`). Text only; there is no tool
+  calling, embeddings or `/v1/responses`. The `model` field in a request is
+  accepted as given; the loaded model answers.
+- No model chosen yet: completions answer `503 model_not_available`. Choose one in
+  Models first. The first call after a start or an idle unload also loads the weights.
+- Loopback only: apps on this computer can connect, other machines cannot.
+  Browser pages on other origins cannot call it either (no CORS).
+
+```
+curl http://127.0.0.1:8732/v1/chat/completions \
+  -H "Authorization: Bearer $IMURUN_KEY" -H "Content-Type: application/json" \
+  -d '{"model": "Llama-3.2-1B-Instruct-Q4_K_M", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8732/v1", api_key="sk-imurun-...")
+print(client.chat.completions.create(model="Llama-3.2-1B-Instruct-Q4_K_M",
+      messages=[{"role": "user", "content": "Hello"}]).choices[0].message.content)
+```
+
+**OpenClaw** reads `~/.openclaw/openclaw.json` (JSON5). Add IMURUN as a custom
+OpenAI-compatible provider (`api: "openai-completions"`, which is OpenClaw's mode
+for `/v1/chat/completions` servers) and make it the default model:
+
+```json5
+{
+  models: {
+    mode: "merge",
+    providers: {
+      imurun: {
+        baseUrl: "http://127.0.0.1:8732/v1",   // keep the /v1
+        apiKey: "sk-imurun-...",
+        api: "openai-completions",
+        models: [{ id: "Llama-3.2-1B-Instruct-Q4_K_M", name: "IMURUN", reasoning: false,
+                   input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                   contextWindow: 8192, maxTokens: 2048 }],
+      },
+    },
+  },
+  agents: { defaults: { model: { primary: "imurun/Llama-3.2-1B-Instruct-Q4_K_M" } } },
+}
+```
+
+The settings panel fills in your real port, key, model id and context size.
+Common failures: a base URL without `/v1`, an old key after **Regenerate key**,
+IMURUN not running, or the model id changed after switching models in Models
+(update `id` and `primary`). The shape follows OpenClaw's custom-provider docs
+(docs.openclaw.ai, read 2026-11-09); IMURUN has not been run against a real
+OpenClaw install. OpenClaw's agent features that need tool calls will not work
+with this API, plain chat does.
+
 ## Troubleshooting
 
 ### `pip install imurun` gives a different program (0.1.x: `imurun models`, `imurun run`)
@@ -278,12 +349,53 @@ agent". Once 0.3.0 is published, `pip install -U imurun` (or `npm i -g imurun@la
 replaces it. The npm launcher always installs exactly its own version, so a stale 0.1.x
 in `~/.imurun/venv` is replaced automatically.
 
+### `pip install imurun` still gives 0.1.11 after 0.3.0 is published
+
+0.3.0 needs Python 3.11+, and 0.1.x accepted 3.9+. On Python 3.9 or 3.10, pip skips
+0.3.0 without saying so and installs the newest 0.1.x. Check `python --version` and use
+3.11 to 3.14. The project owner can make this fail loudly by yanking 0.1.0 to 0.1.11 on
+PyPI (project → Manage → Releases → Options → Yank). After that, a plain
+`pip install imurun` on an old Python fails with "requires a different Python" instead.
+
 ### `'imurun' is not recognized` / `command not found: imurun`
 
-pip put the script in a folder that is not on PATH. pip prints a warning that names
-it: `%APPDATA%\Python\Python312\Scripts` for `--user` installs on Windows,
-`~/.local/bin` on Linux/macOS. Use `python -m imurun`, add that folder to PATH, or
-install with `pipx install imurun` (`pipx ensurepath` fixes PATH).
+The first `imurun` run sets the command up by itself. If `imurun` on PATH does not
+already start this install, setup writes a small launcher and puts its folder on your
+PATH for new terminals:
+
+| OS | Launcher | PATH change |
+|---|---|---|
+| Linux, macOS | `~/.local/bin/imurun` | a marked block in `~/.profile`, plus `~/.bashrc` / `~/.zshrc` when present or when that is your shell; fish: `~/.config/fish/conf.d/imurun.fish` |
+| Windows | `%USERPROFILE%\.imurun\cmd\imurun.cmd` | appended to the user `Path` (`HKCU\Environment`) |
+
+So it works after `pip install` into a venv, `pip install --user`, `npx imurun` and a
+source checkout (`run.sh` / `run.bat`). **Open a new terminal** afterwards; the current one
+keeps its old PATH. `imurun doctor` shows which `imurun` a terminal finds. Setup never
+overwrites a file it did not write (the launcher is marked `imurun-shim`). It never edits
+the PATH when `IMURUN_NO_PATH=1` is set or in CI. `IMURUN_BIN_DIR=<dir>` puts the launcher
+somewhere else. `imurun install --force` points the launcher at the install you run it from.
+To undo it, delete the launcher and the `# >>> imurun >>>` block. Until then, `python -m imurun`
+always works.
+
+### `certificate verify failed` / `unable to get local issuer certificate` (unknown CA)
+
+IMURUN verifies HTTPS against the **operating system's trust store** (Windows certificate
+store, macOS Keychain, the Linux CA bundle) through `truststore`, the same library pip uses.
+So a corporate proxy's CA that IT installed on the machine is trusted, and the python.org
+macOS build works without running "Install Certificates.command". Verification is never turned
+off: self-signed or expired certificates are still rejected. `imurun doctor` shows
+`HTTPS certificates: system trust store`. If it says `python bundle`, run `imurun install --force`
+(it installs `truststore`). `IMURUN_NO_TRUSTSTORE=1` goes back to Python's own bundle.
+
+### Windows "unknown publisher" / macOS "unidentified developer" for the engine
+
+Release builds are signed when the project's signing identities are configured
+(`docs/setup/RELEASE.md`, "Code signing"). Every release file also carries a build-provenance
+attestation: `gh attestation verify fish-windows-x64.dll -R shubham001312/imurun` proves that
+the file came from this repository's release workflow. On macOS, a library you downloaded with a
+browser is quarantined. Use `imurun --get-engine` instead (checksum-verified, not quarantined),
+or remove the flag: `xattr -d com.apple.quarantine <file>`. `imurun doctor` names the file when
+that is the problem.
 
 ### `externally-managed-environment` (Debian/Ubuntu/Fedora, Homebrew Python)
 

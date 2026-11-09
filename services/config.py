@@ -106,7 +106,11 @@ def resolve_model_path(data_root: Path, model_id: Optional[str]) -> Optional[str
         return None
     try:
         from .model_manager import get_model_manager
-        manager = get_model_manager(str(data_root / "models"))
+        # The default manager: its folder is services.paths.models_dir() (the
+        # data root when installed, <repo>/models in a checkout). Passing
+        # data_root/models here created the process-wide manager on the wrong
+        # folder whenever the warm start ran first: no model looked downloaded.
+        manager = get_model_manager()
         path = manager.get_model_path(model_id)
         return str(path) if path else None
     except Exception:

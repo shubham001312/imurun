@@ -98,6 +98,23 @@ def _copy_tree(src: Path, dst: Path) -> None:
             shutil.copy2(Path(root) / name, target)
 
 
+def _clear_app_copy(pkg: Path) -> None:
+    """Remove everything build_py copies into ``pkg`` (never imurun/*.py itself)."""
+    tops = {Path(tree).parts[0] for tree in APP_TREES}
+    tops.update({Path(pattern).parts[0] for pattern in APP_GLOBS if "/" in pattern})
+    tops.add("bin")
+    for top in sorted(tops):
+        target = pkg / top
+        if target.is_dir():
+            shutil.rmtree(target)
+    for name in APP_FILES:
+        (pkg / name).unlink(missing_ok=True)
+    for pattern in APP_GLOBS:
+        if "/" not in pattern:
+            for stale in pkg.glob(pattern):
+                stale.unlink()
+
+
 class build_py(_build_py):
     """Also copy the app (and the engine) into build/lib/imurun/."""
 
@@ -106,6 +123,11 @@ class build_py(_build_py):
         if getattr(self, "editable_mode", False):
             return  # editable installs run the checkout itself (imurun/cli.py)
         pkg = Path(self.build_lib) / "imurun"
+        # setuptools reuses build/lib between builds and only ever adds to it,
+        # so a file deleted from the checkout (or an engine bundled by an
+        # earlier build) would ship again in every later wheel. Start the
+        # copied part of the package from empty on every build.
+        _clear_app_copy(pkg)
         for tree in APP_TREES:
             src = HERE / tree
             if src.is_dir():

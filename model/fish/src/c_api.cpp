@@ -137,10 +137,16 @@ fish_ctx* fish_create(void) {
 void fish_destroy(fish_ctx* ctx) {
     if (!ctx) return;
     ctx->cancel = true;
-    // Wait for any generation in flight before freeing the weights.
-    std::lock_guard<std::mutex> lock(ctx->mu);
-    ctx->model.reset();
-    ctx->tok.reset();
+    // Wait for any generation in flight before freeing the weights. The lock
+    // must be released before `delete ctx`: the mutex lives inside ctx, and a
+    // guard that outlives the delete unlocks freed memory, which zeroes the
+    // allocator's free-list pointers (glibc aborts later with "corrupted
+    // unsorted chunks"; ASan misses it because the write is inside libc).
+    {
+        std::lock_guard<std::mutex> lock(ctx->mu);
+        ctx->model.reset();
+        ctx->tok.reset();
+    }
     delete ctx;
 }
 
