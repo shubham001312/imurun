@@ -43,7 +43,8 @@ The handler class built by `_handler()` implements:
 | `_same_token(a, b)` | `secrets.compare_digest`; non-ASCII input returns `False` instead of raising. |
 | `_authorized()` | Requires `Authorization: Bearer <token>`; for `GET` only, accepts `?token=` (EventSource cannot set headers). Failure → `401` and a mark of the path (never the query). |
 | `_drain(length)` | Consumes a refused body so Windows clients can read the `413`. |
-| `_body()` | `Content-Length` must parse; over `max_body` → `413` (drain up to +64 KiB, else close); invalid JSON or non-object → `400`. Missing body is treated as `{}`. |
+| `_body()` | `Content-Length` must parse and be ≥ 0 (else `400`); over `max_body` → `413` (drain up to +64 KiB, else close); a read that stalls past `REQUEST_TIMEOUT` (60 s) → `408`; invalid JSON, `NaN`/`Infinity`/out-of-range numbers or a non-object → `400`. Missing body is treated as `{}`; a `null` text field counts as missing. |
+| `do_*` guard | An unexpected exception in a route → JSON `500 {"error": "internal error"}` (logged with the path only), never a dropped connection. |
 | `_static(path)` | Resolves under `static_root`, rejects traversal, serves only `STATIC_TYPES`, and substitutes `__IMURUN_TOKEN__` in `index.html`. |
 | `_stream()` | SSE: subscribes, sends `retry: 3000`, forwards named frames, `: ping` every 15 s idle, exits on `CLOSE` or a broken pipe. |
 | `_callback()` | `GET /oauth/callback`: pops the one-time state, completes the flow, renders an HTML result. |
