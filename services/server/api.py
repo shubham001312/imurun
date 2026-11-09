@@ -75,6 +75,7 @@ from ..tools.approvals import ApprovalBroker
 from ..tools.executor import ToolExecutor
 from ..tools.permissions import PermissionPolicy
 from .clients import ClientStore
+from . import openai_api  # /v1/* OpenAI-compatible API + /api/openai (key for the UI)
 from .events import CLOSE, EventBroker
 from .resources import ResourceSampler, handle_update as resources_update
 from ..resources import ResourceGovernor, set_governor, validate_settings as validate_resources
@@ -634,6 +635,9 @@ class ApiServer:
                 if not self._local():
                     return
                 path = unquote(urlsplit(self.path).path)
+                if openai_api.handles(path):  # own auth: API key on /v1
+                    openai_api.dispatch(server, self, "GET")
+                    return
                 if path == "/oauth/callback":
                     # Connector-owned page (account name, auto-close, `connector`
                     # event); the built-in _callback stays as the fallback.
@@ -888,6 +892,9 @@ class ApiServer:
 
             def do_POST(self) -> None:  # noqa: N802
                 if not self._local():
+                    return
+                if openai_api.handles(unquote(urlsplit(self.path).path)):  # own auth: API key on /v1
+                    openai_api.dispatch(server, self, "POST")
                     return
                 if not self._authorized():
                     return
