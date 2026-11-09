@@ -112,8 +112,9 @@ scope, write it down in the matching `*-REQUESTS.md` file instead of editing.
 - "Layer streaming" today = mmap + prefetch of the next layer + eviction of
   layers behind a 3-layer window when the model exceeds the RAM budget. There
   is no expert-level cache yet.
-- Architectures: llama, qwen2, qwen3, qwen35 (hybrid DeltaNet; CPU-only for its
-  DeltaNet layers, ~13.5 tok/s on the 2B), phi3, gemma2 (+ their MoE variants).
+- Architectures: llama, qwen2, qwen3, qwen35 (hybrid DeltaNet; matmuls on the GPU
+  per-matmul, recurrence on the CPU, no spans yet: ~32-36 tok/s on the 2B), phi3,
+  gemma2 (+ their MoE variants).
   Others fail at load with a clear message.
 - Voice: the server layer (`services/voice/`, `/api/voice/*`: faster-whisper STT, Piper TTS,
   system-voice fallback) exists and was measured with synthetic speech only (Piper -> Whisper

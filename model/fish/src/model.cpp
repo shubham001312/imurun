@@ -474,9 +474,11 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
         if (c.full_attn_interval <= 0 || c.ssm_state <= 0 || c.ssm_heads <= 0 ||
             c.ssm_conv_kernel <= 1 || c.ssm_inner <= 0 || c.ssm_inner % c.ssm_heads != 0)
             return fail("qwen35: bad ssm.* / full_attention_interval metadata");
-        // v1 runs the whole graph on the CPU: the mixer recurrence and the
-        // fused per-head q|gate path have no device-code path yet.
-        m->opts_.gpu_layers = 0;
+        // The Vulkan span has no DeltaNet (conv + recurrence) or fused q|gate
+        // code yet, so whole-layer spans are off; the matmuls still go to the
+        // GPU one at a time (per-matmul routing) and the recurrence, conv,
+        // norms and attention stay on the CPU.
+        m->opts_.allow_span = false;
     }
 
     // ---- architecture knobs
@@ -1309,7 +1311,7 @@ void LlamaModel::place_layers() {
         // so placement does not spend the whole budget and then find no room
         // for the device KV cache: f16 K+V per position per layer, plus a
         // small arena for activations.
-        const bool span_wanted = !cfg_.is_moe() &&
+        const bool span_wanted = !cfg_.is_moe() && opts_.allow_span &&
             !(std::getenv("FISH_GPU_SPAN") && std::atoi(std::getenv("FISH_GPU_SPAN")) == 0);
         const uint64_t kv_per_layer = span_wanted
             ? static_cast<uint64_t>(cfg_.n_ctx) * static_cast<uint64_t>(cfg_.kv_dim()) * 4ull : 0;
@@ -1350,7 +1352,9 @@ void LlamaModel::place_layers() {
         // sit on the device, and the output projection stays near the end.
         for (int li = cfg_.n_layers - 1; li >= 0 && gpu_layers_ < want && !span_planned; --li) {
             const LayerTensors& L = layers_[static_cast<size_t>(li)];
-            const TensorInfo* big[] = {L.wq, L.wk, L.wv, L.wo, L.wqkv, L.wg, L.wu, L.wd};
+            // (+ the DeltaNet projections; null on every other architecture)
+            const TensorInfo* big[] = {L.wq, L.wk, L.wv, L.wo, L.wqkv, L.wg, L.wu, L.wd,
+                                       L.wgate, L.ssm_out, L.ssm_alpha, L.ssm_beta};
             uint64_t need = 0;
             bool ok = true;
             for (const TensorInfo* t : big) {
@@ -1823,118 +1827,111 @@ bool LlamaModel::delta_mixer(const LayerTensors& L, int li, int pos0, int n_tok)
     const int K = cfg_.ssm_conv_kernel;
     const int NS = cfg_.ssm_state;
     const int NH = cfg_.ssm_heads;
-    if (NH > 64 || NS > 128 || K > 4) return false;
-    if (cfg_.conv_dim() != 3 * E) return false;  // v1: q|k|v branches are n_embd wide
+    if (NH > 64 || NS > 128 || K != 4) return false;
+    if (CD != 3 * E || G != E || NH * NS != G) return false;  // v1 geometry (2B / 9B)
     const size_t slot = static_cast<size_t>(delta_slot_[static_cast<size_t>(li)]);
     if (slot == static_cast<size_t>(-1)) return false;
+    const size_t T = static_cast<size_t>(n_tok);
 
-    // History row j holds the conv input of pos+j, so while computing token t:
-    // hist[0] = x[t-1], hist[1] = x[t-2], hist[2] = x[t-3].
+    // History row j holds the conv input of token t-1-j while computing t.
     float* hist = conv_hist_.data() + slot * (static_cast<size_t>(K) - 1) * static_cast<size_t>(CD);
     float* S0 = ssm_S_.data() + slot * static_cast<size_t>(NH) * NS * NS;
 
-    std::vector<float> knv(static_cast<size_t>(NS));
-    for (int t = 0; t < n_tok; ++t) {
-        const float* xr = row_ptr(xb_, t, E);
+    // 1. every projection that only reads the block input, batched over all
+    //    tokens (the caller already quantised xb_ into xq_): q|k|v (pre-conv),
+    //    the output gate z, and the per-head alpha / beta.  Doing these one
+    //    token at a time made prefill as slow as decode.
+    ensure(dn_qkv_, T * CD);
+    ensure(dn_z_, T * E);
+    ensure(dn_ab_, T * 2 * NH);
+    ensure(dn_o_, T * E);
+    {
+        const TensorInfo* ts[4] = {L.wqkv, L.wgate, L.ssm_alpha, L.ssm_beta};
+        const int ns[4] = {CD, E, NH, NH};
+        float* ys[4] = {dn_qkv_.data(), dn_z_.data(), dn_ab_.data(), dn_ab_.data() + T * NH};
+        matmul_tensors(ts, 4, xb_.data(), &xq_, n_tok, E, ns, ys);
+    }
+    const float* alpha = dn_ab_.data();
+    const float* beta_raw = dn_ab_.data() + T * NH;
 
-        // 1. x -> [q|k|v] into the (private, row-wide) conv stream
-        xq_.quantize(xr, 1, E);
-        matmul_tensor(L.wqkv, xr, &xq_, 1, E, CD, qkv_.data());
-        float* cur = qkv_.data();   // [CD]
+    ThreadPool& pool = ThreadPool::instance();
 
-        // 2. causal depthwise conv (kernel taps, newest tap last) + SiLU, then
-        //    rotate the history: hist = [x_t, x[t-1], x[t-2]]
-        //    Shift the history BEFORE writing x_t into row 0: writing first and
-        //    shifting after copied x_t into row 1 too, so the conv saw
-        //    [x_t, x_t, x[t-2]] instead of [x_t, x[t-1], x[t-2]] from token 2 on.
-        raw_.assign(cur, cur + CD);
-        for (int c = 0; c < CD; ++c) {
-            const float* cw = L.conv_w.data() + static_cast<size_t>(c) * static_cast<size_t>(K);
-            float acc = cw[K - 1] * cur[c];
-            acc += cw[K - 2] * hist[0 * CD + c];
-            acc += cw[K - 3] * hist[1 * CD + c];
-            acc += cw[K - 4] * hist[2 * CD + c];
-            acc /= (1.0f + std::exp(-acc));   // SiLU
-            cur[c] = acc;
+    // 2. causal depthwise conv (kernel 4, newest tap last) + SiLU, in place,
+    //    channel-parallel: each channel walks its own tokens and history.
+    pool.parallel_range(CD, [&](int c0, int c1) {
+        for (int c = c0; c < c1; ++c) {
+            const float* cw = L.conv_w.data() + static_cast<size_t>(c) * 4;
+            float h0 = hist[c], h1 = hist[CD + c], h2 = hist[2 * static_cast<size_t>(CD) + c];
+            for (size_t t = 0; t < T; ++t) {
+                float* p = dn_qkv_.data() + t * CD + c;
+                const float x = *p;
+                float acc = cw[3] * x + cw[2] * h0 + cw[1] * h1 + cw[0] * h2;
+                *p = acc / (1.0f + std::exp(-acc));   // SiLU
+                h2 = h1; h1 = h0; h0 = x;
+            }
+            hist[c] = h0; hist[CD + c] = h1; hist[2 * static_cast<size_t>(CD) + c] = h2;
         }
-        std::memmove(hist + 2 * static_cast<size_t>(CD), hist + 1 * static_cast<size_t>(CD),
-                     sizeof(float) * static_cast<size_t>(CD));
-        std::memmove(hist + 1 * static_cast<size_t>(CD), hist,
-                     sizeof(float) * static_cast<size_t>(CD));
-        std::memcpy(hist, raw_.data(), sizeof(float) * static_cast<size_t>(CD));
+    }, 256);
 
-        const float* k = cur + G;
-        const float* v = cur + 2 * G;
+    // 3. delta-rule recurrence, head-parallel (heads are independent; tokens
+    //    are sequential within a head).  Per token: L2-normalise q and k (q
+    //    also scaled by 1/sqrt(NS)), decay = exp(ssm_a * softplus(alpha +
+    //    dt_bias)), beta = sigmoid(beta_raw), then with S' = decay * S:
+    //      r = S'^T k,  delta = beta (v - r),  S = S' + k delta^T,  o = S^T q.
+    //    Two passes over S per token (read; update + output).  Then gated
+    //    RMSNorm(o, ssm_norm) * silu(z) into dn_o_.
+    const float inv = 1.0f / std::sqrt(static_cast<float>(NS));
+    pool.parallel_for(NH, [&](int h) {
+        float* S = S0 + static_cast<size_t>(h) * NS * NS;
+        float kn[128], qn[128], r[128], delta[128], o[128];
+        const float a_bias = L.dt_bias[static_cast<size_t>(h)];
+        const float a_neg = L.ssm_a[static_cast<size_t>(h)];
+        for (size_t t = 0; t < T; ++t) {
+            const float* row = dn_qkv_.data() + t * CD;
+            const float* qh = row + static_cast<size_t>(h) * NS;
+            const float* kh = row + G + static_cast<size_t>(h) * NS;
+            const float* vh = row + 2 * static_cast<size_t>(G) + static_cast<size_t>(h) * NS;
+            float ks = 0.0f, qs = 0.0f;
+            for (int d = 0; d < NS; ++d) { ks += kh[d] * kh[d]; qs += qh[d] * qh[d]; }
+            const float kf = 1.0f / std::sqrt(ks + 1e-6f);
+            const float qf = inv / std::sqrt(qs + 1e-6f);
+            for (int d = 0; d < NS; ++d) { kn[d] = kh[d] * kf; qn[d] = qh[d] * qf; }
 
-        // 3. input-dependent decays and write rates from the block input
-        float ab[128];
-        matmul_tensor(L.ssm_alpha, xr, &xq_, 1, E, NH, ab);
-        matmul_tensor(L.ssm_beta, xr, &xq_, 1, E, NH, ab + 64);
-
-        // 4. delta-rule recurrence per head (fp32 scratch in up_[t][0..G))
-        float* o = row_ptr(up_, t, cfg_.n_ff);
-        const float inv = 1.0f / std::sqrt(static_cast<float>(NS));
-        for (int h = 0; h < NH; ++h) {
-            const float* qh = cur + static_cast<size_t>(h) * NS;
-            const float* kh = k + static_cast<size_t>(h) * NS;
-            const float* vh = v + static_cast<size_t>(h) * NS;
-            float* S = S0 + static_cast<size_t>(h) * NS * NS;
-            float kn = 0.0f, qn = 0.0f;
-            for (int d = 0; d < NS; ++d) {
-                kn += kh[d] * kh[d];
-                qn += qh[d] * qh[d];
-            }
-            kn = 1.0f / std::sqrt(kn + 1e-6f);
-            qn = 1.0f / std::sqrt(qn + 1e-6f) * inv;
-            for (int d = 0; d < NS; ++d) {
-                knv[static_cast<size_t>(d)] = kh[d] * kn;
-            }
-            // scaled q on the fly
-            const float a_raw = ab[static_cast<size_t>(h)] + L.dt_bias[static_cast<size_t>(h)];
+            const float a_raw = alpha[t * NH + h] + a_bias;
             const float sp = a_raw > 30.0f ? a_raw : std::log1p(std::exp(a_raw));
-            const float gdec = L.ssm_a[static_cast<size_t>(h)] * sp;
-            const float decay = std::exp(gdec);
-            const float beta = 1.0f / (1.0f + std::exp(-ab[64 + static_cast<size_t>(h)]));
-            float* oh = o + static_cast<size_t>(h) * NS;
-            float delta[128];
-            for (int j = 0; j < NS; ++j) {
-                float rj = 0.0f;
-                for (int i = 0; i < NS; ++i)
-                    rj += S[static_cast<size_t>(i) * NS + j] * knv[static_cast<size_t>(i)];
-                // the read sees the DECAYED state: S' = decay*S, r = S'^T k
-                delta[j] = beta * (vh[j] - decay * rj);
-            }
+            const float decay = std::exp(a_neg * sp);
+            const float beta = 1.0f / (1.0f + std::exp(-beta_raw[t * NH + h]));
+
+            for (int j = 0; j < NS; ++j) r[j] = 0.0f;
             for (int i = 0; i < NS; ++i) {
-                // old state decays; the new rank-1 term does not
-                const float ki = knv[static_cast<size_t>(i)];
-                float* rowS = S + static_cast<size_t>(i) * NS;
+                const float ki = kn[i];
+                const float* Si = S + static_cast<size_t>(i) * NS;
+                for (int j = 0; j < NS; ++j) r[j] += Si[j] * ki;
+            }
+            for (int j = 0; j < NS; ++j) { delta[j] = beta * (vh[j] - decay * r[j]); o[j] = 0.0f; }
+            for (int i = 0; i < NS; ++i) {
+                const float ki = kn[i], qi = qn[i];
+                float* Si = S + static_cast<size_t>(i) * NS;
                 for (int j = 0; j < NS; ++j) {
-                    rowS[j] = rowS[j] * decay + ki * delta[j];
+                    const float s = Si[j] * decay + ki * delta[j];
+                    Si[j] = s;
+                    o[j] += s * qi;
                 }
             }
-            for (int j = 0; j < NS; ++j) {
-                float oj = 0.0f;
-                for (int i = 0; i < NS; ++i)
-                    oj += S[static_cast<size_t>(i) * NS + j] * (qh[i] * qn);
-                oh[j] = oj;
-            }
+            float* out = dn_o_.data() + t * E + static_cast<size_t>(h) * NS;
+            rmsnorm(out, o, L.ssm_norm_w.data(), NS, cfg_.eps);
+            const float* z = dn_z_.data() + t * E + static_cast<size_t>(h) * NS;
+            for (int d = 0; d < NS; ++d) out[d] *= z[d] / (1.0f + std::exp(-z[d]));
         }
+    });
 
-        // 5. gated output norm: RMSNorm(o, ssm_norm) * silu(z), z = attn_gate
-        float* z = row_ptr(gate_, t, 2 * cfg_.n_ff);
-        matmul_tensor(L.wgate, xr, &xq_, 1, E, E, z);
-        for (int d = 0; d < E; ++d) z[d] /= (1.0f + std::exp(-z[d]));   // silu
-        for (int h = 0; h < NH; ++h)
-            rmsnorm(o + static_cast<size_t>(h) * NS, o + static_cast<size_t>(h) * NS,
-                    L.ssm_norm_w.data(), NS, cfg_.eps);
-        for (int d = 0; d < E; ++d) o[d] *= z[d];
-
-        // 6. output projection and residual add
-        xq_.quantize(o, 1, E);
-        float* pr = row_ptr(proj_, t, E);
-        matmul_tensor(L.ssm_out, o, &xq_, 1, E, E, pr);
-        float* xr_out = row_ptr(x_, t, E);
-        for (int d = 0; d < E; ++d) xr_out[d] += pr[d];
+    // 4. output projection (batched) and residual add
+    xq_.quantize(dn_o_.data(), n_tok, E);
+    matmul_tensor(L.ssm_out, dn_o_.data(), &xq_, n_tok, E, E, proj_.data());
+    for (int t = 0; t < n_tok; ++t) {
+        float* xr = row_ptr(x_, t, E);
+        const float* pr = row_ptr(proj_, t, E);
+        for (int d = 0; d < E; ++d) xr[d] += pr[d];
     }
     return true;
 }

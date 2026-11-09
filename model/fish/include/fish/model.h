@@ -284,7 +284,8 @@ private:
     // per-head delta-rule state S. Indexed by delta-layer slot (rng order).
     std::vector<int> delta_slot_;      // layer index -> delta slot (or -1)
     std::vector<float> conv_hist_;     // [n_delta][kernel-1][conv_dim]
-    std::vector<float> raw_;           // [conv_dim] pre-conv q|k|v of the current token
+    // DeltaNet batch scratch: q|k|v stream, gate z, alpha|beta, normed output
+    std::vector<float> dn_qkv_, dn_z_, dn_ab_, dn_o_;
     std::vector<float> ssm_S_;         // [n_delta][heads][state][state]
 
     // Work buffers, sized for the largest batch FISH will prefill at once.

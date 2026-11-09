@@ -1,5 +1,37 @@
 # Engine changelog
 
+## 2026-11-09 — Qwen3.5 on the GPU: prefill 5×, decode 2.5–3×
+
+**Before.** `qwen35` loads forced `gpu_layers = 0` (the Vulkan span has no
+DeltaNet code), so the whole 2B ran on the CPU: 21–28 tok/s prefill and
+6.5–13 tok/s decode, while Qwen3-1.7B on the GPU decodes at 60–70.
+
+**Changes (`src/model.cpp`).**
+- Spans stay off for `qwen35` (`allow_span = false`), but the GPU layer cap is
+  gone: per-layer placement now also uploads the DeltaNet projections
+  (`attn_gate`, `ssm_out`, `ssm_alpha`, `ssm_beta`), so every matmul, including
+  the 248k-vocab output, runs on the GPU through per-matmul routing. The conv,
+  recurrence, norms and attention stay on the CPU. With spans off, the planner
+  no longer reserves span KV VRAM (`span_wanted` honours `allow_span`).
+- `delta_mixer` batches its four input projections over the whole chunk in
+  one `matmul_tensors` call (one grouped GPU dispatch), runs the causal conv
+  channel-parallel and the delta-rule recurrence head-parallel (two passes over
+  S per token instead of three), then does one batched `ssm_out`.
+
+**Result** (RTX 3050 Laptop, FISH_THREADS=4, 387-token prompt, 64 tokens, same
+session): prefill 28 → **149 tok/s**, decode ~12 → **~32 tok/s**; M2 decode
+35.9 tok/s, `test_fish.py` 35.5 tok/s. Output token-for-token identical to the
+CPU path on the probe prompts (Paris, counting). CPU-only, the new mixer is
+on par with Qwen3-1.7B (28.5 vs 28.8 tok/s prefill). Llama-1B / Qwen3-1.7B
+M1+M2+`test_fish.py` pass unchanged. Phi-3-mini: M1 passes; its M2 failures
+(GQA, prompt length) and the `test_fish.py` "fits in RAM" check (4.7 GB free at
+the time) fail identically with the previous DLL / on the CPU, so they are
+not from this change.
+
+**Not yet.** Whole-layer Vulkan spans for DeltaNet (conv + recurrence shaders,
+state in VRAM), which would remove the per-matmul round trips; chunked
+(WY/UT) prefill of the recurrence.
+
 ## 2026-11-09 — Qwen3.5 (`qwen35`, hybrid Gated DeltaNet) gives correct answers
 
 **Symptom.** Qwen3.5-2B-Q4_K_M loaded and wrote fluent English, but wrong:
