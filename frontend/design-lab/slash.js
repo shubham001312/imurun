@@ -24,6 +24,7 @@
   var COMMANDS = [
     { id: 'rename', name: 'Rename this session', description: 'Opens the rename dialog.', command: true },
     { id: 'model', name: 'Choose a model', description: 'Opens the model picker. /model <name> switches straight to that model.', command: true },
+    { id: 'permission', name: 'Access level', description: 'Manual, Ask for changes or Auto: how much IMURUN may do without asking.', command: true },
     { id: 'connect', name: 'Connect a hosted provider', description: 'Add an API key for NVIDIA, OpenRouter, DeepSeek and more. /connect nvidia opens that one.', command: true }
   ];
 

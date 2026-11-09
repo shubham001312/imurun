@@ -4,6 +4,21 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-09: Access level beside the composer, /permission, type-to-focus
+
+- `access.js`: an "Access" pill next to Plan / Build and a `/permission` (or
+  `/permissions`) command open one popover with three levels: **Manual** (asks
+  before every file read, change and command), **Ask for changes** (default:
+  reads run, changes and commands ask) and **Auto** (runs without asking;
+  deny-listed commands, protected files and credential folders stay blocked).
+  It saves `POST /api/permissions {mode}`, the same setting as Settings >
+  Permissions. Checked in the browser: Auto sets `allow-all` on the server,
+  and switching back restores `allow-reads`.
+- `typeahead.js`: typing on Home or Chat with nothing focused lands in the
+  message box (it used to be lost).
+- `hosted-models.js`: the model button and picker show the model the engine
+  is running even when it was loaded from outside the models folder.
+
 ## 2026-11-09: Skills page and the Add skill dialog
 
 - **Add skill** (`skills.js`, `styles/skills.css`) is one dialog with two tabs.

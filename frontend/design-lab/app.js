@@ -586,6 +586,11 @@
       IM.modelPicker.connectCommand(connect[1] || '');
       return true;
     }
+    /* `/permission` opens the access level popover (access.js). */
+    if (/^\/permissions?$/.test(value) && IM.access) {
+      IM.access.open();
+      return true;
+    }
     if (value !== '/rename' && value !== '/rename-session') return false;
     var row = document.querySelector('.session.active');
     if (!row) {

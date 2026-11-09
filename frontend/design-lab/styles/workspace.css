@@ -299,6 +299,42 @@
   .home-grid { grid-template-columns: 1fr; }
 }
 
+/* ---------------------------------------------------- access level (access.js) */
+.access-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border: 1px solid transparent; border-radius: 999px;
+  background: transparent; color: var(--muted); font-size: 12px;
+}
+.access-pill svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
+.access-pill strong { color: var(--text); font-weight: 550; }
+.access-pill:hover { background: var(--surface-2); border-color: var(--line); }
+.access-pill[data-mode="allow-all"] svg { color: var(--accent); }
+.access-pop {
+  position: fixed; z-index: 60; width: 360px; max-width: calc(100vw - 24px);
+  padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow); color: var(--text);
+}
+.access-pop.is-centred { left: 50%; top: 30%; transform: translateX(-50%); }
+.access-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 4px 8px; }
+.access-head strong { font: 600 13.5px/1.3 var(--font); }
+.access-x { border: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 6px; }
+.access-x:hover { background: var(--surface-2); color: var(--text); }
+.access-list { display: grid; gap: 4px; }
+.access-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start;
+  width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text); text-align: left;
+}
+.access-row:hover { background: var(--surface-2); }
+.access-row[aria-checked="true"] { border-color: var(--accent-line); background: var(--accent-soft); }
+.access-dot { width: 14px; height: 14px; margin-top: 2px; border: 1.5px solid var(--line-strong); border-radius: 50%; }
+.access-row[aria-checked="true"] .access-dot { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--surface), inset 0 0 0 7px var(--accent); }
+.access-copy { display: grid; gap: 2px; }
+.access-copy strong { font: 600 13px/1.3 var(--font); }
+.access-copy span { font: 400 12.5px/1.4 var(--font); color: var(--muted); }
+.access-foot { margin: 10px 4px 2px; font-size: 12px; color: var(--muted); }
+.access-link { border: 0; padding: 0; background: none; color: var(--text); text-decoration: underline; font: inherit; }
+
 /* Keyboard hints mean nothing on a phone. */
 @media (max-width: 860px), (pointer: coarse) {
   .side-new-kbd { display: none; }
