@@ -2,6 +2,24 @@
 
 The API contract itself is documented in `services/server/doc/README.md`.
 
+## 2026-11-09 — bugs found driving the running server end to end
+
+Found by running `python start.py --no-open` headless (provisioning state, then the
+CPU engine with Llama 3.2 1B) and probing every main route.
+
+- **Provisioning state said "ready" and accepted turns** (`model/fish_client.py`
+  `SyncFishModelClient.configured`). Without an engine library the client falls back to
+  the HTTP engine (`model/fish/src/server.cpp`), and `configured` was
+  `bool(server_url)`, which is always true (default `http://127.0.0.1:8731`). So
+  `/api/status` reported `runtime: "ready"`, `engine.available: true`, and
+  `POST /api/turns` answered 200 instead of `503 model_unavailable`; the turn then failed
+  ("Cannot connect to host 127.0.0.1:8731"). Now the HTTP engine counts as configured only
+  when its `/fish/health` answers (cached 5 s). Test: `tests/test_fish_http_backend.py`.
+- **HTTP engine: every turn after the first failed with "Event loop is closed"**
+  (`model/fish_client.py`). The aiohttp session was cached, but each synchronous call and
+  each streamed turn runs on its own short-lived event loop, and a session is bound to the
+  loop that created it. Each request now opens and closes its own session.
+
 ## 2026-11-03 — resource governor (resources owner)
 
 - `/api/resources` governor view grows `gpu` (detected with fallbacks, engine placement

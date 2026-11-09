@@ -59,8 +59,6 @@ class FishModelClient:
 
     def __init__(self, config: Optional[FishConfig] = None):
         self.config = config or FishConfig()
-        self._session = None
-        self._session_lock = asyncio.Lock()
         self._native = None
         if FishNativeClient is not None:
             candidate = FishNativeClient(self.config)
@@ -76,34 +74,34 @@ class FishModelClient:
 
     # ----------------------------------------------------------------- http
 
-    async def _get_session(self):
-        """Get or create the aiohttp session (imported lazily: the native
-        path does not need aiohttp at all)."""
+    def _new_session(self):
+        """A fresh aiohttp session for one request (imported lazily: the native
+        path does not need aiohttp at all).
+
+        Not cached: every synchronous call (``SyncFishModelClient._run``) and
+        every streamed turn runs on its own short-lived event loop, and an
+        aiohttp session is bound to the loop that created it. A cached one
+        made the second turn fail with "Event loop is closed". The engine is
+        on loopback, so a connection per request costs nothing measurable.
+        """
         import aiohttp
 
-        async with self._session_lock:
-            if self._session is None or self._session.closed:
-                timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
-                self._session = aiohttp.ClientSession(timeout=timeout)
-            return self._session
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
+        return aiohttp.ClientSession(timeout=timeout)
 
     async def close(self) -> None:
-        """Close the HTTP session and release the native engine."""
+        """Release the native engine (HTTP sessions close per request)."""
         if self._native is not None:
             self._native.close()
-        async with self._session_lock:
-            if self._session is not None and not self._session.closed:
-                await self._session.close()
-                self._session = None
 
     async def health(self) -> bool:
         """Check if the FISH engine can serve."""
         if self._native is not None:
             return self._native.health()
         try:
-            session = await self._get_session()
-            async with session.get(self.config.health_url) as response:
-                return response.status == 200
+            async with self._new_session() as session:
+                async with session.get(self.config.health_url) as response:
+                    return response.status == 200
         except Exception as e:  # noqa: BLE001
             logger.warning("FISH health check failed: %s", e)
             return False
@@ -113,11 +111,11 @@ class FishModelClient:
         if self._native is not None:
             return self._native.stats()
         try:
-            session = await self._get_session()
-            async with session.get(self.config.stats_url) as response:
-                if response.status == 200:
-                    return await response.json()
-                return {"error": f"HTTP {response.status}"}
+            async with self._new_session() as session:
+                async with session.get(self.config.stats_url) as response:
+                    if response.status == 200:
+                        return await response.json()
+                    return {"error": f"HTTP {response.status}"}
         except Exception as e:  # noqa: BLE001
             logger.warning("FISH stats request failed: %s", e)
             return {"error": str(e)}
@@ -135,12 +133,11 @@ class FishModelClient:
         return out
 
     async def _http_stream(self, payload: dict) -> AsyncGenerator[str, None]:
-        session = await self._get_session()
         # ensure_ascii=False keeps non-Latin text readable for the engine's
         # small JSON reader (it decodes \uXXXX too, but plain UTF-8 is cheaper).
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         try:
-            async with session.post(
+            async with self._new_session() as session, session.post(
                 self.config.stream_url,
                 data=body,
                 headers={"Accept": "text/event-stream", "Content-Type": "application/json"},
@@ -252,7 +249,11 @@ class SyncFishModelClient:
         native = self._native
         if native is not None:
             return bool(getattr(native, "configured", False))
-        return bool(getattr(self._async_client.config, "server_url", ""))
+        # HTTP engine (model/fish/src/server.cpp): configured means it answers
+        # its health probe (cached for a few seconds). ``server_url`` alone
+        # always has the default value, so it said "ready" on a machine with
+        # no engine at all and turns were accepted only to fail.
+        return self.health()
 
     @property
     def loaded(self) -> bool:
