@@ -1,5 +1,22 @@
 # Engine changelog
 
+## 2026-11-09 — heap corruption in `fish_destroy`
+
+- `src/c_api.cpp::fish_destroy`: the `lock_guard` on `ctx->mu` outlived
+  `delete ctx`, so its destructor unlocked a mutex inside freed memory. That
+  write zeroes the start of the freed block, where glibc keeps its free-list
+  pointers. Symptom: `test/test_fish.py` passed every check, then aborted at
+  interpreter exit with `free(): corrupted unsorted chunks` (exit 134). It
+  happened every run on Linux x86_64 with the 1B Llama, in both the Release
+  build and the main checkout's build. A load + `fish_destroy` alone was
+  enough to trigger it. ASan/UBSan builds (Debug and -O3) reported nothing: the
+  stray write happens inside libc's `pthread_mutex_unlock`, and ASan's
+  quarantine keeps freed blocks out of the free lists. The Python bindings call
+  `fish_destroy` on every unload, model switch and failed load
+  (`model/fish_native.py`), so the server could hit it too. → The lock is now
+  released before the delete. After the fix: `test_fish.py` passes with exit 0
+  (Release, 3 runs), and m1/m2/m5 pass (Release, ASan Debug, ASan Release).
+
 ## 2026-11-03 — default GPU residency for the 8B, warm loads in seconds, ABI 4
 
 Measured on the RTX 3050 Laptop (4 GB; the desktop held 0.63–0.80 GB of it),
