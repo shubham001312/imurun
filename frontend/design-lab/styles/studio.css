@@ -90,75 +90,60 @@
 }
 
 /* -------------------------------------------------------------------- home */
-.page-home { gap: 20px; padding: 56px 32px 56px; }
-.page-home > * { max-width: 920px; }
+/* A coding agent's start screen: where it works (the project folder), what to
+ * do (the composer), and what was done (recent work). Only the composer is
+ * raised; everything else sits flat on the canvas. */
+.page-home { gap: 18px; padding: 48px 32px 56px; }
+.page-home > * { max-width: 860px; }
 
-.home-hero {
-  position: relative;
-  padding: 30px 30px 24px !important;
-  border: 1px solid var(--line) !important;
-  border-radius: var(--studio-r-xl) !important;
-  background:
-    radial-gradient(120% 90% at 100% 0%, color-mix(in srgb, var(--accent) 7%, transparent) 0%, transparent 55%),
-    var(--surface) !important;
-  box-shadow: var(--studio-lift-hi) !important;
+.home-hero { padding: 0 !important; border: 0 !important; background: none !important; box-shadow: none !important; }
+
+.home-project {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 28px; padding: 8px 8px 8px 14px;
+  border: 1px solid var(--line); border-radius: var(--studio-r-md);
+  background: var(--surface);
 }
-.home-mark { display: inline-flex; margin-bottom: 14px; color: var(--accent); }
-.home-greeting { font-weight: 550; color: var(--accent); }
-.home-hero .home-title { margin-bottom: 20px; font-size: clamp(32px, 4vw, 46px); }
+.home-project-ico { width: 18px; height: 18px; flex: none; fill: none; stroke: var(--muted);
+  stroke-width: 1.7; stroke-linejoin: round; }
+.home-project-main { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1; }
+.home-project-k { flex: none; font: 500 12.5px/1 var(--font); color: var(--muted-soft); }
+.home-project-main code {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left;
+  font: 500 13px/1.3 var(--mono); color: var(--text); background: none; padding: 0;
+}
+.home-project-change { flex: none; padding: 6px 12px; border-radius: 9px; font-size: 12.5px; }
 
-/* Inside the slab the composer is an inset well, not a second card. */
+.home-greeting { margin-bottom: 4px; font-weight: 500; color: var(--muted); }
+.home-hero .home-title { margin-bottom: 8px; font-size: clamp(30px, 3.6vw, 42px); }
+.home-lede { margin: 0 0 22px; max-width: 60ch; font: 400 15px/1.55 var(--font); color: var(--muted); }
+
 .home-quick {
-  padding: 14px 14px 12px 18px;
+  padding: 16px 16px 12px 20px;
   border: 1px solid var(--line-strong); border-radius: var(--studio-r-lg);
-  background: var(--bg); box-shadow: none;
+  background: var(--surface); box-shadow: var(--studio-lift-hi);
 }
 .home-quick:focus-within { border-color: var(--accent-line);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
-.home-quick textarea { background: transparent; }
-.home-chip { padding: 6px 12px; background: var(--surface); }
+  box-shadow: var(--studio-lift-hi), 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
+.home-quick textarea { background: transparent; min-height: 96px; }
+.home-chip { padding: 6px 12px; background: var(--bg); }
+.home-chip:hover { background: var(--surface-2); }
 .home-send { border-radius: var(--studio-r-md); padding: 9px 16px; }
 
-.home-tiles {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
-}
-.home-tile {
-  display: grid; gap: 12px; align-content: start;
-  padding: 16px; min-height: 118px;
-  border: 1px solid var(--line); border-radius: var(--studio-r-lg);
-  background: var(--surface); color: var(--text); text-align: left;
-  box-shadow: var(--studio-lift);
-  transition: transform .16s var(--ease-std, ease), box-shadow .16s ease, border-color .16s ease;
-}
-.home-tile:hover { transform: translateY(-2px); border-color: var(--accent-line); box-shadow: var(--studio-lift-hi); }
-.home-tile:focus-visible { outline: none; box-shadow: var(--focus-ring); }
-.home-tile-ico {
-  width: 36px; height: 36px; display: grid; place-items: center;
-  border-radius: 11px; background: var(--accent-soft); color: var(--accent);
-}
-.home-tile-ico svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7;
-  stroke-linecap: round; stroke-linejoin: round; }
-.home-tile-copy { display: grid; gap: 3px; }
-.home-tile-copy strong { font: 600 14px/1.25 var(--font); }
-.home-tile-copy span { font: 400 12.5px/1.4 var(--font); color: var(--muted); }
-
+.home-grid { margin-top: 10px; }
 .home-recent, .home-machine {
   padding: 18px 20px 14px;
   border-radius: var(--studio-r-lg);
-  box-shadow: var(--studio-lift);
+  box-shadow: none;
 }
-.home-recent-row { border-radius: 10px; border-bottom-color: transparent; padding: 10px 10px; }
-.home-recent-row + .home-recent-row { box-shadow: 0 -1px 0 var(--line); }
-.home-recent-row:hover { box-shadow: none; }
+.home-recent-row { border-radius: 10px; padding: 10px 10px; }
 .home-check-act, .home-recent-head .btn { border-radius: 999px; }
 
-@media (max-width: 1100px) { .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 860px) {
   .page-home { padding: 20px 16px 40px; }
-  .home-hero { padding: 22px 18px 18px !important; }
+  .home-project-k { display: none; }
 }
-@media (max-width: 480px) { .home-tiles { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) {
-  .home-tile, .side-new { transition: none; }
-  .home-tile:hover, .side-new:hover { transform: none; }
+  .side-new { transition: none; }
+  .side-new:hover { transform: none; }
 }

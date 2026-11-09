@@ -97,7 +97,6 @@ INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bwho (?:is|'s) the (?:current |present |new )?(?:prime minister|pm|president|chief minister|"
         r"ceo|chairman|chairperson|governor|chancellor|mayor|captain|coach|champion|leader|pope|"
         r"king|queen)\b",
-        r"\b(?:right now|these days|at the moment|as of (?:today|now)|this (?:year|month|week))\b",
         r"\b(?:current|present|new|today'?s)\b.{0,20}\b(?:government|cabinet|administration|ruling party|"
         r"parliament|lineup|roster|standings|ranking|rankings|population|census)\b",
     ),
@@ -152,6 +151,22 @@ STOP_WORDS = {
 }
 
 
+# Questions about this computer (files, folders, apps, commands). The web
+# cannot answer them, so no fallback rule ever searches for them: "what's on
+# my desktop right now" searched the web and answered with news headlines.
+LOCAL_PATTERN = re.compile(
+    r"\b(?:my|this|the|our)\s+(?:desktop|documents|downloads|files?|folders?|director(?:y|ies)|"
+    r"computer|pc|laptop|machine|system|disk|drive|workspace|project|repo(?:sitory)?|code|terminal|"
+    r"screen|apps?|processes)\b|~/|\b[a-z]:\\|\b(?:on|in)\s+(?:desktop|documents|downloads)\b",
+    re.IGNORECASE,
+)
+
+
+def is_local(text: str) -> bool:
+    """True when the message is about this computer, not the outside world."""
+    return bool(LOCAL_PATTERN.search(text or ""))
+
+
 def detect_intents(text: str) -> list[str]:
     """Tool names worth running for this message, in a stable order."""
     lowered = (text or "").lower()
@@ -162,6 +177,9 @@ def detect_intents(text: str) -> list[str]:
         for name, patterns in INTENT_PATTERNS.items()
         if any(re.search(pattern, lowered) for pattern in patterns)
     ]
+    if "web_search" in found and is_local(text) and not re.search(
+            r"\b(?:search|look up|google)\b", lowered):
+        found.remove("web_search")
     return found
 
 

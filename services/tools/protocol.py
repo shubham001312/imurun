@@ -14,6 +14,8 @@ Three pieces, kept short because small models follow short rules:
 """
 from __future__ import annotations
 
+import sys
+
 import json
 from typing import Any, Iterable
 
@@ -80,6 +82,14 @@ def tool_prompt(tools: list[Any], *, max_steps: int, full: bool = False, workspa
         where = f" (workspace: {workspace})" if workspace else ""
         lines.append(f"- Anything about files, folders or commands on this computer{where}. "
                      "Relative paths are inside the workspace.")
+        if names & {"file_write", "shell"}:
+            opener = ("start \"\"" if sys.platform.startswith("win") else
+                      "open" if sys.platform == "darwin" else "xdg-open")
+            lines.append("- You are a coding agent on this computer. To build something, create the files "
+                         "with make_dir and file_write, then run, build or test them with shell, read the "
+                         "errors and fix them; keep going until it works. To open a file, folder, web page "
+                         f"or app for the user, run shell with: {opener} <target>. Act; do not just explain "
+                         "how.")
         if folders:
             lines.append("- You can also use these folders with absolute or ~ paths: "
                          + ", ".join(folders) + ". The user approves reads there with a card. "

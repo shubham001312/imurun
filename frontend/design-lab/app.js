@@ -702,6 +702,16 @@
       greeting.textContent = hour < 5 ? 'Working late' : hour < 12 ? 'Good morning'
         : hour < 18 ? 'Good afternoon' : 'Good evening';
     }
+    // The folder the agent works in, so it is clear where code will be written.
+    var projectPath = byId('home-project-path');
+    var api = window.__imurun_api;
+    if (projectPath && api && api.getPermissions) {
+      api.getPermissions().then(function (view) {
+        var values = (view && (view.values || view)) || {};
+        var root = values.workspaceRoot || (view && view.workspace) || '';
+        if (root) { projectPath.textContent = '\u200e' + root + '\u200e'; projectPath.title = root; }
+      }, function () {});
+    }
     var quick = byId('home-quick');
     var homePrompt = byId('home-prompt');
     if (quick && homePrompt) {

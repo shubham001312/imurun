@@ -493,6 +493,54 @@ class FileTokenStore:
 
 
 # --------------------------------------------------------------- choosing
+class MirroredStore:
+    """The OS store first, with an encrypted file copy as a fallback.
+
+    A locked Linux keyring (or a Keychain that wants a password) cannot be
+    read at start-up without a prompt, so saved API keys looked "lost" after
+    every restart. Each write now also goes to the encrypted file store; a
+    read falls back to it when the OS store is locked, slow or empty. Only
+    used when the file is encrypted (never a plain-text copy).
+    """
+
+    def __init__(self, primary, fallback) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.encrypted = True
+        self.warning = ""
+
+    def get(self, provider: str) -> str | None:
+        try:
+            value = self.primary.get(provider)
+        except Exception:  # noqa: BLE001 - locked or unavailable: use the copy
+            value = None
+        if value:
+            return value
+        try:
+            return self.fallback.get(provider)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def set(self, provider: str, token: str) -> None:
+        _require(provider, token)
+        self.fallback.set(provider, token)  # always lands, even with the keyring locked
+        try:
+            self.primary.set(provider, token)
+        except Exception:  # noqa: BLE001 - the encrypted copy holds it
+            pass
+
+    def delete(self, provider: str) -> None:
+        for store in (self.primary, self.fallback):
+            try:
+                store.delete(provider)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def backend_name(self) -> str:
+        name = self.primary.backend_name() if hasattr(self.primary, "backend_name") else "os store"
+        return f"{name} + encrypted file"
+
+
 def build_secret_store(home: Path | str, *, platform: str | None = None,
                        which: Callable[[str], str | None] = shutil.which, runner: Runner = _run,
                        keyring_module=None, choice: str | None = None):
@@ -506,10 +554,18 @@ def build_secret_store(home: Path | str, *, platform: str | None = None,
         return FileTokenStore(file_path)
     if choice in ("", "keyring", "auto") and keyring_module is not False:
         try:
-            return KeyringTokenStore(module=keyring_module)
+            primary = KeyringTokenStore(module=keyring_module)
         except TokenStoreUnavailable:
             if choice == "keyring":
                 raise
+        else:
+            if choice == "keyring":
+                return primary
+            try:
+                copy = FileTokenStore(file_path)
+            except Exception:  # noqa: BLE001 - no file store: keyring alone
+                return primary
+            return MirroredStore(primary, copy) if copy.encrypted else primary
     if choice in ("", "auto", "keychain") and platform == "darwin" and which("security"):
         return MacKeychainStore(runner=runner, binary=which("security") or "security")
     if choice == "keychain":
