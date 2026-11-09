@@ -1,7 +1,10 @@
 """Shared fixtures for the tuning tests: fixture transcripts and a fake backend."""
 from __future__ import annotations
 
+import collections
 import json
+import shutil
+import types
 from pathlib import Path
 
 from services.sessions.transcript import TranscriptStore
@@ -21,6 +24,28 @@ def laptop() -> Hardware:
     return Hardware(gpu_name="RTX 3050 Laptop", vram_total_gb=4.0, vram_free_gb=3.5,
                     ram_total_gb=16.0, ram_free_gb=8.0, commit_limit_gb=21.4, cpu_threads=16,
                     disk_free_gb=300.0)
+
+
+_DiskUsage = collections.namedtuple("_DiskUsage", "total used free")
+
+
+def roomy_disk(monkeypatch, *, free_gb: float = 300.0, total_gb: float = 1000.0) -> None:
+    """Give the resource governor's disk probe a fixed, roomy disk.
+
+    ``ResourceGovernor.check_disk`` (the tuning scheduler's disk guard) reads
+    ``shutil.disk_usage`` of the filesystem under ``tmp_path``. On a machine
+    whose /tmp is a small tmpfs that left the job tests passing or failing
+    with whatever happened to be free ("Not enough disk for downloading the
+    original weights"). Only the governor module's view is replaced, so the
+    real headroom rule still runs, against a known disk.
+    """
+    from services.resources import governor
+
+    gb = 1024 ** 3
+    usage = _DiskUsage(int(total_gb * gb), int((total_gb - free_gb) * gb), int(free_gb * gb))
+    fake = types.SimpleNamespace(**{k: getattr(shutil, k) for k in dir(shutil) if not k.startswith("__")})
+    fake.disk_usage = lambda path: usage
+    monkeypatch.setattr(governor, "shutil", fake)
 
 
 def turn(store: TranscriptStore, session: str, turn_id: str, prompt: str, *answers: str) -> None:

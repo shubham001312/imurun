@@ -10,11 +10,12 @@ from services import model_manager as mm
 from services.server.settings import SettingsStore
 from services.tuning.paths import TuningPaths
 from services.tuning.scheduler import Scheduler, validate_settings
-from tests.tuning_fakes import FakeBackend, fixture_sessions, laptop
+from tests.tuning_fakes import roomy_disk, FakeBackend, fixture_sessions, laptop
 
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
+    roomy_disk(monkeypatch)  # the disk guard must not read this machine's /tmp
     monkeypatch.setattr(mm, "FISH_COMPATIBLE_IDS", set(mm.FISH_COMPATIBLE_IDS))
     catalogue = dict(mm.RECOMMENDED_MODELS)
     store, fb = fixture_sessions(tmp_path)
