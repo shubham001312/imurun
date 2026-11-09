@@ -66,6 +66,15 @@ CPU engine with Llama 3.2 1B) and probing every main route.
   `locate_root`): with no `docker-compose.yml` anywhere it returned `stack.py` itself, so
   `root` was `.../services/server/stack.py` and `compose_file`
   `.../stack.py/docker-compose.yml`. Now its folder. Test: `tests/test_stack_root.py`.
+- **After the first launch that selected a model, every later launch showed no model
+  downloaded** (`services/config.py` `resolve_model_path`, called by the warm start). It
+  created the process-wide model manager on `<data root>/models`; in a source checkout the
+  models live in `<repo>/models` (`services.paths.models_dir()`). So on the second start
+  the warm start found nothing (`warm_start.state` stayed `idle`), `GET /api/models` listed
+  every model as not downloaded and `POST /api/models/select` answered 404 for the whole
+  session. It now uses the default manager. Measured on restart: warm start loads the 1B
+  with no user action, `downloaded: true`. Installed copies were not affected (`start.py`
+  pins the manager to the data root first). Test: `tests/test_last_model_resolve.py`.
 
 ## 2026-11-03 — resource governor (resources owner)
 
