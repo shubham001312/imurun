@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>json — JSON encoder and decoder &#8212; Example Docs</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/docs.css">
+</head>
+<body>
+<div class="skip-link"><a href="#content">Skip to main content</a></div>
+<div class="related" role="navigation" aria-label="related navigation">
+  <ul><li><a href="/index">index</a></li><li><a href="/modules">modules</a></li><li><a href="/next">next</a></li></ul>
+</div>
+<div class="document">
+  <div class="sphinxsidebar" role="navigation">
+    <h3>Table of Contents</h3>
+    <ul><li><a href="#basic-usage">Basic Usage</a></li><li><a href="#encoders">Encoders and Decoders</a></li></ul>
+    <div id="searchbox"><form><input type="text" name="q"><input type="submit" value="Go"></form></div>
+  </div>
+  <div class="documentwrapper">
+    <div class="body" role="main" id="content">
+      <section id="module-json">
+        <h1>json &#8212; JSON encoder and decoder</h1>
+        <p><strong>Source code:</strong> <a href="/src/json">Lib/json/__init__.py</a></p>
+        <p>JSON (JavaScript Object Notation) is a lightweight data interchange format inspired by JavaScript object literal syntax, although it is not a strict subset of JavaScript.</p>
+        <p>The module exposes an API familiar to users of the standard library marshal and pickle modules. Encoding basic Python object hierarchies is straightforward:</p>
+<pre>&gt;&gt;&gt; import json
+&gt;&gt;&gt; json.dumps(['foo', {'bar': ('baz', None, 1.0, 2)}])
+'["foo", {"bar": ["baz", null, 1.0, 2]}]'</pre>
+        <section id="basic-usage">
+          <h2>Basic Usage</h2>
+          <p>The function <code>json.dump(obj, fp)</code> serializes <em>obj</em> as a JSON formatted stream to <em>fp</em>, a file-like object supporting write().</p>
+          <p>If <em>skipkeys</em> is true, then dict keys that are not of a basic type are skipped instead of raising a TypeError.</p>
+          <table class="docutils">
+            <thead><tr><th>JSON</th><th>Python</th></tr></thead>
+            <tbody>
+              <tr><td>object</td><td>dict</td></tr>
+              <tr><td>array</td><td>list</td></tr>
+              <tr><td>string</td><td>str</td></tr>
+              <tr><td>number (int)</td><td>int</td></tr>
+            </tbody>
+          </table>
+          <div class="admonition note"><p class="admonition-title">Note</p><p>JSON is a subset of YAML 1.2, so the output of this module is also valid YAML in most cases.</p></div>
+        </section>
+      </section>
+    </div>
+  </div>
+</div>
+<div class="footer">&copy; Copyright 2001-2026, Example Foundation. <a href="/bugs">Found a bug?</a></div>
+<script src="/static/searchtools.js"></script>
+</body>
+</html>

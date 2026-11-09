@@ -1,0 +1,139 @@
+/* User preferences (Settings > Customisation), applied on top of any theme.
+ * theme.js writes the attributes on <body>; this file gives them meaning.
+ * Loaded last so a preference always beats a theme's default.
+ */
+
+/* ------------------------------------------------------------ text size */
+
+.transcript .bubble { font-size: calc(var(--text-base) * var(--font-scale)); }
+.transcript .md-table { font-size: calc(var(--text-md) * var(--font-scale)); }
+.transcript .md-code { font-size: calc(12.5px * var(--font-scale)); }
+.transcript .md-code-inline { font-size: calc(12px * var(--font-scale)); }
+.transcript h2.md-h { font-size: calc(18px * var(--font-scale)); }
+.transcript h3.md-h { font-size: calc(16px * var(--font-scale)); }
+.transcript .thinking-body { font-size: calc(12px * var(--font-scale)); }
+.input-wrap textarea { font-size: calc(var(--text-base) * var(--font-scale)); }
+
+/* -------------------------------------------------------------- density */
+
+body[data-density="compact"] {
+  --msg-gap: 10px;
+  --bubble-pad: 8px 11px;
+  --row-py: 5px;
+  --page-pad: 18px 22px 30px;
+  --card-pad: 13px;
+  --composer-pad: 10px 16px 12px;
+}
+body[data-density="spacious"] {
+  --msg-gap: 26px;
+  --bubble-pad: 15px 18px;
+  --row-py: 10px;
+  --page-pad: 34px 36px 52px;
+  --card-pad: 22px;
+  --composer-pad: 18px 24px 22px;
+}
+.transcript { gap: var(--msg-gap); }
+.bubble { padding: var(--bubble-pad); }
+.session, .nav-item { padding-top: var(--row-py); padding-bottom: var(--row-py); }
+.page-scroll { padding: var(--page-pad); }
+.settings-card { padding: var(--card-pad); }
+.composer { padding: var(--composer-pad); }
+
+/* Narrow windows keep a 16px gutter whatever the density. */
+@media (max-width: 860px) {
+  .page-scroll { padding: 18px 16px 30px; }
+  .composer { padding: 10px 12px 12px; }
+  .transcript { padding-left: 14px; padding-right: 14px; }
+}
+
+/* --------------------------------------------------------- background motion */
+
+body[data-motion="none"],
+body[data-motion="none"]::before,
+body[data-motion="none"] .ambient-orb,
+body[data-motion="none"] .ambient-sheen,
+body[data-motion="none"] .home-hero::after { animation: none !important; }
+body[data-motion="washes"]::before,
+body[data-motion="washes"] .ambient-orb,
+body[data-motion="washes"] .ambient-sheen { animation: none !important; }
+body[data-motion="drift"] { animation: none !important; }
+
+/* ------------------------------------------------------------ ambient light */
+
+body[data-ambient="none"] .ambient,
+body[data-ambient="none"] .pointer-glow { display: none; }
+body[data-ambient="warm"] .ambient-orb.ambient-c { display: none; }
+body[data-ambient="cool"] .ambient-orb.ambient-a,
+body[data-ambient="cool"] .ambient-orb.ambient-b { display: none; }
+
+/* --------------------------------------------------------------- glass */
+
+body[data-glass="clear"] .bubble,
+body[data-glass="clear"] .input-wrap,
+body[data-glass="clear"] .panel,
+body[data-glass="clear"] .sidebar,
+body[data-glass="clear"] .topbar {
+  -webkit-backdrop-filter: blur(6px) saturate(115%);
+  backdrop-filter: blur(6px) saturate(115%);
+}
+body[data-glass="tinted"] .bubble,
+body[data-glass="tinted"] .input-wrap,
+body[data-glass="tinted"] .panel,
+body[data-glass="tinted"] .sidebar,
+body[data-glass="tinted"] .topbar {
+  -webkit-backdrop-filter: blur(38px) saturate(175%);
+  backdrop-filter: blur(38px) saturate(175%);
+}
+
+/* -------------------------------------------------------- custom accent */
+
+/* Themes paint the send button with a fixed gradient; a chosen accent must
+ * win, or the most visible accent surface would ignore the picker. */
+body[data-accent="custom"] .send,
+body[data-accent="custom"] .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent-line);
+  color: var(--accent-text);
+}
+body[data-accent="custom"] .logo,
+body[data-accent="custom"] .nav-item.active { color: var(--accent); }
+
+/* ------------------------------------------------------- reduced motion */
+
+/* Forced from Settings, or asked for by the OS: everything settles at once.
+ * Spinners keep turning slowly so "working" stays readable. */
+body[data-reduced-motion="1"] *,
+body[data-reduced-motion="1"] *::before,
+body[data-reduced-motion="1"] *::after {
+  animation-duration: .001s !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001s !important;
+  scroll-behavior: auto !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001s !important;
+    scroll-behavior: auto !important;
+  }
+}
+body[data-reduced-motion="1"] .web-search-spinner,
+body[data-reduced-motion="1"] .notif-spinner {
+  animation-duration: 2.4s !important;
+  animation-iteration-count: infinite !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .web-search-spinner, .notif-spinner {
+    animation-duration: 2.4s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* ------------------------------------------------------- theme switching */
+
+html.theme-switching body,
+html.theme-switching body * {
+  transition: background-color .35s var(--ease-std), color .35s var(--ease-std),
+    border-color .35s var(--ease-std), fill .35s var(--ease-std) !important;
+}

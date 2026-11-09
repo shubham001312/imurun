@@ -1,0 +1,75 @@
+/* Loading skeletons.
+ *
+ * A skeleton is honest: it says "the server has not answered yet" and never
+ * invents a row. Every renderer replaces these nodes with real data or an
+ * empty state, so a skeleton can never survive a successful load.
+ */
+
+.sk {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.sk::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, .55),
+    transparent
+  );
+  animation: sk-shimmer 1.4s ease-in-out infinite;
+}
+
+.sk-row {
+  height: 44px;
+  margin-bottom: 8px;
+}
+
+.sk-row.short { height: 34px; }
+
+.sk-card {
+  height: 132px;
+}
+
+.sk-line {
+  height: 10px;
+  margin: 10px 14px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.sk-line.wide { width: 70%; }
+.sk-line.mid { width: 45%; }
+.sk-line.narrow { width: 28%; }
+
+.sk-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.sk-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes sk-shimmer {
+  100% { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk::after { animation: none; }
+}

@@ -1,0 +1,218 @@
+# IMURUN: build the FISH engine library on each OS (reusable).
+#
+# Called by ci.yml (every push/PR) and workflow.yml (releases). Uploads one
+# artifact per platform, named engine-<platform>, holding the library under
+# its release-asset name:
+#
+#   engine-windows-x64   fish-windows-x64.dll        MinGW-w64 GCC (MSYS2 UCRT64), static, Vulkan ON
+#   engine-linux-x64     libfish-linux-x64.so        GCC in manylinux_2_28 (glibc 2.28+), Vulkan ON
+#   engine-macos-arm64   libfish-macos-arm64.dylib   Apple clang, Vulkan OFF (no MoltenVK path)
+#
+# MSVC is not supported (the kernels use GCC target attributes), hence MSYS2.
+# The Vulkan backend needs only the headers at build time (the loader is
+# opened at run time and shaders come from shaders/prebuilt when glslc is
+# absent), so no Vulkan SDK is installed: Windows uses the MSYS2 headers
+# package, Linux a pinned clone of KhronosGroup/Vulkan-Headers.
+# The C++ tests need a GGUF model, so they are compiled (FISH_BUILD_TESTS) but
+# not run here.
+name: Engine
+
+on:
+  workflow_call:
+    inputs:
+      sign:
+        description: "Sign the libraries (release builds; only when signing is configured)"
+        type: boolean
+        default: false
+    secrets:
+      AZURE_CLIENT_ID: {required: false}
+      AZURE_TENANT_ID: {required: false}
+      AZURE_SUBSCRIPTION_ID: {required: false}
+      APPLE_CERT_P12: {required: false}
+      APPLE_CERT_PASSWORD: {required: false}
+      APPLE_ID: {required: false}
+      APPLE_APP_PASSWORD: {required: false}
+  workflow_dispatch:
+
+# Code signing (publisher identity; without it Windows Smart App Control /
+# SmartScreen can block or warn about an "unknown publisher", and macOS
+# Gatekeeper about an "unidentified developer"). Runs only for releases
+# (workflow.yml passes sign: true + secrets: inherit) and only when configured;
+# otherwise the step is skipped and the release still ships. Setup:
+# docs/setup/RELEASE.md, "Code signing".
+#   Windows (Azure Artifact Signing, OIDC): vars AZURE_SIGNING_ENDPOINT,
+#     AZURE_SIGNING_ACCOUNT, AZURE_CERT_PROFILE; secrets AZURE_CLIENT_ID,
+#     AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
+#   macOS (Developer ID + notarization): var APPLE_SIGNING_IDENTITY
+#     ("Developer ID Application: <name> (<team>)"), APPLE_TEAM_ID; secrets
+#     APPLE_CERT_P12 (base64), APPLE_CERT_PASSWORD, APPLE_ID, APPLE_APP_PASSWORD.
+
+# No top-level `permissions:`: a called workflow can only narrow the caller's
+# token, and naming one permission here would drop the `id-token: write` that
+# workflow.yml grants for the Azure signing login (OIDC). ci.yml calls this
+# with contents: read only, so CI and fork PRs stay read-only.
+
+env:
+  VULKAN_HEADERS_TAG: v1.3.296
+
+jobs:
+  windows:
+    name: Engine (Windows x64, MinGW)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e  # v2.33.0
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-vulkan-headers
+      - name: Build
+        working-directory: model/fish
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=ON
+          ninja -C build
+      - name: Azure login (code signing)
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign fish.dll (Authenticode, Azure Artifact Signing)
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82  # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\model\fish\build
+          files-folder-filter: dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Verify the signature
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature model\fish\build\fish.dll
+          "{0}: {1}" -f $sig.Status, $sig.SignerCertificate.Subject
+          if ($sig.Status -ne 'Valid') { throw "fish.dll signature is $($sig.Status)" }
+      - name: Signing not configured
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT == '' }}
+        shell: bash
+        run: echo "::warning::fish.dll is unsigned (Azure Artifact Signing not configured, see docs/setup/RELEASE.md)"
+      - name: Check it is self-contained
+        working-directory: model/fish
+        run: |
+          objdump -p build/fish.dll | grep "DLL Name" | tee deps.txt
+          if grep -iE "libstdc|libgcc|libwinpthread" deps.txt; then
+            echo "::error::fish.dll depends on MinGW runtime DLLs; it must link statically"; exit 1
+          fi
+          mkdir -p ../../engine-out
+          cp build/fish.dll ../../engine-out/fish-windows-x64.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-windows-x64
+          path: engine-out/
+          if-no-files-found: error
+
+  linux:
+    name: Engine (Linux x64, manylinux_2_28)
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          /opt/python/cp312-cp312/bin/python -m pip install --upgrade cmake ninja
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+          git clone --depth 1 --branch "$VULKAN_HEADERS_TAG" https://github.com/KhronosGroup/Vulkan-Headers.git /opt/vulkan-headers
+      - name: Build
+        working-directory: model/fish
+        env:
+          VULKAN_SDK: /opt/vulkan-headers
+        run: |
+          gcc --version | head -1
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=ON
+          ninja -C build
+      - name: Check dependencies
+        working-directory: model/fish
+        run: |
+          objdump -p build/libfish.so | grep NEEDED
+          mkdir -p ../../engine-out
+          cp build/libfish.so ../../engine-out/libfish-linux-x64.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-linux-x64
+          path: engine-out/
+          if-no-files-found: error
+
+  macos:
+    name: Engine (macOS arm64, clang)
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: brew install ninja
+      - name: Build
+        working-directory: model/fish
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=OFF \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=arm64
+          ninja -C build
+      - name: Sign libfish.dylib (Developer ID + notarization, else ad-hoc)
+        working-directory: model/fish
+        env:
+          SIGN: ${{ inputs.sign && vars.APPLE_SIGNING_IDENTITY != '' }}
+          IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          lib=build/libfish.dylib
+          if [ "$SIGN" = "true" ]; then
+            kc="$RUNNER_TEMP/signing.keychain-db"; kcpw="$(uuidgen)"
+            echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security create-keychain -p "$kcpw" "$kc"
+            security set-keychain-settings -lut 3600 "$kc"
+            security unlock-keychain -p "$kcpw" "$kc"
+            security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -k "$kcpw" "$kc" >/dev/null
+            security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+            rm -f "$RUNNER_TEMP/cert.p12"
+            codesign --force --timestamp --options runtime --sign "$IDENTITY" --keychain "$kc" "$lib"
+            ditto -c -k "$lib" "$RUNNER_TEMP/libfish.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/libfish.zip" --apple-id "$APPLE_ID" \
+              --team-id "$TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          else
+            # arm64 macOS refuses to load code without a valid signature; make sure
+            # the library carries an intact ad-hoc one (no publisher identity).
+            codesign --force --sign - "$lib"
+            if [ "${{ inputs.sign }}" = "true" ]; then
+              echo "::warning::libfish.dylib is ad-hoc signed only (Developer ID not configured, see docs/setup/RELEASE.md)"
+            fi
+          fi
+          codesign --verify --strict --verbose=2 "$lib"
+          codesign -dv "$lib" 2>&1 | grep -E "Authority|Signature|TeamIdentifier" || true
+      - name: Check dependencies
+        working-directory: model/fish
+        run: |
+          otool -L build/libfish.dylib
+          mkdir -p ../../engine-out
+          cp build/libfish.dylib ../../engine-out/libfish-macos-arm64.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine-macos-arm64
+          path: engine-out/
+          if-no-files-found: error

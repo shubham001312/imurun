@@ -1,0 +1,98 @@
+#version 450
+// FISH Vulkan backend - prefill matmul on the tensor cores
+// (VK_KHR_cooperative_matrix, f16 x f16 -> f32, 16x16x16 per subgroup op).
+//
+// y[y_off + t*n_out + row] = dot(W_row, x_t) for a 64-row x 64-token tile.
+// Per K-chunk of 32: threads 0..63 dequantise one weight row each (the same
+// dequant32 as every other kernel) into f16 shared memory, threads 64..127
+// convert one token's 32 activations; then each of the 4 subgroups multiplies
+// its 32 x 32 quarter as 2 x 2 accumulator tiles over two k-steps. The f32
+// result goes through shared memory so partial tiles are written guarded.
+// Selected by the backend for n_tok > matvec_max when the device reports the
+// 16x16x16 f16/f32 configuration; matmul_tiled.comp otherwise.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_cooperative_matrix : require
+#extension GL_KHR_memory_scope_semantics : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_KHR_shader_subgroup_basic : require
+
+#define BM 64u
+#define BN 64u
+#define BK 32u
+#define LDW 40u      // f16 row stride of the shared tiles (32 + 8: fewer bank conflicts)
+#define LDC 68u      // f32 stride of the shared result tile
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+#include "dequant.glsl"
+
+layout(std430, binding = 1) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 2) writeonly buffer YBuf { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint n_in;
+    uint n_out;
+    uint n_tok;
+    uint row_bytes;
+    uint y_off;
+    uint x_off;
+} pc;
+
+shared float16_t Ws[BM * LDW];   // [row][k]
+shared float16_t Xs[BN * LDW];   // [token][k]
+shared float Cs[BM * LDC];       // [row][token]
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint row0 = gl_WorkGroupID.x * BM;
+    const uint tok0 = gl_WorkGroupID.y * BN;
+    const uint sg = tid / 32u;                 // 4 subgroups of 32 (NVIDIA / AMD wave32)
+    const uint sr = (sg & 1u) * 32u;           // this subgroup's 32 rows
+    const uint st = (sg >> 1) * 32u;           // and 32 tokens
+
+    coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator> acc[2][2];
+    for (uint i = 0u; i < 2u; ++i)
+        for (uint j = 0u; j < 2u; ++j)
+            acc[i][j] = coopmat<float, gl_ScopeSubgroup, 16, 16, gl_MatrixUseAccumulator>(0.0);
+
+    const bool is_w = tid < 64u;
+    const uint lr = tid & 63u;
+    const uint lrow = row0 + lr, ltok = tok0 + lr;
+    const bool ok = is_w ? lrow < pc.n_out : ltok < pc.n_tok;
+    const uint ro = lrow * pc.row_bytes;
+    const uint xo = pc.x_off + ltok * pc.n_in;
+
+    for (uint k0 = 0u; k0 < pc.n_in; k0 += BK) {
+        if (is_w) {
+            float v[32];
+            if (ok) dequant32(ro, k0, v);
+            else for (uint i = 0u; i < 32u; ++i) v[i] = 0.0;
+            for (uint i = 0u; i < 32u; ++i) Ws[lr * LDW + i] = float16_t(v[i]);
+        } else {
+            for (uint i = 0u; i < 32u; ++i)
+                Xs[lr * LDW + i] = ok ? float16_t(clamp(x[xo + k0 + i], -65000.0, 65000.0)) : float16_t(0.0);
+        }
+        barrier();
+        for (uint kk = 0u; kk < BK; kk += 16u) {
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseA> a[2];
+            coopmat<float16_t, gl_ScopeSubgroup, 16, 16, gl_MatrixUseB> b[2];
+            for (uint i = 0u; i < 2u; ++i)
+                coopMatLoad(a[i], Ws, (sr + 16u * i) * LDW + kk, LDW, gl_CooperativeMatrixLayoutRowMajor);
+            for (uint j = 0u; j < 2u; ++j)   // B[k][t] = Xs[t][k]: column-major K x N
+                coopMatLoad(b[j], Xs, (st + 16u * j) * LDW + kk, LDW, gl_CooperativeMatrixLayoutColumnMajor);
+            for (uint i = 0u; i < 2u; ++i)
+                for (uint j = 0u; j < 2u; ++j)
+                    acc[i][j] = coopMatMulAdd(a[i], b[j], acc[i][j]);
+        }
+        barrier();
+    }
+
+    for (uint i = 0u; i < 2u; ++i)
+        for (uint j = 0u; j < 2u; ++j)
+            coopMatStore(acc[i][j], Cs, (sr + 16u * i) * LDC + st + 16u * j, LDC, gl_CooperativeMatrixLayoutRowMajor);
+    barrier();
+    for (uint e = tid; e < BM * BN; e += 128u) {
+        const uint r = e % BM, t = e / BM;     // consecutive threads -> consecutive rows (coalesced y)
+        if (row0 + r < pc.n_out && tok0 + t < pc.n_tok)
+            y[pc.y_off + (tok0 + t) * pc.n_out + row0 + r] = Cs[r * LDC + t];
+    }
+}

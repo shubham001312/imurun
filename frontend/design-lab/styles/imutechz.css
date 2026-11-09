@@ -1,0 +1,155 @@
+/* ImuTechz (default) - the company website's "console" design system on
+ * cream paper (WebSite/frontend/app/globals.css, DESIGN.md): warm ivory
+ * canvas, ink text, Inter + JetBrains Mono, Fraunces headlines, hairline
+ * borders, matte surfaces (no glass), one accent: brand red #d9481e.
+ * Token mapping is listed in docs/frontend/README.md ("Brand"). */
+:root {
+  --bg: #f3ede2;                       /* --color-canvas */
+  --surface: #faf7f0;                  /* --color-surface */
+  --surface-2: #ebe4d6;                /* --color-surface-2 */
+  --surface-3: #e1d9c8;                /* --color-surface-3 */
+  --text: #1c1915;                     /* --color-fg */
+  --muted: #58524a;                    /* --color-fg-muted */
+  --muted-soft: #847c70;               /* --color-fg-dim */
+  --line: rgba(28, 25, 20, .10);       /* --color-line */
+  --line-strong: rgba(28, 25, 20, .22);
+  --accent: #d9481e;                   /* --color-accent */
+  --accent-hi: #b93a14;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(217, 72, 30, .12);
+  --accent-line: rgba(217, 72, 30, .34);
+  --code-bg: #ebe4d6;
+  --success: #1f8a46;                  /* --color-ok */
+  --success-soft: rgba(31, 138, 70, .12);
+  --danger: #b2352a;                   /* --color-err */
+  --danger-line: rgba(178, 53, 42, .35);
+  --danger-text: #ffffff;
+  --backdrop: rgba(28, 25, 20, .40);   /* --color-veil */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px rgba(28, 25, 20, .6);
+  --shadow: 0 2px 4px rgba(28, 25, 20, .05), 0 28px 60px -30px rgba(28, 25, 20, .35);  /* --shadow-pop */
+  --shadow-card: 0 1px 2px rgba(28, 25, 20, .04), 0 14px 34px -26px rgba(28, 25, 20, .28);
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-lg: 20px;
+  --font: "Inter", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-display: "Fraunces", Georgia, "Times New Roman", serif;
+  --teal: #15858d;
+  --steel: #7e858d;
+  --ambient-opacity: 0;
+  --ease-std: cubic-bezier(.2, .8, .2, 1);
+}
+/* agent.css sets these on :root after this sheet; body wins. */
+body[data-theme^="imutechz"] { --ok-hue: #1f8a46; --warn-hue: #9a6a12; }
+
+::selection { background: rgba(217, 72, 30, .28); }
+
+/* A faint paper grain over the page: the matte finish of the website. */
+body { background: var(--bg); font-size: 15px; }
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  opacity: .06; mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.2 0 0 0 0 0.17 0 0 0 0 0.12 0 0 0 0.9 0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+}
+.ambient, .pointer-glow { display: none; }
+/* the website's dot field (dotfield.js; globals.css .dotfield) */
+.dotfield { position: fixed; inset: 0; z-index: 0; pointer-events: none; display: block; }
+.shell { position: relative; z-index: 1; }
+
+/* Matte chrome: solid surfaces and hairlines, no blur. */
+.sidebar { background: var(--surface); border-right: 1px solid var(--line); }
+.topbar { background: rgba(243, 237, 226, .85); border-bottom: 1px solid var(--line); }
+.composer { background: transparent; border-top: 0; }
+.composer .input-wrap {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-card);
+}
+.composer .input-wrap:focus-within { border-color: rgba(28, 25, 20, .35); }
+
+.bubble, .dialog, .queued {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-card);
+}
+.msg.user .bubble { background: var(--surface-2); border-color: var(--line); box-shadow: none; }
+.panel, .settings-card { background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-card); }
+.panel:hover { border-color: var(--line); }
+.dialog { box-shadow: var(--shadow); }
+.thinking p { background: var(--surface-2); }
+
+/* Typography: Fraunces 500 for titles, mono eyebrows. */
+.page-title, .settings-section-title, .dialog h2, .home-title, .empty-state h3, .notif-title {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-optical-sizing: auto;
+  font-variation-settings: "SOFT" 40;
+  letter-spacing: -.015em;
+}
+.page-title { font-size: 32px; line-height: 1.1; }
+.notif-title { font-size: 15.5px; letter-spacing: 0; }
+.page-kicker, .settings-label, .settings-card-title.eyebrow, .msg .who {
+  font-family: var(--mono);
+  font-size: 11px; font-weight: 500;
+  letter-spacing: .14em; text-transform: uppercase;
+  color: var(--muted-soft);
+}
+.brand { font-family: var(--font); font-weight: 650; letter-spacing: .04em; }
+.brand-name { color: var(--text); }
+.logo { color: var(--accent); }
+
+/* Navigation: pressed rows on surface-3, the red only for the marker. */
+.nav-item:hover { background: var(--surface-2); }
+.nav-item.active { background: var(--surface-3); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+.settings-tab.active { background: var(--surface-3); color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
+
+/* Buttons: ink primary (website .btn-primary), red for the one main action
+ * (send), hairline ghosts. */
+.btn { border-radius: var(--radius-sm); font-weight: 500; transition: background .15s ease, border-color .15s ease, color .15s ease, transform .12s ease; }
+.btn:active { transform: translateY(1px); }
+.btn.primary { background: var(--text); border-color: var(--text); color: var(--bg); }
+.btn.primary:hover { background: #000; border-color: #000; color: var(--bg); }
+.btn.ghost, .ghost, .icon, .cancel, .stop {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  box-shadow: none;
+}
+.btn.ghost:hover, .ghost:hover, .icon:hover { background: var(--surface-2); }
+.send {
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  color: #fff;
+  box-shadow: none;
+}
+.send:hover { background: var(--accent-hi); border-color: var(--accent-hi); }
+.danger, .btn.danger-solid { background: var(--danger); border: 1px solid var(--danger); color: #fff; box-shadow: none; }
+
+/* Chips: mono, uppercase, pill, as on the website. */
+.chip {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 500;
+  letter-spacing: .06em; text-transform: uppercase;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--muted);
+}
+.chip.success { background: var(--success-soft); border-color: rgba(31, 138, 70, .3); color: var(--success); }
+.chip.error { background: rgba(178, 53, 42, .12); border-color: rgba(178, 53, 42, .3); color: var(--danger); }
+
+input, select, textarea { background: var(--surface-2); border-color: var(--line); }
+input:focus, select:focus, textarea:focus { border-color: var(--line-strong); }
+.tool-badge { background: var(--surface-2); border-color: var(--line); }
+
+/* Code blocks on the website's dark code ground (.term, .md-code re-map
+ * the tokens for themselves). */
+.md-codeblock {
+  --code-bg: #1b1813;
+  --text: #f2ece0;
+  --muted: #b9b1a3;
+  --line: rgba(255, 255, 255, .09);
+  --line-strong: rgba(255, 255, 255, .18);
+  background: #1b1813;
+  color: #f2ece0;
+  border-color: rgba(255, 255, 255, .09);
+}
+.md-codeblock .md-codehead { background: #26221a; border-color: rgba(255, 255, 255, .09); color: #b9b1a3; }
+.md-codeblock pre, .md-codeblock code { background: transparent; color: #f2ece0; }
+.md-codeblock .md-copy { color: #f2ece0; border-color: rgba(255, 255, 255, .18); background: transparent; }

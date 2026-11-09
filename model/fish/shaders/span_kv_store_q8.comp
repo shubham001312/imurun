@@ -1,0 +1,40 @@
+#version 450
+// FISH layer span - append k and v of n_tok tokens to an int8 KV cache.
+// Per layer: K codes [pos][kv_dim/4 words], V codes likewise, then K scales
+// [pos][kv_dim/32] and V scales (f32). One scale per 32 values = absmax; a
+// value is code/127 * scale (unpackSnorm4x8 decodes four at once). 2.25 bytes
+// per K+V element instead of 4 for f16: the context a VRAM-bound span can hold
+// nearly doubles (docs/engine/GPU.md, "Device formats").
+layout(local_size_x = 64) in;
+
+layout(std430, binding = 0) readonly buffer Arena { float a[]; };
+layout(std430, binding = 2) buffer KV { uint kv[]; };
+
+layout(push_constant) uniform PC {
+    uint kvd;                 // kv_dim, multiple of 32
+    uint k_off, k_stride, v_off, v_stride;
+    uint ck_off, cv_off;      // word offsets of this layer's K / V codes
+    uint pos0;
+    uint cks_off, cvs_off;    // word offsets of this layer's K / V scales
+} pc;
+
+void store_block(uint src, uint code_word, uint scale_word) {
+    float amax = 0.0;
+    for (uint i = 0u; i < 32u; ++i) amax = max(amax, abs(a[src + i]));
+    const float inv = amax > 0.0 ? 127.0 / amax : 0.0;
+    for (uint w4 = 0u; w4 < 8u; ++w4) {
+        const vec4 v = vec4(a[src + 4u * w4], a[src + 4u * w4 + 1u], a[src + 4u * w4 + 2u], a[src + 4u * w4 + 3u]) * inv;
+        kv[code_word + w4] = packSnorm4x8(v / 127.0);
+    }
+    kv[scale_word] = floatBitsToUint(amax);
+}
+
+void main() {
+    const uint t = gl_WorkGroupID.x;
+    const uint pos = pc.pos0 + t;
+    const uint nb = pc.kvd / 32u;
+    for (uint b = gl_LocalInvocationID.x; b < nb; b += 64u) {
+        store_block(pc.k_off + t * pc.k_stride + 32u * b, pc.ck_off + pos * (pc.kvd / 4u) + 8u * b, pc.cks_off + pos * nb + b);
+        store_block(pc.v_off + t * pc.v_stride + 32u * b, pc.cv_off + pos * (pc.kvd / 4u) + 8u * b, pc.cvs_off + pos * nb + b);
+    }
+}

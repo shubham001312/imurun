@@ -1,0 +1,103 @@
+#version 450
+// FISH layer span - causal multi-head attention over the int8 KV cache
+// (span_kv_store_q8.comp). Same algorithm as span_attention.comp (keys in
+// chunks of 128, online softmax, GQA, soft-cap, sliding window); only the
+// K / V reads differ: four int8 codes per word, one f32 absmax per 32 values.
+layout(local_size_x = 128) in;
+
+layout(std430, binding = 0) buffer Arena { float a[]; };
+layout(std430, binding = 2) readonly buffer KV { uint kv[]; };
+
+layout(push_constant) uniform PC {
+    uint head_dim, group, kvd;
+    uint q_off, q_stride, o_off, o_stride;
+    uint ck_off, cv_off;     // word offsets of this layer's K / V codes
+    uint pos0, window;
+    float scale, softcap;
+    uint cks_off, cvs_off;   // word offsets of this layer's K / V scales
+} pc;
+
+shared float qs[256];
+shared float pr[128];
+shared float red[128];
+
+const float NEG_INF = uintBitsToFloat(0xFF800000u);
+
+float wg_reduce(float v, bool is_max) {
+    const uint tid = gl_LocalInvocationID.x;
+    red[tid] = v;
+    barrier();
+    for (uint s = 64u; s > 0u; s >>= 1) {
+        if (tid < s) red[tid] = is_max ? max(red[tid], red[tid + s]) : red[tid] + red[tid + s];
+        barrier();
+    }
+    const float r = red[0];
+    barrier();
+    return r;
+}
+
+float v_at(uint pos, uint e) {           // element e of the layer's V row at pos
+    const uint w = kv[pc.cv_off + pos * (pc.kvd / 4u) + e / 4u];
+    const float sc = uintBitsToFloat(kv[pc.cvs_off + pos * (pc.kvd / 32u) + e / 32u]);
+    return float(int(w << (24u - 8u * (e & 3u))) >> 24) * (sc / 127.0);
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint h = gl_WorkGroupID.x, t = gl_WorkGroupID.y;
+    const uint D = pc.head_dim;
+    const uint kvh = h / pc.group;
+    const int pos = int(pc.pos0 + t);
+
+    for (uint d = tid; d < D; d += 128u) qs[d] = a[pc.q_off + t * pc.q_stride + h * D + d];
+    barrier();
+
+    int tb = 0;
+    if (pc.window > 0u && pos - int(pc.window) + 1 > 0) tb = pos - int(pc.window) + 1;
+
+    float m = NEG_INF, l = 0.0, acc0 = 0.0, acc1 = 0.0;
+    const uint d0 = tid, d1 = tid + 128u;
+    const uint nb = pc.kvd / 32u;
+    for (int c0 = tb; c0 <= pos; c0 += 128) {
+        const int j = c0 + int(tid);
+        float s = NEG_INF;
+        if (j <= pos) {
+            const uint kb = pc.ck_off + uint(j) * (pc.kvd / 4u) + kvh * D / 4u;
+            const uint sb = pc.cks_off + uint(j) * nb + kvh * D / 32u;
+            float dotv = 0.0;
+            for (uint b = 0u; b < D / 32u; ++b) {
+                float part = 0.0;
+                for (uint w4 = 0u; w4 < 8u; ++w4) {
+                    const vec4 k = unpackSnorm4x8(kv[kb + 8u * b + w4]);
+                    const uint e = 32u * b + 4u * w4;
+                    part += dot(k, vec4(qs[e], qs[e + 1u], qs[e + 2u], qs[e + 3u]));
+                }
+                dotv += part * uintBitsToFloat(kv[sb + b]);
+            }
+            s = dotv * pc.scale;
+            if (pc.softcap > 0.0) s = pc.softcap * tanh(clamp(s / pc.softcap, -15.0, 15.0));
+        }
+        const float cm = wg_reduce(s, true);
+        const float nm = max(m, cm);
+        const float p = j <= pos ? exp(s - nm) : 0.0;
+        pr[tid] = p;
+        const float cs = wg_reduce(p, false);
+        const float f = exp(m - nm);
+        l = l * f + cs;
+        acc0 *= f;
+        acc1 *= f;
+        m = nm;
+        const int cn = min(128, pos - c0 + 1);
+        for (int jj = 0; jj < cn; ++jj) {
+            const uint pj_pos = uint(c0 + jj);
+            const float pj = pr[jj];
+            if (d0 < D) acc0 += pj * v_at(pj_pos, kvh * D + d0);
+            if (d1 < D) acc1 += pj * v_at(pj_pos, kvh * D + d1);
+        }
+        barrier();
+    }
+    const float inv = l > 0.0 ? 1.0 / l : 0.0;
+    const uint ob = pc.o_off + t * pc.o_stride + h * D;
+    if (d0 < D) a[ob + d0] = acc0 * inv;
+    if (d1 < D) a[ob + d1] = acc1 * inv;
+}

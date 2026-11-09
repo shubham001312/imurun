@@ -1,0 +1,21 @@
+# IMURUN runtime dependencies (Python 3.11 - 3.14).
+#   python -m pip install -r requirements.txt
+# Keep in sync with [project].dependencies in pyproject.toml and
+# REQUIRED_MODULES in install.py.
+
+aiohttp>=3.9            # model/fish_client.py - FISH HTTP client
+httpx>=0.27             # services/model_manager.py - model downloads
+huggingface_hub>=0.23   # services/model_manager.py - model catalogue / downloads
+pyyaml>=6.0             # config files
+truststore>=0.9         # HTTPS against the OS trust store (corporate proxies, macOS python.org)
+
+# --- Optional (uncomment, or use the pyproject extras) -----------------------
+# Native desktop window for `start.py --window`   (extra: imurun[window])
+# pywebview>=5.0
+# Connector tokens in the OS keychain             (extra: imurun[connectors])
+# keyring>=24.0
+# Accurate CPU/RAM figures in the resources panel (extra: imurun[metrics])
+# psutil>=5.9
+# FastAPI models router, services/server/models_api.py (extra: imurun[api])
+# fastapi>=0.110
+# pydantic>=2.5

@@ -61,3 +61,5 @@ The website's `frontend/components/Mark.jsx` is the original.
 `svg/aperture-small.svg` is byte-identical to the website's tab icon. If the
 math changes, change both files and re-run the script. The `react/` copies are
 snapshots and must be re-copied by hand after a change on the website.
+
+**IMURUN UI copy:** `frontend/design-lab/aperture.js` is this `vanilla/aperture.js`, byte for byte (the UI's static root cannot reach `brand/`); edit the kit, copy it over, then run `python frontend/design-lab/brand/make_icons.py --check`.

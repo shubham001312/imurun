@@ -1,0 +1,42 @@
+/* ImuTechz Console - the website's dark palette (html[data-theme="dark"]
+ * in WebSite/frontend/app/globals.css). Same rules as imutechz.css, loaded
+ * through @import so the two never drift; only the tokens differ. */
+@import url("imutechz.css");
+
+:root {
+  --bg: #09090b;
+  --surface: #111113;
+  --surface-2: #18181b;
+  --surface-3: #1f1f23;
+  --text: #f4f4f5;
+  --muted: #a1a1aa;
+  --muted-soft: #71717a;
+  --line: rgba(255, 255, 255, .08);
+  --line-strong: rgba(255, 255, 255, .16);
+  --accent: #ff5c35;
+  --accent-hi: #ff7a5a;
+  --accent-text: #ffffff;
+  --accent-soft: rgba(255, 92, 53, .14);
+  --accent-line: rgba(255, 92, 53, .38);
+  --code-bg: #18181b;
+  --success: #4ade80;
+  --success-soft: rgba(74, 222, 128, .14);
+  --danger: #f87171;
+  --danger-line: rgba(248, 113, 113, .4);
+  --danger-text: #1a0606;
+  --backdrop: rgba(0, 0, 0, .6);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px rgba(255, 255, 255, .55);
+  --shadow: 0 1px 0 rgba(255, 255, 255, .06) inset, 0 24px 60px -24px rgba(0, 0, 0, .9);
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, .04) inset, 0 12px 32px -20px rgba(0, 0, 0, .8);
+  --teal: #22b8c2;
+  --steel: #8b9199;
+}
+body[data-theme="imutechz-dark"] { --ok-hue: #4ade80; --warn-hue: #fbbf24; }
+
+body::before { mix-blend-mode: screen; opacity: .03; }
+.topbar { background: rgba(9, 9, 11, .72); }
+.btn.primary { background: var(--text); border-color: var(--text); color: var(--bg); }
+.btn.primary:hover { background: #fff; border-color: #fff; }
+.chip.success { border-color: rgba(74, 222, 128, .3); }
+.chip.error { background: rgba(248, 113, 113, .14); border-color: rgba(248, 113, 113, .3); }
+::selection { background: rgba(255, 92, 53, .32); }

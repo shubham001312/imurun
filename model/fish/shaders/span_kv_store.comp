@@ -1,0 +1,27 @@
+#version 450
+// FISH layer span — append k and v of n_tok tokens to the layer's KV cache.
+// The cache is f16, two values per 32-bit word (portable: no 16-bit storage
+// feature needed), layout [pos][kv_dim] per layer, K and V separate.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) readonly buffer Arena { float a[]; };
+layout(std430, binding = 2) buffer KV { uint kv[]; };
+
+layout(push_constant) uniform PC {
+    uint kvd;                 // kv_dim (even)
+    uint k_off, k_stride, v_off, v_stride;
+    uint ck_off, cv_off;      // word offsets of this layer's K / V cache
+    uint pos0;
+} pc;
+
+void main() {
+    const uint t = gl_WorkGroupID.x;
+    const uint half_kvd = pc.kvd / 2u;
+    const uint dst = (pc.pos0 + t) * half_kvd;
+    for (uint i = gl_LocalInvocationID.x; i < half_kvd; i += 256u) {
+        const uint ks = pc.k_off + t * pc.k_stride + 2u * i;
+        const uint vs = pc.v_off + t * pc.v_stride + 2u * i;
+        kv[pc.ck_off + dst + i] = packHalf2x16(vec2(a[ks], a[ks + 1u]));
+        kv[pc.cv_off + dst + i] = packHalf2x16(vec2(a[vs], a[vs + 1u]));
+    }
+}

@@ -1,0 +1,56 @@
+/* Aurora - soft gradients, glass, rounded, friendly. */
+:root {
+  --bg: #0a0f1e;
+  --surface: rgba(17, 24, 42, .74);
+  --surface-2: rgba(30, 41, 70, .56);
+  --text: #eef2ff;
+  --muted: #9aa8c7;
+  --line: rgba(148, 163, 184, .16);
+  --line-strong: rgba(148, 163, 184, .30);
+  --accent: #7dd3fc;
+  --accent-text: #082f49;
+  --accent-soft: rgba(125, 211, 252, .12);
+  --accent-line: rgba(125, 211, 252, .40);
+  --code-bg: rgba(8, 13, 28, .65);
+  --success: #6ee7b7;
+  --success-soft: rgba(110, 231, 183, .16);
+  --danger: #fda4af;
+  --danger-line: rgba(253, 164, 175, .45);
+  --danger-text: #2a0710;
+  --backdrop: rgba(4, 8, 20, .65);
+  --focus-ring: 0 0 0 3px rgba(125, 211, 252, .18);
+  --shadow: 0 30px 70px rgba(0, 0, 0, .50);
+  --radius: 20px;
+  --radius-sm: 12px;
+  --font: ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+}
+
+body {
+  background:
+    radial-gradient(800px 480px at 12% -10%, rgba(125, 211, 252, .16), transparent 60%),
+    radial-gradient(700px 420px at 95% 15%, rgba(196, 181, 253, .16), transparent 60%),
+    radial-gradient(900px 600px at 50% 110%, rgba(110, 231, 183, .10), transparent 60%),
+    var(--bg);
+}
+.sidebar,
+.topbar,
+.composer {
+  backdrop-filter: blur(18px);
+}
+.dialog { background: #0d1324; }
+.bubble {
+  backdrop-filter: blur(10px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .18);
+}
+.msg.user .bubble {
+  background: linear-gradient(135deg, rgba(125, 211, 252, .18), rgba(196, 181, 253, .16));
+  border-color: var(--accent-line);
+}
+.send {
+  background: linear-gradient(135deg, #7dd3fc, #c4b5fd);
+  border: 0;
+  color: #0b1224;
+}
+.send:hover { filter: brightness(1.06); }
+.logo { text-shadow: 0 0 16px rgba(125, 211, 252, .5); }

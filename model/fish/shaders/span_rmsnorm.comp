@@ -1,0 +1,42 @@
+#version 450
+// FISH layer span — RMSNorm over rows of the activation arena.
+//
+// Row r belongs to token r / rows_per_tok and sub-row r % rows_per_tok, so the
+// same kernel does the per-token norms (rows_per_tok = 1, n = n_embd) and the
+// Qwen-3 per-head q/k norms (rows_per_tok = n_head, n = head_dim) on a fused
+// or unfused q|k|v layout. In place is allowed (each element is read and
+// written by the same thread). out = x * 1/sqrt(mean(x^2) + eps) * w.
+layout(local_size_x = 256) in;
+
+layout(std430, binding = 0) buffer Arena { float a[]; };
+layout(std430, binding = 1) readonly buffer Params { float prm[]; };
+
+layout(push_constant) uniform PC {
+    uint n;            // row length
+    uint rows_per_tok;
+    uint src_off, src_tok_stride;
+    uint dst_off, dst_tok_stride;
+    uint w_off;        // in Params
+    float eps;
+} pc;
+
+shared float red[256];
+
+void main() {
+    const uint r = gl_WorkGroupID.x;
+    const uint tid = gl_LocalInvocationID.x;
+    const uint tok = r / pc.rows_per_tok, sub = r % pc.rows_per_tok;
+    const uint s0 = pc.src_off + tok * pc.src_tok_stride + sub * pc.n;
+    const uint d0 = pc.dst_off + tok * pc.dst_tok_stride + sub * pc.n;
+
+    float ss = 0.0;
+    for (uint i = tid; i < pc.n; i += 256u) { const float v = a[s0 + i]; ss += v * v; }
+    red[tid] = ss;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (tid < s) red[tid] += red[tid + s];
+        barrier();
+    }
+    const float scale = inversesqrt(red[0] / float(pc.n) + pc.eps);
+    for (uint i = tid; i < pc.n; i += 256u) a[d0 + i] = a[s0 + i] * scale * prm[pc.w_off + i];
+}

@@ -1,0 +1,87 @@
+#version 450
+// FISH Vulkan backend — prefill matmul (many tokens).
+//
+// Output tile = BM rows x BN tokens per workgroup; the K dimension is walked
+// in chunks of BK = 32 elements. Per chunk the workgroup dequantises a
+// BM x BK slab of weights into shared memory once and reuses it for all BN
+// tokens, so each weight byte is read from VRAM once per token tile
+// (ceil(n_tok / 64) times per matmul) instead of once per token.
+// Each of the 256 threads accumulates a 4 x 4 block of outputs; rows and
+// tokens are interleaved by 16 so shared-memory reads are bank-conflict free.
+#extension GL_GOOGLE_include_directive : require
+
+#define BM 64u
+#define BN 64u
+#define BK 32u
+#define PAD 65u
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "dequant.glsl"
+
+layout(std430, binding = 1) readonly buffer XBuf { float x[]; };
+layout(std430, binding = 2) writeonly buffer YBuf { float y[]; };
+
+layout(push_constant) uniform PC {
+    uint n_in;
+    uint n_out;
+    uint n_tok;
+    uint row_bytes;
+    uint y_off;
+    uint x_off;      // floats (layer spans address one arena)
+} pc;
+
+shared float Ws[BK * PAD];   // [k][row]
+shared float Xs[BK * PAD];   // [k][token]
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint row0 = gl_WorkGroupID.x * BM;
+    const uint tok0 = gl_WorkGroupID.y * BN;
+    const uint tm = tid & 15u;    // rows tm + 16 i
+    const uint tn = tid >> 4;     // tokens tn + 16 j
+
+    // Loader mapping: 64 rows (tokens) x 4 parts of 8 elements.
+    const uint lr = tid >> 2;
+    const uint lp = (tid & 3u) * 8u;
+    const uint lrow = row0 + lr;
+    const uint ltok = tok0 + lr;
+    const bool row_ok = lrow < pc.n_out;
+    const bool tok_ok = ltok < pc.n_tok;
+    const uint ro = lrow * pc.row_bytes;
+    const uint xo = pc.x_off + ltok * pc.n_in;
+
+    float acc[4][4];
+    for (uint i = 0u; i < 4u; ++i)
+        for (uint j = 0u; j < 4u; ++j) acc[i][j] = 0.0;
+
+    for (uint k0 = 0u; k0 < pc.n_in; k0 += BK) {
+        float v[8];
+        if (row_ok) {
+            dequant8(ro, k0 + lp, v);
+        } else {
+            for (uint i = 0u; i < 8u; ++i) v[i] = 0.0;
+        }
+        for (uint i = 0u; i < 8u; ++i) Ws[(lp + i) * PAD + lr] = v[i];
+        for (uint i = 0u; i < 8u; ++i)
+            Xs[(lp + i) * PAD + lr] = tok_ok ? x[xo + k0 + lp + i] : 0.0;
+        barrier();
+
+        for (uint kk = 0u; kk < BK; ++kk) {
+            float a[4], b[4];
+            for (uint i = 0u; i < 4u; ++i) a[i] = Ws[kk * PAD + tm + 16u * i];
+            for (uint j = 0u; j < 4u; ++j) b[j] = Xs[kk * PAD + tn + 16u * j];
+            for (uint i = 0u; i < 4u; ++i)
+                for (uint j = 0u; j < 4u; ++j) acc[i][j] += a[i] * b[j];
+        }
+        barrier();
+    }
+
+    for (uint j = 0u; j < 4u; ++j) {
+        const uint t = tok0 + tn + 16u * j;
+        if (t >= pc.n_tok) continue;
+        for (uint i = 0u; i < 4u; ++i) {
+            const uint r = row0 + tm + 16u * i;
+            if (r < pc.n_out) y[pc.y_off + t * pc.n_out + r] = acc[i][j];
+        }
+    }
+}

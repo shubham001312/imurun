@@ -1,133 +1,340 @@
-# IMURUN — publishing
+# IMURUN: release. Runs on its own when main gets a version that has no
+# v<version> tag yet: bump `version` in pyproject.toml + package.json, merge,
+# and this workflow tests, builds, tags, releases and publishes it. Pushing a
+# tag v<version> by hand still works too, and "Run workflow" builds and checks
+# everything (dry run, default) or, with dry_run unticked, releases.
 #
-# Two jobs, both driven by a version tag:
+#   check     tag == pyproject.toml version == package.json version; decides
+#             whether this run releases (main: only when v<version> is new)
+#   test      pytest on Linux, Windows, macOS
+#   engine    FISH library per OS (engine.yml)
+#   wheels    one wheel per OS with its engine bundled, each smoke-installed
+#             on its own OS:  py3-none-win_amd64, py3-none-manylinux_2_28_x86_64,
+#             py3-none-macosx_11_0_arm64
+#   sdist     source distribution + a pure py3-none-any wheel (no engine; pip
+#             picks it on other platforms, and `imurun --get-engine` or a
+#             source build supplies the library)
+#   release   GitHub Release with the engine libraries, SHA256SUMS.txt and
+#             every distribution attached
+#   pypi      PyPI, by trusted publishing (OIDC; no token stored anywhere)
+#   npm       the npm launcher (package.json + npm/imurun.js), after PyPI so
+#             `npx imurun` can install the matching imurun==<version> at once;
+#             then marks the old 0.1.x CLI deprecated on npm
 #
-#   pypi   — builds the Python launcher and publishes it to PyPI using
-#            trusted publishing (OIDC). No token is stored in the
-#            repository: PyPI trusts this workflow for the `imurun`
-#            project, and the short-lived OIDC token proves it.
-#   npm    — builds the CLI and publishes it to the npm registry.
-#
-# The trusted publisher on PyPI is configured for:
-#
-#   project name     imurun
-#   owner            shubham001312
-#   repository       imurun
-#   workflow file    workflow.yml
-#   environment      pypi
-#
-# Triggered by pushing a tag (v0.1.1) or by running it by hand.
-name: Publish
+# The file name (workflow.yml) and the environment name (pypi) are what the
+# PyPI trusted publisher for the `imurun` project was registered with in
+# 0.1.x; renaming either breaks publishing until PyPI is updated to match.
+# One-time setup: docs/setup/RELEASE.md.
+name: Release
 
 on:
   push:
     tags: ["v*"]
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build and check, but publish nothing"
+        description: "Build, test and check everything, but publish nothing"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
-  id-token: write
+
+# One release at a time. A queued run re-checks the tag, so two quick merges
+# cannot publish the same version twice.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  pypi:
-    name: Publish to PyPI
+  check:
     runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/project/imurun/
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      build: ${{ steps.gate.outputs.build }}
+      publish: ${{ steps.gate.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 0   # the gate checks that a release commit is on main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Build the distributions
-        working-directory: python
+      - id: v
+        name: Versions agree with the tag
         run: |
-          python -m pip install --upgrade pip build
-          python -m build --sdist --wheel --outdir dist/
-
-      - name: Check the distributions
-        working-directory: python
+          python - <<'EOF'
+          import json, os, tomllib
+          py = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          js = json.load(open("package.json"))["version"]
+          ref = os.environ.get("GITHUB_REF_NAME", "")
+          tag = ref[1:] if os.environ.get("GITHUB_REF_TYPE") == "tag" else py
+          print(f"tag={tag} pyproject={py} package.json={js}")
+          if not (py == js == tag):
+              raise SystemExit(f"version mismatch: tag {tag}, pyproject {py}, package.json {js}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"version={py}\n")
+          EOF
+      - id: gate
+        name: Release or not
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          python -m pip install --upgrade twine
-          twine check dist/*
+          build=true; publish=false
+          # Publishing (and signing) only ever happens for code on main: a tag
+          # must point at a commit of main, a manual real run must be on main.
+          on_main() {
+            git fetch --quiet origin main &&
+              git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+          }
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF_TYPE" in
+            push:tag)
+              if on_main; then publish=true
+              else echo "::error::tag $GITHUB_REF_NAME is not on main - refusing to publish"; exit 1; fi ;;
+            workflow_dispatch:*)
+              if [ "$DRY_RUN" = "false" ]; then
+                if [ "$GITHUB_REF" = "refs/heads/main" ]; then publish=true
+                else echo "::error::real releases run from main only ($GITHUB_REF)"; exit 1; fi
+              fi ;;
+            push:branch)
+              # exit 0: tag exists, 2: no such tag, anything else: lookup failed
+              # (stop rather than guess - a wrong "not tagged" would re-release).
+              rc=0; git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null || rc=$?
+              case $rc in
+                0) echo "v$VERSION is already tagged - nothing to release"; build=false ;;
+                2) echo "v$VERSION is not tagged yet - releasing it"; publish=true ;;
+                *) echo "could not list tags (git exit $rc)"; exit 1 ;;
+              esac ;;
+          esac
+          echo "build=$build publish=$publish"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
-      - name: Publish
-        if: ${{ !inputs.dry_run }}
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          # The distributions are built under python/, not the workspace root.
-          packages-dir: python/dist
-          # The trusted publisher on PyPI is configured for the `pypi`
-          # environment, and this workflow must use the same one.
-          environment: pypi
-
-  npm:
-    name: Publish to npm
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Trusted publishing: npm verifies this workflow with a short-lived OIDC
-      # credential, so no npm token is stored in the repository.
-      id-token: write
+  test:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-python@v5
         with:
-          bun-version: latest
+          python-version: "3.12"
+      - run: python -m pip install -r requirements-dev.txt
+      - name: pytest (window tests are opt-in and stay skipped)
+        env:
+          IMURUN_NO_BROWSER: "1"
+          BROWSER: "none"
+        run: python -m pytest -q
 
+  engine:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: read
+      id-token: write   # Azure Artifact Signing login by OIDC (when configured)
+    uses: ./.github/workflows/engine.yml
+    with:
+      sign: ${{ needs.check.outputs.publish == 'true' }}
+    secrets:   # only the signing credentials, never NPM_TOKEN & co.
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+
+  wheels:
+    name: wheel (${{ matrix.platform }})
+    needs: [check, engine]
+    if: needs.check.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+            asset: fish-windows-x64.dll
+            tag: win_amd64
+          - platform: linux-x64
+            os: ubuntu-latest
+            asset: libfish-linux-x64.so
+            tag: manylinux_2_28_x86_64
+          - platform: macos-arm64
+            os: macos-14
+            asset: libfish-macos-arm64.dylib
+            tag: macosx_11_0_arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-${{ matrix.platform }}
+          path: engine/
+      - name: Build the wheel with the engine bundled
+        shell: bash
+        env:
+          IMURUN_ENGINE_LIB: engine/${{ matrix.asset }}
+          IMURUN_WHEEL_PLAT: ${{ matrix.tag }}
+        run: |
+          python -m pip install build twine
+          python -m build --wheel --outdir dist/
+          twine check dist/*
+          ls -la dist/
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Smoke-install on ${{ matrix.os }} (fresh venv + npm launcher)
+        shell: bash
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-${{ matrix.tag }}.whl"             --expect-engine --npm "$(ls "$RUNNER_TEMP"/imurun-*.tgz)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist + pure wheel
+        env:
+          IMURUN_BUNDLE_ENGINE: "0"
+        run: |
+          python -m pip install build twine
+          python -m build --outdir dist/
+          twine check dist/*
+      - name: Smoke-install the pure wheel
+        run: python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-any.whl"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [check, test, wheels, sdist]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write          # Sigstore signing certificate for the attestations
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: engine-*
+          path: assets/
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist/
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Build provenance attestations (verifiable identity of every file)
+        # Anyone can check that a file was built by this repository's release
+        # workflow:  gh attestation verify <file> -R shubham001312/imurun
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f  # v3.2.0
+        with:
+          subject-path: |
+            assets/*
+            dist/*
+      - name: Create or update the GitHub Release (and the tag)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.check.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists - replacing its assets"
+            gh release upload "$TAG" assets/* dist/* --clobber
+          else
+            # --target creates the tag on this commit when it does not exist
+            # (a release from main); a pushed tag is used as it is.
+            gh release create "$TAG" --target "$GITHUB_SHA" --title "IMURUN $TAG" --generate-notes \
+              assets/* dist/*
+          fi
+
+  pypi:
+    needs: [check, release]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/imurun/${{ needs.check.outputs.version }}/
+    permissions:
+      id-token: write   # trusted publishing: PyPI verifies this workflow by OIDC
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist/
+          merge-multiple: true
+      - run: ls -la dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          attestations: true    # PEP 740 provenance: PyPI shows the files as built by workflow.yml
+          skip-existing: true   # a re-run after a partial upload finishes the job
+
+  npm:
+    needs: [check, pypi]
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/imurun
+    permissions:
+      contents: read
+      id-token: write   # npm provenance (and npm trusted publishing, if configured)
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
-
-      - name: Install
-        run: bun install --frozen-lockfile
-
-      - name: Type check
-        run: bun run typecheck
-
-      - name: Test
-        run: bun test
-
-      - name: Build the package
-        run: bun run package
-
       - name: Check the package
         run: |
-          cd dist/package/npm/imurun
-          node -e "const p=require('./package.json'); if(!p.bin||!p.bin.imurun){console.error('no bin entry');process.exit(1)} console.log('bin:',p.bin.imurun)"
-
+          node --check npm/imurun.js
+          npm pack --dry-run
       - name: Publish
-        if: ${{ !inputs.dry_run }}
-        working-directory: dist/package/npm/imurun
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          if npm view "imurun@$VERSION" version >/dev/null 2>&1; then
+            echo "imurun@$VERSION is already on npm - nothing to do"; exit 0
+          fi
+          # Works with an NPM_TOKEN secret, or without one when a trusted
+          # publisher for this repository + workflow.yml is configured on
+          # npmjs.com (npm >= 11.5 exchanges the OIDC credential itself).
+          npm install -g npm@11.21.2   # exact: this job holds NODE_AUTH_TOKEN
+          npm publish --access public --provenance
+      - name: Deprecate the old 0.1.x CLI on npm
+        # Needs NPM_TOKEN (trusted publishing covers `publish` only). Best effort:
+        # a failure here never fails the release.
+        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          # Publishing to npm needs one of two things:
-          #   - a trusted publisher configured on npmjs.com for this
-          #     repository and this workflow file (no secret at all), or
-          #   - an NPM_TOKEN secret in the repository settings.
-          # With a token, npm uses it. Without one, npm exchanges the OIDC
-          # credential itself - which only works when the trusted publisher
-          # exists. If neither is in place the step says so and stops, rather
-          # than failing the whole release with a bare ENEEDAUTH.
-          if [ -n "$NODE_AUTH_TOKEN" ]; then
-            npm publish --access public --provenance
-          elif npm publish --access public --provenance; then
-            echo "Published to npm with trusted publishing."
-          else
-            echo "::notice title=Skipped::npm could not publish."
-            echo "Configure a trusted publisher on npmjs.com for"
-            echo "  shubham001312/imurun · workflow.yml · environment npm,"
-            echo "or add an NPM_TOKEN secret to the repository. The release"
-            echo "itself is unaffected; only the npm publish is skipped."
-          fi
+          npm deprecate "imurun@<0.2.0" "imurun 0.1.x is the retired TypeScript CLI. Install the current app: npm i -g imurun@latest"
