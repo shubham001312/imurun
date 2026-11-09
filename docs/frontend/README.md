@@ -82,7 +82,9 @@ after that, modules talk through `window.IMURUN` at call time.
 | `tuning-settings.js` | ~530 | Settings > Tuning (stack install, plan, samples, Train now with the 409 confirm / allow_slow round trip, the job state machine and Cancel, automation settings, history) and the "Use it" card on `tuning.ready`. | `IMURUN.tuning` |
 | `mcp-settings.js` | ~510 | Settings > MCP servers: list with live status, add/edit form, connect/disconnect/remove, discovered tools with auto-approve, templates. | `IMURUN.mcp` |
 | `models.js` | ~1320 | Models tab, downloads with progress modal and pill, model switching, composer model picker. | `IMURUN.models`, `window.__imurun_models` |
-| `panels.js` | ~805 | Performance drawer and model card, command palette (session search), shortcuts dialog, sidebar filter, global shortcuts, response gallery (including the agentic states). | `IMURUN.panels` |
+| `dialogs.js` | ~305 | In-app confirm dialog and the Add API client dialog (name with inline validation, scopes in plain words, token shown once with Copy), replacing `window.prompt`/`confirm` in Settings. | `IMURUN.dialogs` |
+| `stats-view.js` | ~310 | Content of the Performance drawer: Model, Last reply (stat tiles), Context (meter: used / window in use, model maximum, saved size), Speed trend (sparkline). Only reported values; one-line empty states. | `IMURUN.statsView` |
+| `panels.js` | ~720 | Performance drawer (open/close, Esc, focus return), command palette (session search), shortcuts dialog, sidebar filter, global shortcuts, response gallery (including the agentic states). | `IMURUN.panels` |
 | `voice-server.js` | ~615 | Voice on the local server (`/api/voice/*`): MediaRecorder dictation with first-use download and retry, the spoken language for the next turn, sentence-by-sentence read aloud with prefetch and stop, Settings > Voice "Speech on this computer". Takes over the mic and Read aloud (capture-phase clicks) only when the server can do it; voice.js is the browser fallback. | `IMURUN.voiceServer` |
 | `voice.js` | ~500 | Dictation (Web Speech recognition), read aloud (speechSynthesis), Settings > Voice. | `IMURUN.voice` |
 
@@ -208,6 +210,7 @@ Persistent client-side keys (`localStorage`, all wrapped in try/catch):
 | `imurun.sound` | sound.js | `off` when interface sounds are muted |
 | `imurun.tuning.consent.v1` | feedback.js | The rating consent notice was shown |
 | `imurun.stats.history.v1` | panels.js | Last 40 per-reply stats |
+| `imurun.openai.keyHidden` | openai-settings.js | `1` when the API key is hidden in Settings > Use by API (shown by default) |
 | `imurun.stats.open`, `imurun.design.sidebar`, `imurun.chat.mode` | panels/app/chat | UI conveniences |
 | `imurun.voice.consent.v1` | voice.js | User acknowledged that browser dictation uses the vendor's service |
 | `imurun.models.guided` | models.js | Models guide dismissed |

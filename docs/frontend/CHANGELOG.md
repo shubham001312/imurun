@@ -23,6 +23,49 @@ why.
 - Fixed: the old New skill button used two `window.prompt`s and sent no
   instructions, so the server refused every skill it tried to create (400
   "a skill needs instructions").
+## 2026-11-09: API client dialog, visible API key, Performance panel
+
+- **Add API client is a dialog**, not three browser prompts (`dialogs.js`,
+  `styles/dialogs.css`). A name field with inline validation (required, at
+  most 80 characters, not a duplicate), the scopes as checkboxes with one
+  line each in plain words, grouped into "Works today" (chat, admin: the
+  only scopes the server enforces, on `/v1`) and "Saved on the token, not
+  enforced yet" (the rest), a warning when none of the chosen scopes can
+  call anything, and Create. The token then shows once in a copy box with
+  Copy, "You will not see this token again", and Done; a click outside does
+  not close that step. Server errors show in the dialog. The client row
+  shows "Not used yet" / "Used 3 min ago" instead of a status the server
+  never sends.
+- **In-app confirms** replace `window.confirm` for Revoke client, Rotate
+  token, Clear cache (Settings > Resources) and Regenerate key (Use by API).
+  Destructive confirms start on Cancel; Esc cancels; focus returns.
+- **Use by API: the key is visible by default.** Hide masks it and is
+  remembered (`imurun.openai.keyHidden`, try/catch). Base URL, key and model
+  id are full width, monospace and wrap instead of being cut off; Copy stays.
+  With no model loaded the panel still shows the base URL and key with a
+  note that a model must be loaded to answer, and a link to Settings > Models.
+  The cards no longer widen past a narrow column.
+- **Performance panel redesigned** (`stats-view.js`, `styles/stats.css`):
+  Model (name; size, quantisation, architecture; runs on CPU/GPU, GPU name,
+  layers, threads, weight memory, each only when reported), Last reply
+  (speed, time to first token or prompt read, tokens as stat tiles),
+  Context, Speed trend (sparkline with latest/average/best and per-reply
+  tooltips). Rows that were "not reported" and raw keys such as
+  `loaded: false` or `Engine: none` are gone. With no model: one line and a
+  single "Choose a model" button (Settings > Models). Esc closes the panel
+  and focus returns to the Stats button; re-renders keep keyboard focus.
+- **Context numbers are correct.** The window in use is
+  `engine.model.context` (what the engine loaded with), shown next to the
+  model maximum (`engine.model.context_train`, the GGUF context length) and
+  the size saved in Settings > Engine; a note says when the run uses less
+  than the model supports. The saved `server.contextSize` is not read by the
+  server (the engine takes `FISH_CONTEXT_SIZE` or sizes the window to fit
+  memory), so the panel labels it "saved, not applied yet" instead of
+  showing it as the window (API-REQUESTS 35). No context number is shown
+  while no model is loaded. Usage is for the current chat: exact when its
+  last reply carried engine counters, else an estimate, labelled as such.
+
+## 2026-11-09: Workspace layout, home launchpad, draft chats
 
 - **Side panel** is a tool rail: New chat on top (Alt N), pages grouped under
   Workspace (Home, Chat, Sessions) and Agent (Skills, Persona, Apps) with line
