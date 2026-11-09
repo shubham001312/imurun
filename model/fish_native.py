@@ -141,6 +141,27 @@ def default_library_path() -> Optional[Path]:
     return None
 
 
+# Windows "An Application Control policy has blocked this file": Smart App
+# Control (or WDAC) refused an unsigned engine binary it has no reputation for.
+WINDOWS_APP_CONTROL_BLOCKED = 4551
+
+
+def describe_load_error(path, exc: OSError) -> str:
+    """A load failure in words a user can act on.
+
+    Smart App Control blocks every freshly built, unsigned fish.dll; the raw
+    OSError text does not say why or what to do, so the app looked broken.
+    """
+    if getattr(exc, "winerror", None) == WINDOWS_APP_CONTROL_BLOCKED:
+        return (
+            f"Windows Smart App Control blocked the engine ({path}). This fish.dll "
+            "build is unsigned and Windows has no reputation for it yet, so it will "
+            "not load. Use a released build (pip install -U imurun) or switch Smart "
+            "App Control off in Windows Security > App & browser control."
+        )
+    return f"cannot load {path}: {exc}"
+
+
 def default_model_path() -> Optional[Path]:
     """The model to serve: FISH_MODEL only.
 
@@ -377,7 +398,7 @@ class FishNativeClient:
                 )
                 return True
             except OSError as exc:
-                self._error = f"cannot load {self._library_path}: {exc}"
+                self._error = describe_load_error(self._library_path, exc)
                 logger.warning(self._error)
                 return False
             except Exception as exc:  # noqa: BLE001 - never break the host

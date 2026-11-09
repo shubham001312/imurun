@@ -990,6 +990,10 @@ def probe_engine(path: Path | None) -> dict:
                                    "need a newer engine build")
     except OSError as exc:
         info["error"] = f"cannot load: {exc}"
+        if getattr(exc, "winerror", None) == 4551:  # Smart App Control / WDAC block
+            info["error"] = ("Windows Smart App Control blocked this unsigned engine build. "
+                             "Use a released build (pip install -U imurun) or switch Smart App "
+                             "Control off in Windows Security > App & browser control.")
         if sys.platform == "darwin" and _quarantined(path):
             info["error"] += (f" - macOS quarantined this downloaded file. Use `imurun --get-engine` "
                               f"(checksum-verified, not quarantined) or: xattr -d com.apple.quarantine \"{path}\"")
