@@ -11,6 +11,13 @@
   earlier build, even with `IMURUN_BUNDLE_ENGINE=0`. Reproduced: a deleted
   `services/zz_stale.py` and `bin/fish.dll` both showed up in the next pure wheel. Now the
   second build matches a clean one (289 files).
+- `.github/workflows/workflow.yml`: **releases are automatic.** A push to `main` whose
+  `pyproject.toml` version has no `v<version>` tag yet runs the whole pipeline and then
+  creates the tag and the GitHub Release, publishes to PyPI (trusted publishing, already
+  registered for `workflow.yml`, checked against the provenance of 0.1.11), and publishes
+  to npm. Every other push to `main` stops after `check`. The tag lookup fails closed: an
+  error stops the run instead of releasing again. The npm job also marks `imurun@<0.2.0`
+  deprecated. The 0.1.x yank on PyPI stays manual, because PyPI has no API for it.
 - `npm/imurun.js`: with `IMURUN_WHEEL=<wheel>`, the launcher compares the version in the
   wheel's file name with the one in the venv and installs when they differ. Before this, an
   existing install, for example the old 0.1.11 in `~/.imurun/venv`, was kept and run

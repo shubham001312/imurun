@@ -125,18 +125,24 @@ git push -u origin main
    python .github/scripts/smoke_install.py "dist/imurun-*-py3-none-win_amd64.whl" --expect-engine
    npm pack --dry-run
    ```
-4. Commit, tag, push:
-   ```
-   git commit -am "release: vX.Y.Z"
-   git tag vX.Y.Z
-   git push origin main vX.Y.Z
-   ```
+4. Commit and merge (or push) to `main`. **That is the release.** On every push to `main`,
+   the Release workflow's `check` job asks whether `vX.Y.Z` is already tagged. If it is,
+   nothing else runs. If it is not, the full pipeline runs, and the `release` job creates
+   the tag on that commit together with the GitHub Release. The tag is created with
+   `GITHUB_TOKEN`, so it does not start a second run. A failed release leaves no tag, and
+   the next push to `main` tries again. Releases never overlap (`concurrency: release`).
+   Pushing a tag yourself still works (`git tag vX.Y.Z && git push origin vX.Y.Z`), and so
+   does **Actions → Release → Run workflow**: a dry run by default, or a real release with
+   `dry_run` unticked.
+   > Merging a version bump publishes to PyPI and npm, and a PyPI version can never be
+   > uploaded again. Bump the version only in the commit that is meant to ship.
 5. Watch **Actions → Release**. Jobs, in order:
-   `check` (tag = pyproject = package.json) → `test` (pytest on Ubuntu, Windows, macOS)
+   `check` (tag = pyproject = package.json; release or not) → `test` (pytest on Ubuntu, Windows, macOS)
    and `engine` (MinGW / manylinux GCC / clang) → `wheels` (one per OS, each
    smoke-installed into a fresh venv on its own OS and started with
    `--no-open`, until `/health` answers) and `sdist` → `release` (GitHub Release +
-   assets + `SHA256SUMS.txt`) → `pypi` → `npm`.
+   assets + `SHA256SUMS.txt`) → `pypi` → `npm` (then `npm deprecate imurun@<0.2.0`,
+   best effort, needs `NPM_TOKEN`).
 6. Verify from a clean machine or venv:
    ```
    pip install --upgrade imurun && imurun --version

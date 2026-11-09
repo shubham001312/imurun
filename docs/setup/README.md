@@ -38,7 +38,7 @@ pip install -U imurun              # upgrade (also from the old 0.1.x CLI, see b
 > says that the version is not on PyPI yet). Everything below was verified by
 > building the wheel and the npm tarball from this repository and installing them
 > into fresh environments outside the checkout. It becomes true for PyPI/npm users
-> once the `v0.3.0` tag is pushed and the release workflow publishes
+> once 0.3.0 reaches `main` and the release workflow publishes it on its own
 > (`docs/setup/RELEASE.md`). Until then use `pip install <path>/imurun-0.3.0-*.whl`,
 > `IMURUN_WHEEL=<wheel> npx <path>/imurun-0.3.0.tgz`, or the source checkout.
 
