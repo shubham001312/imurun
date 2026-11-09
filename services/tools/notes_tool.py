@@ -48,7 +48,9 @@ class NotesTool(Tool):
 
     def __init__(self, storage_dir: str | None = None):
         if storage_dir is None:
-            storage_dir = os.path.join(os.path.expanduser("~"), ".imurun", "notes")
+            from ..paths import data_root  # honours IMURUN_DATA_ROOT
+
+            storage_dir = str(data_root() / "notes")
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -247,7 +249,9 @@ class FactsTool(Tool):
 
     def __init__(self, storage_dir: str | None = None):
         if storage_dir is None:
-            storage_dir = os.path.join(os.path.expanduser("~"), ".imurun", "facts")
+            from ..paths import data_root  # honours IMURUN_DATA_ROOT
+
+            storage_dir = str(data_root() / "facts")
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()

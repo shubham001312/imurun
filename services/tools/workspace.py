@@ -23,7 +23,11 @@ from ..safety.decisions import check_action
 
 
 def default_workspace() -> Path:
-    return Path(os.path.expanduser("~/.imurun/workspace"))
+    """``<data root>/workspace``; honours IMURUN_DATA_ROOT like every other
+    store (it used to be ``~/.imurun/workspace`` whatever the data root)."""
+    from ..paths import data_root
+
+    return data_root() / "workspace"
 
 
 class WorkspaceError(ValueError):

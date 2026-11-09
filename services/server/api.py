@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import html
 import json
+import logging
+import math
 import secrets
 import threading
 import time
@@ -165,6 +167,58 @@ if not _HAS_MODELS_API:
 
 MAX_BODY = 1_000_000
 MAX_READ = 1_000
+# Seconds a request may stall while its line, headers or body are read. Without
+# it a body shorter than its Content-Length held a handler thread forever. It
+# only bounds blocking socket waits: an idle SSE stream sends its own pings.
+REQUEST_TIMEOUT = 60.0
+
+logger = logging.getLogger(__name__)
+
+
+def _finite_float(text: str) -> float:
+    """``json`` turns 1e309 into inf; every route expects a real number."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite number")
+    return value
+
+
+def _no_constant(name: str):
+    """Reject the non-standard NaN / Infinity / -Infinity literals."""
+    raise ValueError(f"invalid JSON literal {name}")
+
+
+def _text(payload: dict, key: str) -> str:
+    """A string field of a request body; JSON null counts as missing (``str``
+    alone turned it into the text "None": a session or skill named None)."""
+    value = payload.get(key)
+    return "" if value is None else str(value)
+
+
+def _guarded(method):
+    """Last resort for a handler method: an unexpected exception becomes a JSON
+    500 (or just a closed connection when the reply had already started)
+    instead of a dropped connection and a stdlib traceback on stderr. Only the
+    path is logged, never the query (it can carry ?token=) or headers."""
+
+    def run(self) -> None:
+        try:
+            method(self)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            self.close_connection = True
+        except Exception:  # noqa: BLE001 - see docstring
+            route = urlsplit(self.path or "").path
+            logger.exception("unhandled error in %s %s", self.command, route)
+            self.close_connection = True
+            if not getattr(self, "_responded", False):
+                try:
+                    self._reply(500, {"error": "internal error"})
+                except OSError:
+                    pass
+
+    run.__name__ = method.__name__
+    run.__doc__ = method.__doc__
+    return run
 LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 CSP = (
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
@@ -249,6 +303,7 @@ class ApiServer:
         self._sessions_root = sessions_root
         self._gate = gate or ConnectorGate()
         self._max_body = max_body
+        self._request_timeout = REQUEST_TIMEOUT
         self._mark = mark
         self._token = token or secrets.token_urlsafe(24)
         self._static_root = Path(static_root) if static_root is not None else None
@@ -424,8 +479,17 @@ class ApiServer:
         server = self
 
         class Handler(BaseHTTPRequestHandler):
+            # Read by StreamRequestHandler.setup() as the socket timeout.
+            @property
+            def timeout(self) -> float:
+                return server._request_timeout
+
             def log_message(self, *_args) -> None:  # noqa: D401 - quiet by design
                 return
+
+            def send_response(self, code, message=None) -> None:
+                self._responded = True
+                super().send_response(code, message)
 
             def _reply(self, code: int, payload: dict) -> None:
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -516,6 +580,9 @@ class ApiServer:
                 try:
                     length = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
+                    length = -1
+                if length < 0:
+                    self.close_connection = True
                     self._reply(400, {"error": "invalid content length"})
                     return None
                 if length > server._max_body:
@@ -526,9 +593,19 @@ class ApiServer:
                         self.close_connection = True
                     self._reply(413, {"error": "body too large"})
                     return None
-                raw = self.rfile.read(length) if length else b"{}"
                 try:
-                    payload = json.loads(raw.decode("utf-8"))
+                    raw = self.rfile.read(length) if length else b"{}"
+                except TimeoutError:
+                    self.close_connection = True
+                    self._reply(408, {"error": "request timed out"})
+                    return None
+                if len(raw) < length:
+                    # The client closed early; nobody is left to answer.
+                    self.close_connection = True
+                    return None
+                try:
+                    payload = json.loads(raw.decode("utf-8"), parse_float=_finite_float,
+                                         parse_constant=_no_constant)
                 except (ValueError, UnicodeDecodeError):
                     self._reply(400, {"error": "invalid json"})
                     return None
@@ -931,8 +1008,8 @@ class ApiServer:
                         return
                     try:
                         prompt = server._queue.push(
-                            str(payload.get("session_id", "")),
-                            str(payload.get("text", "")),
+                            _text(payload, "session_id"),
+                            _text(payload, "text"),
                         )
                     except ValueError as exc:
                         self._reply(400, {"error": str(exc)})
@@ -953,7 +1030,7 @@ class ApiServer:
                         return
                     try:
                         session = Session.start(
-                            str(payload.get("first_command", "")),
+                            _text(payload, "first_command"),
                             server._sessions_root,
                             mark=lambda rule, subject, why: server._record(
                                 subject, f"{rule}: {why}"
@@ -970,7 +1047,7 @@ class ApiServer:
                     payload = self._body()
                     if payload is None:
                         return
-                    session_id = str(payload.get("session_id", ""))
+                    session_id = _text(payload, "session_id")
                     prompt = str(payload.get("text") or payload.get("prompt") or "")
                     if not session_id:
                         self._reply(400, {"error": "session_id is required"})
@@ -1018,9 +1095,9 @@ class ApiServer:
                         return
                     try:
                         skill = server._skills.create(
-                            str(payload.get("name", "")),
-                            str(payload.get("description", "")),
-                            str(payload.get("body", "")),
+                            _text(payload, "name"),
+                            _text(payload, "description"),
+                            _text(payload, "body"),
                         )
                     except FileExistsError as exc:
                         self._reply(409, {"error": str(exc)})
@@ -1054,7 +1131,7 @@ class ApiServer:
                         self._reply(404, {"error": "unknown session"})
                         return
                     try:
-                        identity = session.rename(str(payload.get("name", "")))
+                        identity = session.rename(_text(payload, "name"))
                     except ValueError as exc:
                         self._reply(400, {"error": str(exc)})
                         return
@@ -1209,7 +1286,11 @@ class ApiServer:
                     # Use the queued model switch mechanism
                     result = server._turns.request_model_switch(target)
                     if not result.get("ok"):
-                        self._reply(500, {"error": result.get("error", "model switch failed")})
+                        error = result.get("error") or "model switch failed"
+                        if result.get("reason") == "load_failed":
+                            self._reply(422, {"error": error, "reason": "load_failed"})
+                        else:
+                            self._reply(500, {"error": error})
                         return
                     # Persist the selected model so it loads on next startup
                     try:
@@ -1234,7 +1315,7 @@ class ApiServer:
                     payload = self._body()
                     if payload is None:
                         return
-                    model_id = str(payload.get("model_id", ""))
+                    model_id = _text(payload, "model_id")
                     token = payload.get("token")
                     if not model_id:
                         self._reply(400, {"error": "model_id is required"})
@@ -1284,6 +1365,13 @@ class ApiServer:
                         except OSError:
                             pass
                     finally:
+                        # Finalise the download generator left mid-iteration
+                        # (the return above, or a client that hung up) so its
+                        # cleanup runs: the open .part file and HTTP response.
+                        try:
+                            loop.run_until_complete(loop.shutdown_asyncgens())
+                        except Exception:  # noqa: BLE001 - cleanup must not raise
+                            pass
                         loop.close()
                         self.close_connection = True
                     return
@@ -1295,7 +1383,7 @@ class ApiServer:
                         return
                     try:
                         client = server._clients.create(
-                            str(payload.get("name", "")),
+                            _text(payload, "name"),
                             payload.get("scopes") or [],
                         )
                     except ValueError as exc:
@@ -1366,9 +1454,9 @@ class ApiServer:
                     try:
                         server._persona_store.save(
                             Persona(
-                                name=str(payload.get("name", "")),
-                                email_role=str(payload.get("email_role", "")),
-                                description=str(payload.get("description", "")),
+                                name=_text(payload, "name"),
+                                email_role=_text(payload, "email_role"),
+                                description=_text(payload, "description"),
                             )
                         )
                     except (ValueError, TypeError) as exc:
@@ -1461,4 +1549,7 @@ class ApiServer:
                 self._reply(404, {"error": "not found"})
 
 
+        for _name in ("do_GET", "do_POST", "do_PUT", "do_DELETE"):
+            if _name in Handler.__dict__:
+                setattr(Handler, _name, _guarded(Handler.__dict__[_name]))
         return Handler

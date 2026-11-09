@@ -32,7 +32,9 @@ def locate_root(start: Path | None = None) -> Path:
         if (directory / "imurun" / "docker-compose.yml").is_file():
             return directory / "imurun"
 
-    return here
+    # No compose file anywhere: report a directory (``here`` is stack.py
+    # itself by default, which gave ".../stack.py/docker-compose.yml").
+    return here.parent if here.is_file() else here
 
 
 class StackController:

@@ -328,6 +328,9 @@ class TurnRunner:
             err = getattr(getattr(self._model, "_fish", None), "_native", None)
             detail = getattr(err, "error", None) if err is not None else None
             result["error"] = detail or "the model could not be selected"
+            # The engine refused the file (not a GGUF, truncated, unsupported):
+            # a property of the request, answered 422 rather than 500.
+            result["reason"] = "load_failed"
 
     def request_model_switch(self, model_path: Path) -> dict:
         """Request a model switch. Returns immediately with status.

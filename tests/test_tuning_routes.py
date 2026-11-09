@@ -12,11 +12,12 @@ from services.skills.store import SkillsStore
 from services.tools import ToolRunner, default_registry
 from services.tuning import routes as tuning_routes
 from tests.test_agentic_api import FakeModel, req
-from tests.tuning_fakes import LONG, FakeBackend, laptop
+from tests.tuning_fakes import roomy_disk, LONG, FakeBackend, laptop
 
 
 @pytest.fixture()
 def api(tmp_path, monkeypatch):
+    roomy_disk(monkeypatch)  # the disk guard must not read this machine's /tmp
     monkeypatch.setattr(mm, "FISH_COMPATIBLE_IDS", set(mm.FISH_COMPATIBLE_IDS))
     monkeypatch.setattr(mm, "RECOMMENDED_MODELS", dict(mm.RECOMMENDED_MODELS))
     monkeypatch.setattr(tuning_routes.feasibility, "probe_hardware", lambda *a, **k: laptop())
