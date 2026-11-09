@@ -653,6 +653,23 @@
     return fetchAPI(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
   }
 
+  /* Install from GitHub: preview has no side effects; import installs the
+   * chosen folder paths at the previewed commit (ref). */
+  async function previewSkillImport(url) {
+    return fetchAPI('/api/skills/import/preview', { method: 'POST', body: JSON.stringify({ url: url }) });
+  }
+
+  async function importSkills(url, paths, ref) {
+    return fetchAPI('/api/skills/import', {
+      method: 'POST',
+      body: JSON.stringify({ url: url, paths: paths, ref: ref || '' }),
+    });
+  }
+
+  async function updateSkill(id) {
+    return fetchAPI(`/api/skills/${encodeURIComponent(id)}/update`, { method: 'POST', body: '{}' });
+  }
+
   /* ------------------------------------------------------------ Connectors */
 
   /* options.open: the server opens the sign-in page in the SYSTEM browser
@@ -1060,6 +1077,9 @@
     createSkill,
     getSkill,
     deleteSkill,
+    previewSkillImport,
+    importSkills,
+    updateSkill,
     connectConnector,
     disconnectConnector,
     getConnectorStatus,
