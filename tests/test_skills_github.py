@@ -404,7 +404,7 @@ def test_install_round_trip_and_delete(fake, store):
     folder = store.root / "pdf"
     assert (folder / "reference.md").read_text() == "Reference text.\n"
     assert (folder / "forms" / "guide.txt").is_file()
-    written = sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file())
+    written = sorted(p.relative_to(folder).as_posix() for p in folder.rglob("*") if p.is_file())
     assert written == [".source.json", "SKILL.md", "forms/guide.txt", "reference.md"]
     assert not (store.root.parent / "escape.md").exists()
     manifest = store.source_manifest("pdf")

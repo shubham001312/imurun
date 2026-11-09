@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from .limits import Limits
 from .profile import MachineProfile
+from ..paths import user_home
 
 GB = 1024**3
 
@@ -215,7 +216,7 @@ def _autorun_target(path: str) -> bool:
         return True
     if candidate.lower().endswith(_LAUNCHER_SUFFIXES):
         return True
-    home = os.path.expanduser("~")
+    home = str(user_home())
     roots = [os.path.join(home, *item.split("/")) for item in _HOME_AUTORUN]
     data = os.getenv("IMURUN_DATA_ROOT", "").strip()
     if data:
@@ -229,7 +230,7 @@ def _autorun_target(path: str) -> bool:
 
 def _protected(path: str, project_root: str, extra: tuple[str, ...]) -> bool:
     candidate = _norm(path)
-    home = os.path.expanduser("~")
+    home = str(user_home())
     secret_roots = tuple(os.path.join(home, d) for d in _HOME_SECRET_DIRS)
     roots = (GUARDRAIL_DIR, os.path.join(project_root, ".git")) + secret_roots + tuple(extra)
     for root in roots:

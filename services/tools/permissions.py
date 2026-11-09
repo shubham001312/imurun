@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from ..safety.decisions import DANGEROUS_COMMANDS, Decision
+from ..paths import expand_user
 from .workspace import (Workspace, WorkspaceError, contains_home, default_workspace,
                         is_filesystem_root)
 
@@ -180,7 +181,7 @@ class PermissionPolicy:
         if self.workspace_override:
             return Path(self.workspace_override)
         root = self.values()["workspaceRoot"]
-        return Path(os.path.expanduser(root)) if root else default_workspace()
+        return expand_user(root) if root else default_workspace()
 
     def _extra_roots(self) -> list[str]:
         return list(self.values()["extraRoots"])
@@ -204,7 +205,7 @@ class PermissionPolicy:
                 text = str(item or "").strip()
                 if not text:
                     continue
-                path = Path(os.path.expanduser(text))
+                path = expand_user(text)
                 if not path.is_absolute():
                     raise ValueError(f"{text} must be an absolute path (or start with ~)")
                 if is_filesystem_root(path):
@@ -218,7 +219,7 @@ class PermissionPolicy:
         if "workspaceRoot" in payload:
             root = str(payload["workspaceRoot"] or "").strip()
             if root:
-                path = Path(os.path.expanduser(root))
+                path = expand_user(root)
                 if not path.is_absolute():
                     raise ValueError("workspaceRoot must be an absolute path")
                 if is_filesystem_root(path):

@@ -82,6 +82,8 @@ def _is_program(command: str) -> bool:
         return False
     if first.lower() in _BUILTINS or first.lower() in _COMMON:
         return True
+    if first != first.lower():
+        return False
     if os.sep in first or "/" in first:
         return os.path.isfile(os.path.expanduser(first))
     return shutil.which(first) is not None

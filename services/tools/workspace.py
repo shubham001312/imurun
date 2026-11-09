@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..safety.decisions import check_action
+from ..paths import expand_user, user_home
 
 
 def default_workspace() -> Path:
@@ -44,8 +45,8 @@ def contains_home(path: Path | str) -> bool:
     """True when ``path`` is the home folder or a folder above it: approving
     it would expose every credential and start-up file (security review L3)."""
     try:
-        target = Path(os.path.realpath(os.path.expanduser(str(path))))
-        home = Path(os.path.realpath(os.path.expanduser("~")))
+        target = Path(os.path.realpath(expand_user(str(path))))
+        home = Path(os.path.realpath(user_home()))
         home.relative_to(target)
         return True
     except (ValueError, OSError):
@@ -76,7 +77,7 @@ class Workspace:
             return []
         out: list[Path] = []
         for item in raw:
-            path = Path(os.path.realpath(os.path.expanduser(str(item))))
+            path = Path(os.path.realpath(expand_user(str(item))))
             if not is_filesystem_root(path) and not contains_home(path) and path not in out:
                 out.append(path)
         return out
@@ -87,7 +88,7 @@ class Workspace:
             raw = self.root_getter()
         except Exception:  # noqa: BLE001 - a broken settings file falls back
             raw = None
-        root = Path(os.path.expanduser(str(raw))) if raw else default_workspace()
+        root = expand_user(str(raw)) if raw else default_workspace()
         return Path(os.path.realpath(root))
 
     def ensure(self) -> Path:
@@ -109,7 +110,7 @@ class Workspace:
         if text in ("", "."):
             candidate = root
         else:
-            given = Path(os.path.expanduser(text))
+            given = expand_user(text)
             candidate = given if given.is_absolute() else root / given
         resolved = Path(os.path.realpath(candidate))
         container = root if _inside(resolved, root) else next(
