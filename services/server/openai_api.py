@@ -53,6 +53,11 @@ KEY_PREFIX = "sk-imurun-"
 OWNED_BY = "imurun"
 ROLES = {"system", "user", "assistant", "developer", "tool", "function"}
 MAX_STOP = 4
+# /v1 generations waiting on (or holding) the engine at once. The engine runs
+# one generation at a time; more than this queued means a runaway client, and
+# the user's own chat would wait behind all of them.
+MAX_PENDING = 4
+_PENDING = threading.BoundedSemaphore(MAX_PENDING)
 
 
 # --------------------------------------------------------------------- key
@@ -78,9 +83,14 @@ class ApiKeyStore:
         except OSError:
             pass
         temporary = self.path.with_name(self.path.name + ".tmp")
-        # Created 0600 from the first byte: never world-readable, not even
-        # for the moment between write and chmod.
-        fd = os.open(str(temporary), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # A leftover tmp (crash) keeps its old mode and a planted symlink
+        # would be followed: remove it, then create a fresh 0600 file.
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(temporary), flags, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(key + "\n")
         os.replace(temporary, self.path)
@@ -94,14 +104,22 @@ class ApiKeyStore:
         with self._lock:
             if self._key:
                 return self._key
-            key = ""
             try:
                 key = self.path.read_text(encoding="utf-8").strip()
-            except OSError:
+            except FileNotFoundError:
                 key = ""
+            # Any other OSError (a lock held by antivirus, a permission
+            # problem) propagates: silently minting a new key would break
+            # every app the user configured.
             if not key.startswith(KEY_PREFIX) or len(key) < len(KEY_PREFIX) + 20:
                 key = self._new()
                 self._write(key)
+            else:
+                for target, mode in ((self.path, 0o600), (self.path.parent, 0o700)):
+                    try:
+                        os.chmod(target, mode)
+                    except OSError:
+                        pass
             self._key = key
             return key
 
@@ -122,6 +140,8 @@ class ApiKeyStore:
         try:
             return secrets.compare_digest(candidate, self.get())
         except TypeError:  # non-ASCII input can never match
+            return False
+        except OSError:  # the key file cannot be read: nothing matches
             return False
 
 
@@ -550,7 +570,9 @@ def _completion(server, handler, request: dict) -> None:
         try:
             text, chunks = _run(collect())
         except Exception as exc:  # noqa: BLE001 - the client gets an OpenAI error
-            _error(handler, 500, f"Generation failed: {exc}", "server_error", "generation_failed")
+            server._record("/v1/chat/completions", f"generation failed: {type(exc).__name__}")
+            _error(handler, 500, "Generation failed in the local engine; see IMURUN for details.",
+                   "server_error", "generation_failed")
             return
         usage = _usage(model, messages, chunks)
         _record_usage(server, usage["completion_tokens"])
@@ -611,9 +633,10 @@ def _completion(server, handler, request: dict) -> None:
     except (BrokenPipeError, ConnectionResetError):
         return  # the client went away; the engine was cancelled on close
     except Exception as exc:  # noqa: BLE001 - reported in-band, then [DONE]
+        server._record("/v1/chat/completions", f"generation failed: {type(exc).__name__}")
         try:
-            error = {"error": {"message": f"Generation failed: {exc}", "type": "server_error",
-                               "param": None, "code": "generation_failed"}}
+            error = {"error": {"message": "Generation failed in the local engine; see IMURUN for details.",
+                               "type": "server_error", "param": None, "code": "generation_failed"}}
             send(b"data: " + json.dumps(error).encode("utf-8") + b"\n\n")
             send(b"data: [DONE]\n\n")
         except OSError:
@@ -643,15 +666,27 @@ def dispatch(server, handler, method: str) -> None:
     """Entry point from ``api.py``; ``handler._local()`` has already passed."""
     path = unquote(urlsplit(handler.path).path).rstrip("/") or "/"
     if path in UI_PATHS:
-        if not handler._authorized():  # the shell's per-run token
+        # The shell token in the Authorization header only: api.py also takes
+        # ?token= on GET (for EventSource), and a URL that lands in history
+        # or a log must not be able to yield the long-lived key.
+        if not handler.headers.get("Authorization", "").strip().lower().startswith("bearer "):
+            server._record(path, "denied: header token required")
+            _json(handler, 401, {"error": "unauthorized"})
             return
-        if method == "GET" and path == "/api/openai":
-            _json(handler, 200, ui_view(server))
-        elif method == "POST" and path == "/api/openai/rotate":
-            key_store(server).rotate()
-            _json(handler, 200, ui_view(server))
-        else:
-            _json(handler, 405, {"error": "method not allowed"})
+        if not handler._authorized():
+            return
+        try:
+            if method == "GET" and path == "/api/openai":
+                _json(handler, 200, ui_view(server))
+            elif method == "POST" and path == "/api/openai/rotate":
+                key_store(server).rotate()
+                _json(handler, 200, ui_view(server))
+            else:
+                _json(handler, 405, {"error": "method not allowed"})
+        except OSError:
+            server._record(path, "api key file unreadable")
+            _json(handler, 503, {"error": "key_unreadable",
+                                 "message": "The API key file cannot be read; check its permissions."})
         return
 
     if not _authorized_v1(server, handler):
@@ -690,7 +725,18 @@ def dispatch(server, handler, method: str) -> None:
         # `model` is accepted as given: IMURUN serves exactly one model, and
         # tools that insist on their own id (an alias in their config) must
         # not fail. The reply's `model` names what actually answered.
-        _completion(server, handler, request)
+        # A reply can never be longer than the context; a huge max_tokens
+        # would pin the engine (and the user's chat behind it) for nothing.
+        if request["max_tokens"]:
+            request["max_tokens"] = min(request["max_tokens"], _context_window(server))
+        if not _PENDING.acquire(blocking=False):
+            _error(handler, 429, f"IMURUN is already handling {MAX_PENDING} API requests; retry shortly.",
+                   "rate_limit_error", "too_many_requests")
+            return
+        try:
+            _completion(server, handler, request)
+        finally:
+            _PENDING.release()
         return
     _error(handler, 404, f"Unknown endpoint {path}. IMURUN serves /v1/models and /v1/chat/completions.",
            "invalid_request_error", "unknown_url")

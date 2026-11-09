@@ -309,6 +309,55 @@ def test_key_is_never_logged_or_marked(tmp_path):
         server.stop()
 
 
+def test_ui_view_refuses_the_query_token(api):
+    server, _, _ = api
+    # api.py accepts ?token= on GET for EventSource; the long-lived key must
+    # not be reachable through a URL.
+    status, body = req(server, "GET", f"/api/openai?token={server.token}")
+    assert status == 401 and "apiKey" not in body
+
+
+def test_max_tokens_is_clamped_to_the_context(api):
+    server, model, _ = api
+    status, _ = req(server, "POST", "/v1/chat/completions", {
+        "messages": [{"role": "user", "content": "x"}], "max_tokens": 10**9,
+    }, key=api_key(server))
+    assert status == 200
+    assert model.seen[-1][1].max_tokens == 4096
+
+
+def test_too_many_pending_requests_is_429(api, monkeypatch):
+    import threading
+
+    from services.server import openai_api
+
+    server, _, _ = api
+    monkeypatch.setattr(openai_api, "_PENDING", threading.BoundedSemaphore(1))
+    openai_api._PENDING.acquire()  # one generation already in flight
+    try:
+        status, err = req(server, "POST", "/v1/chat/completions",
+                          {"messages": [{"role": "user", "content": "x"}]}, key=api_key(server))
+    finally:
+        openai_api._PENDING.release()
+    assert status == 429 and err["error"]["type"] == "rate_limit_error"
+
+
+def test_stale_tmp_and_loose_permissions_are_fixed(tmp_path):
+    from services.server.openai_api import ApiKeyStore
+
+    path = tmp_path / "secrets" / "openai_api_key"
+    path.parent.mkdir()
+    stale = path.with_name(path.name + ".tmp")
+    stale.write_text("old")
+    store = ApiKeyStore(path)
+    key = store.rotate()
+    assert path.read_text().strip() == key and not stale.exists()
+    if os.name == "posix":
+        os.chmod(path, 0o644)
+        assert ApiKeyStore(path).get() == key  # same key, not a new one
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_stop_filter_holds_back_partial_matches():
     f = StopFilter(["END"])
     assert f.feed("abc") == "a"

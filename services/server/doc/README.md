@@ -175,9 +175,16 @@ the path; the key and headers are never logged or marked.
 non-text content part, `max_tokens`/`max_completion_tokens` < 1, `temperature`
 outside 0..2, `top_p` outside (0, 1], more than 4 `stop` strings, non-boolean
 `stream`, `n` != 1; `param` names the field), `401`, `404 model_not_found` /
-`unknown_url`, `405`, `413 request_too_large` (the server's `max_body`), `503`
+`unknown_url`, `405`, `413 request_too_large` (the server's `max_body`), `429`
+`rate_limit_error`/`too_many_requests` (more than `MAX_PENDING = 4` completions
+already waiting on or holding the engine), `503`
 `server_error`/`model_not_available` when `TurnRunner.available` is false, `500`
-`generation_failed`.
+`generation_failed` (generic message; the exception type goes to a `G3-api` mark).
+`max_tokens` is clamped to the model's context window. `/api/openai[/rotate]`
+accept the shell token only in the `Authorization` header (not `?token=`), so a
+URL can never yield the long-lived key. The key file is regenerated only when it
+is missing or malformed; an unreadable file answers `503 key_unreadable` instead
+of silently replacing the key.
 
 | Method | Path | Body | Reply |
 |---|---|---|---|
