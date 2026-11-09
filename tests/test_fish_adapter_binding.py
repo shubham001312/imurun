@@ -156,6 +156,21 @@ def test_failed_select_restores_previous_model_and_adapter(tmp_path):
     assert last_load == ("load", str(base), (str(ad), 1.0))
 
 
+def test_failed_first_select_leaves_no_model_configured(tmp_path):
+    # With no previous model, a file that will not load used to stay as the
+    # model path: configured was true, /api/status said "ready" and every turn
+    # was accepted only to fail with the load error.
+    (bad,) = _files(tmp_path, "bad.gguf")
+    lib = FakeLib(fail_paths=[bad])
+    c = _client(tmp_path, lib, tmp_path / "none.gguf")
+    c._model_path = None
+    assert not c.configured
+    assert not c.select(bad)
+    assert c.error == "boom"
+    assert c.model_path is None
+    assert not c.configured
+
+
 def test_adapter_info_struct_layout():
     from model.fish_native import FishAdapterInfo
     # int, int, char[128], int, int, float x3, int, u64, double x3, u64 x2 (natural alignment)

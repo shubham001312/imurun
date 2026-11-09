@@ -1279,7 +1279,11 @@ class ApiServer:
                     # Use the queued model switch mechanism
                     result = server._turns.request_model_switch(target)
                     if not result.get("ok"):
-                        self._reply(500, {"error": result.get("error", "model switch failed")})
+                        error = result.get("error") or "model switch failed"
+                        if result.get("reason") == "load_failed":
+                            self._reply(422, {"error": error, "reason": "load_failed"})
+                        else:
+                            self._reply(500, {"error": error})
                         return
                     # Persist the selected model so it loads on next startup
                     try:

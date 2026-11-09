@@ -143,3 +143,42 @@ def test_download_stream_finalises_the_download_generator(server, monkeypatch):
             data += chunk
     assert b'"status": "complete"' in data
     assert closed == ["m1"]
+
+
+def test_selecting_a_model_file_that_will_not_load_is_422(tmp_path, monkeypatch):
+    # Seen live: a corrupt .gguf answered 500 {"error": "not a GGUF file"}.
+    from types import SimpleNamespace
+
+    from services.server import api as api_module
+
+    bad = tmp_path / "bad.gguf"
+    bad.write_bytes(b"not a model")
+
+    class Model(_Model):
+        def __init__(self):
+            self._fish = SimpleNamespace(_native=SimpleNamespace(error="not a GGUF file"))
+
+        def select(self, path):
+            return False
+
+    class Manager:
+        def get_model_path(self, model_id):
+            return bad
+
+        def is_compatible(self, model_id):
+            return True
+
+    monkeypatch.setattr(api_module, "_HAS_MODELS_API", True)
+    monkeypatch.setattr(api_module, "get_model_manager", lambda *a, **k: Manager())
+    srv = ApiServer(
+        persona_store=PersonaStore(tmp_path / "persona.json"),
+        sessions_root=tmp_path / "sessions", data_root=tmp_path, model=Model(),
+        skills=SkillsStore(tmp_path / "skills"), static_root=None,
+    )
+    srv.start()
+    try:
+        status, body = _raw(srv, _post(srv, "/api/models/select", b'{"id": "m"}'))
+    finally:
+        srv.stop()
+    assert status == 422
+    assert body == {"error": "not a GGUF file", "reason": "load_failed"}

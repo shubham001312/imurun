@@ -53,6 +53,15 @@ CPU engine with Llama 3.2 1B) and probing every main route.
   the response (`Content-Length` / `Content-Range`), only an exact size may delete or skip
   a `.part`, and a 416 whose total equals the bytes on disk counts as complete. The nine
   catalogue sizes are corrected to the served values. Test: `tests/test_download_served_size.py`.
+- **Selecting a model file that will not load left it as "the model"**
+  (`model/fish_native.py` `FishNativeClient.select`). With no previous model to restore,
+  the broken path stayed in `_model_path`, so `/api/status` said `runtime: "ready"` with
+  `selected_model` = the broken file, and every turn was accepted (200) only to fail with
+  "not a GGUF file". Now the client is left with no model: status says provisioning and a
+  turn gets `503 model_unavailable / no_model`. `POST /api/models/select` answers such a
+  file with **422** `{error: <engine message>, reason: "load_failed"}` instead of 500
+  (`services/server/turns.py` `_select_model`, `api.py`). Tests:
+  `tests/test_fish_adapter_binding.py`, `tests/test_api_bad_requests.py`.
 
 ## 2026-11-03 — resource governor (resources owner)
 
