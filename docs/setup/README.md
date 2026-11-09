@@ -278,6 +278,14 @@ agent". Once 0.3.0 is published, `pip install -U imurun` (or `npm i -g imurun@la
 replaces it. The npm launcher always installs exactly its own version, so a stale 0.1.x
 in `~/.imurun/venv` is replaced automatically.
 
+### `pip install imurun` still gives 0.1.11 after 0.3.0 is published
+
+0.3.0 needs Python 3.11+, and 0.1.x accepted 3.9+. On Python 3.9 or 3.10, pip skips
+0.3.0 without saying so and installs the newest 0.1.x. Check `python --version` and use
+3.11 to 3.14. The project owner can make this fail loudly by yanking 0.1.0 to 0.1.11 on
+PyPI (project → Manage → Releases → Options → Yank). After that, a plain
+`pip install imurun` on an old Python fails with "requires a different Python" instead.
+
 ### `'imurun' is not recognized` / `command not found: imurun`
 
 pip put the script in a folder that is not on PATH. pip prints a warning that names

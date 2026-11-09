@@ -1,5 +1,22 @@
 # Setup / packaging changelog
 
+## 2026-11-09 — packaging no longer ships stale files
+
+- `setup.py`: `build_py` now empties the copied part of the package (`services/`,
+  `model/`, `frontend/`, `docs/`, `bin/`, `start.py`, `install.py`, `window.py`,
+  `requirements*.txt`, `LICENSE`) in `build/lib/imurun/` before copying again.
+  setuptools reuses `build/lib` between builds and only adds to it, so after one
+  `pip install .` / `python -m build` in a checkout, every later wheel also carried files
+  that had since been deleted from the repo. It also carried the engine library from an
+  earlier build, even with `IMURUN_BUNDLE_ENGINE=0`. Reproduced: a deleted
+  `services/zz_stale.py` and `bin/fish.dll` both showed up in the next pure wheel. Now the
+  second build matches a clean one (289 files).
+- `npm/imurun.js`: with `IMURUN_WHEEL=<wheel>`, the launcher compares the version in the
+  wheel's file name with the one in the venv and installs when they differ. Before this, an
+  existing install, for example the old 0.1.11 in `~/.imurun/venv`, was kept and run
+  (reproduced: `imurun --version` printed `0.1.11`). When the file name gives no version,
+  it always installs.
+
 ## 2026-11-03 — data folder created up front
 
 - `install.py`: `HOME_DIRS` + `ensure_home_layout()` create the whole `~/.imurun` tree
