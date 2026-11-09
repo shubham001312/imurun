@@ -469,6 +469,7 @@ def main(argv=None):
         ui.hint("Is IMURUN already running? Try another port with --port.")
         sys.exit(1)
 
+    _stop_on_signals()
     try:
         # Write runtime info
         runtime_path = write_runtime(cfg.data_root, server.port, server.token)
@@ -494,6 +495,28 @@ def main(argv=None):
         server.stop()
         clear_runtime(cfg.data_root)
         ui.ok("Stopped.")
+
+
+def _stop_on_signals():
+    """`kill`, logout/terminal close and Ctrl+Break take the same clean path as Ctrl+C.
+
+    Without this, SIGTERM (what `kill`, systemd, launchd and most process
+    managers send) ended the process at once: no server.stop(), and
+    runtime/api.json kept a dead port and token for the next client to find.
+    """
+    import signal
+
+    def _interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, _interrupt)
+        except (ValueError, OSError):  # not the main thread / not allowed here
+            pass
 
 
 if __name__ == "__main__":

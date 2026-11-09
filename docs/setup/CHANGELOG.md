@@ -11,6 +11,10 @@
   earlier build, even with `IMURUN_BUNDLE_ENGINE=0`. Reproduced: a deleted
   `services/zz_stale.py` and `bin/fish.dll` both showed up in the next pure wheel. Now the
   second build matches a clean one (289 files).
+- `start.py`: SIGTERM, SIGHUP and Ctrl+Break now take the same clean path as Ctrl+C. Before
+  this, `kill`, systemd or launchd stopped the process without `server.stop()`, and
+  `runtime/api.json` was left with a dead port and token. Verified: after `kill -TERM` the log
+  ends with "Stopped.", `api.json` is gone and the port is closed.
 - **Security review fixes** (independent review of the setup and CI changes; no Critical findings):
   - The `imurun` launcher and the npm launcher run `python -P -m imurun`. Without `-P`, typing
     `imurun` inside an untrusted folder imported that folder's `imurun/` or `json.py`. A test

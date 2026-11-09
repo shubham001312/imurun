@@ -293,10 +293,24 @@ def _authorized_v1(server, handler) -> bool:
 # ------------------------------------------------------------------ body
 
 
+def _finite(text: str) -> float:
+    value = float(text)
+    if value != value or value in (float("inf"), float("-inf")):
+        raise ValueError("non-finite number")
+    return value
+
+
+def _no_constant(name: str):
+    raise ValueError(f"{name} is not valid JSON")
+
+
 def _read_body(server, handler) -> dict | None:
     try:
         length = int(handler.headers.get("Content-Length") or 0)
     except ValueError:
+        length = -1
+    if length < 0:
+        handler.close_connection = True
         _bad(handler, "Invalid Content-Length header.")
         return None
     limit = int(getattr(server, "_max_body", 1_000_000))
@@ -311,9 +325,18 @@ def _read_body(server, handler) -> dict | None:
     if length <= 0:
         _bad(handler, "A JSON request body is required.")
         return None
-    raw = handler.rfile.read(length)
     try:
-        payload = json.loads(raw.decode("utf-8"))
+        raw = handler.rfile.read(length)
+    except TimeoutError:
+        handler.close_connection = True
+        _error(handler, 408, "Timed out reading the request body.", "invalid_request_error", "timeout")
+        return None
+    if len(raw) < length:  # the client hung up mid-body; nobody is left to answer
+        handler.close_connection = True
+        return None
+    try:
+        # Infinity / NaN (e.g. "temperature": Infinity) never reach the sampler.
+        payload = json.loads(raw.decode("utf-8"), parse_float=_finite, parse_constant=_no_constant)
     except (ValueError, UnicodeDecodeError):
         _bad(handler, "We could not parse the JSON body of your request.")
         return None

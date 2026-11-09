@@ -366,3 +366,21 @@ def test_stop_filter_holds_back_partial_matches():
     assert f.feed("D more") == "" and f.hit
     g = StopFilter([])
     assert g.feed("x") == "x"
+
+
+def test_non_finite_numbers_and_bad_lengths_are_400(api):
+    api, _, _ = api
+    key = api_key(api)
+    body = b'{"model": "m", "messages": [{"role": "user", "content": "hi"}], "temperature": Infinity}'
+    status, _, data = raw(api, "POST", "/v1/chat/completions", body, key=key)
+    assert status == 400 and json.loads(data)["error"]["type"] == "invalid_request_error"
+    nan = body.replace(b"Infinity", b"NaN")
+    assert raw(api, "POST", "/v1/chat/completions", nan, key=key)[0] == 400
+    huge = body.replace(b"Infinity", b"1e999")
+    assert raw(api, "POST", "/v1/chat/completions", huge, key=key)[0] == 400
+    status, _, _ = raw(api, "POST", "/v1/chat/completions", b"{}", key=key,
+                       headers={"Content-Length": "-5"})
+    assert status == 400
+    # Not only range-checked fields: a non-finite number anywhere is invalid JSON (RFC 8259).
+    anywhere = b'{"model": "m", "messages": [{"role": "user", "content": "hi"}], "metadata": {"x": NaN}}'
+    assert raw(api, "POST", "/v1/chat/completions", anywhere, key=key)[0] == 400

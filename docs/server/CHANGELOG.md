@@ -2,6 +2,15 @@
 
 The API contract itself is documented in `services/server/doc/README.md`.
 
+## 2026-11-09 — `/v1` request bodies hardened like `/api/*`
+
+- `services/server/openai_api.py` `_read_body`: a negative Content-Length is now a 400. A read
+  timeout is a 408 in the OpenAI error shape. A body cut short gets no reply. `NaN`, `Infinity`
+  and overflowing numbers anywhere in the JSON are a 400, matching the rules `api.py` got the same
+  day. Before this, `{"metadata": {"x": NaN}}` was accepted. Test:
+  `tests/test_openai_api.py::test_non_finite_numbers_and_bad_lengths_are_400` (fails on the old
+  reader).
+
 ## 2026-11-09 — bugs found driving the running server end to end
 
 Found by running `python start.py --no-open` headless (provisioning state, then the
