@@ -1,0 +1,213 @@
+/* Workspace layout: the sidebar as a tool rail and Settings as one sheet with
+ * an index. Loaded after every theme; colours only ever come from the active
+ * theme's variables, so all eight themes keep their own palette.
+ *
+ * The idea: the dot field is the cutting mat, each page is a sheet of paper
+ * laid on it, and the red accent marks only "where you are".
+ */
+
+/* ------------------------------------------------------------- sidebar */
+
+.sidebar { gap: 12px; padding: 16px 12px 12px; }
+.brand { padding: 2px 4px; }
+
+.side-new {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; padding: 8px 8px 8px 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text);
+  font-size: 13px; font-weight: 550; text-align: left;
+}
+.side-new:hover { background: var(--surface-3); border-color: var(--line-strong); color: var(--text); }
+.side-new-plus {
+  width: 18px; height: 18px; flex: none;
+  display: grid; place-items: center;
+  border-radius: 6px; background: var(--accent); color: var(--accent-text, #fff);
+  font: 600 14px/1 var(--font);
+}
+.side-new-text { flex: 1; }
+.side-new-kbd {
+  font: 10.5px/1 var(--mono); color: var(--muted-soft);
+  padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--surface);
+}
+
+.nav { gap: 1px; }
+.nav-caption,
+.side-label {
+  padding: 14px 10px 6px;
+  font: 600 11.5px/1 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--muted-soft);
+}
+.nav-caption:first-child { padding-top: 6px; }
+.side-label { padding: 4px 10px 0; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; font-size: 13.5px; color: var(--muted);
+}
+.nav-ico {
+  width: 17px; height: 17px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round; opacity: .8;
+}
+.nav-item:hover .nav-ico { opacity: 1; }
+.nav-item.active .nav-ico { color: var(--accent); opacity: 1; }
+.nav-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sessions { gap: 1px; }
+.session { padding: 6px 30px 6px 10px; }
+.s-name { font-size: 13px; }
+
+.side-foot {
+  gap: 2px; padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font: inherit;
+}
+.side-foot .status {
+  padding: 6px 10px; border: 0; background: transparent; text-align: left;
+  font: 11px/1.4 var(--mono);
+}
+
+/* Collapsed: a 56 px icon rail instead of an empty strip. Labels are hidden
+ * visually but stay in the accessibility tree (and as tooltips). */
+.shell.sidebar-collapsed .nav,
+.shell.sidebar-collapsed .side-foot { display: grid; width: 100%; justify-items: center; }
+.shell.sidebar-collapsed .side-foot { border-top: 0; }
+.shell.sidebar-collapsed .nav-caption,
+.shell.sidebar-collapsed .side-new-kbd { display: none; }
+.shell.sidebar-collapsed .nav-text,
+.shell.sidebar-collapsed .side-new-text,
+.shell.sidebar-collapsed #status-text {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+.shell.sidebar-collapsed .nav-item { width: 40px; height: 36px; padding: 0; justify-content: center; }
+.shell.sidebar-collapsed .nav-item + .nav-caption + .nav-item { margin-top: 10px; }
+.shell.sidebar-collapsed .side-new { width: 40px; padding: 9px 0; justify-content: center; }
+.shell.sidebar-collapsed .side-foot .status { width: 40px; justify-content: center; padding: 8px 0; }
+
+/* ------------------------------------------------------------ page heads */
+
+/* Kickers read as quiet context, not as shouting labels. */
+.page-kicker {
+  margin-bottom: 6px;
+  font: 600 12px/1 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--muted-soft);
+}
+
+/* --------------------------------------------------------- settings sheet */
+
+#page-settings .page-head { margin-bottom: 16px; }
+
+.settings-layout {
+  grid-template-columns: 216px minmax(0, 1fr);
+  gap: 0; margin-top: 0;
+  min-height: min(760px, calc(100vh - 170px));
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  /* index column + its hairline painted on the sheet itself, so the
+     column runs the full height while the index stays sticky */
+  background:
+    linear-gradient(to right, var(--surface-2) 0 215px, var(--line) 215px 216px, transparent 216px),
+    var(--surface);
+  box-shadow: var(--shadow-card);
+  overflow: clip;
+}
+.settings-subnav {
+  position: sticky; top: 0; align-self: start;
+  gap: 0; padding: 18px 10px 20px;
+  border: 0; background: transparent;
+}
+.settings-group { display: grid; gap: 1px; }
+.settings-group + .settings-group { margin-top: 16px; }
+.settings-group-title {
+  padding: 0 10px 7px;
+  font: 600 11.5px/1 var(--font); color: var(--muted-soft);
+}
+.settings-tab {
+  padding: 7px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--muted);
+  font-size: 13px; font-weight: 450;
+}
+.settings-tab:hover { background: var(--surface-3); color: var(--text); }
+.settings-tab.active {
+  background: var(--surface); color: var(--text); font-weight: 550;
+  border: 0;
+  box-shadow: inset 2px 0 0 var(--accent), 0 1px 2px rgba(0, 0, 0, .05);
+}
+
+.settings-content { padding: 26px 30px 34px; }
+.settings-section-head { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+/* The index already says which section this is. */
+.settings-section-head .settings-label { display: none; }
+.settings-section-title { margin: 0; font-size: 24px; }
+.settings-section-head p { font-size: 13px; }
+
+/* Field labels: plain sentence case, the same voice as the rest of the sheet. */
+.form-field > .k {
+  font: 500 12px/1.3 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--muted);
+}
+
+/* Sub-headings inside a section ("Available models", "Downloaded models"). */
+.settings-content .settings-label {
+  font: 600 13.5px/1.3 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--text);
+}
+
+/* Empty states: one line icon in the rail's style, not an emoji. */
+.empty-icon:has(.empty-svg) {
+  display: grid; place-items: center;
+  width: 44px; height: 44px; margin: 0 auto 12px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface-2); opacity: 1;
+}
+.empty-svg {
+  width: 22px; height: 22px;
+  fill: none; stroke: var(--muted); stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* Models: one "download" call to action at a time. While nothing is
+ * downloaded the empty state carries it, so the header copy steps aside. */
+[data-settings-panel="models"]:has(#models-empty-state:not([hidden])) #download-first-model { display: none; }
+.models-toolbar { gap: 12px; }
+.models-search {
+  min-width: 260px; padding: 8px 11px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); font-size: 13px;
+}
+
+/* Inside the sheet, boxes are drawn with hairlines, not lifted as cards. */
+.settings-content .settings-card,
+.settings-content .panel {
+  background: transparent; box-shadow: none;
+  border: 1px solid var(--line);
+}
+
+@media (max-width: 980px) {
+  .settings-layout {
+    grid-template-columns: 1fr; gap: 0; min-height: 0;
+    background: var(--surface);
+  }
+  .settings-subnav {
+    position: static; flex-direction: column; gap: 10px;
+    padding: 14px 14px 12px;
+    background: var(--surface-2); border-bottom: 1px solid var(--line);
+  }
+  .settings-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .settings-group + .settings-group { margin-top: 0; }
+  .settings-group-title { width: 100%; padding: 0 2px 2px; }
+  .settings-tab { background: var(--surface); border: 1px solid var(--line); }
+  .settings-tab.active { box-shadow: inset 0 -2px 0 var(--accent); }
+  .settings-content { padding: 20px 18px 26px; }
+}
+
+/* Keyboard hints mean nothing on a phone. */
+@media (max-width: 860px), (pointer: coarse) {
+  .side-new-kbd { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-section.is-entering { animation: none; }
+}
