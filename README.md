@@ -50,11 +50,13 @@ Chat templates are applied structurally inside the engine (user text can never
 inject control tokens), a KV prefix cache makes repeated system prompts free, and
 when a model is larger than free RAM the next layer's pages are prefetched while
 the current one computes. Supported architectures: llama (incl. Mistral,
-DeepSeek distills, Mixtral MoE), qwen2/qwen3 (+MoE), phi3, gemma2. Details, limits
+DeepSeek distills, Mixtral MoE), qwen2/qwen3 (+MoE), qwen35 (Qwen3.5 hybrid DeltaNet), phi3,
+gemma2. Details, limits
 and numbers: `docs/engine/`.
 
-What it is **not** (yet): a GPU engine, or a VRAM/NVMe tiered streamer — see
-`docs/ROADMAP.md`.
+GPU: a Vulkan backend runs whole layers in VRAM where they fit (tested on NVIDIA only;
+`docs/engine/GPU.md`). What it is **not** (yet): a GPU engine on macOS (no Metal; the Mac
+build is CPU-only), or a VRAM/NVMe tiered streamer — see `docs/ROADMAP.md`.
 
 ## Build the engine
 

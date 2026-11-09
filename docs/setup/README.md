@@ -30,23 +30,16 @@ npx imurun                         # npm launcher (or: npm i -g imurun && imurun
 pip install -U imurun              # upgrade (also from the old 0.1.x CLI, see below)
 ```
 
-> **Status 2026-11-03: these commands do not install this app yet.** PyPI and npm
-> still serve `imurun` **0.1.11** (Oct 2026), the earlier Bun/TypeScript CLI that
-> downloads `imurun-windows-x64.exe` etc. from the v0.1.11 GitHub release. 0.3.0 (this
-> app) has never been released. So `pip install imurun` gives 0.1.11, and the 0.3.0
-> npm launcher fails with `No matching distribution found for imurun==0.3.0` (it now
-> says that the version is not on PyPI yet). Everything below was verified by
-> building the wheel and the npm tarball from this repository and installing them
-> into fresh environments outside the checkout. It becomes true for PyPI/npm users
-> once 0.3.0 reaches `main` and the release workflow publishes it on its own
-> (`docs/setup/RELEASE.md`). Until then use `pip install <path>/imurun-0.3.0-*.whl`,
-> `IMURUN_WHEEL=<wheel> npx <path>/imurun-0.3.0.tgz`, or the source checkout.
+> **Status 2026-11-09:** this app is published on PyPI and npm (0.3.0, 0.3.2, 0.3.3).
+> 0.3.x has no in-app updater yet; upgrade with `pip install -U imurun` (or
+> `pipx upgrade imurun`, `npm i -g imurun@latest`). The old 0.1.x CLI's own
+> `imurun update` also reaches 0.3.x through npm.
 
 | Command | What it does |
 |---|---|
 | `imurun` | start. The first run installs whatever is missing (next section), then opens the window or the browser |
 | `imurun --no-open --port 8800` | server only, on another port (every `start.py` flag works) |
-| `imurun --version` | prints `imurun 0.3.0` |
+| `imurun --version` | prints `imurun <version>` (e.g. `imurun 0.3.3`) |
 | `imurun doctor [--port N]` | Python, core packages, frontend, engine (loads it and prints the ABI), Vulkan loader + GPU driver, home dir, models dir, install state, port free |
 | `imurun install [--force] [--no-voice] [--tuning] [--no-build]` | runs the installer into this interpreter (= `python install.py --here ...`) |
 | `imurun --get-engine` | downloads the prebuilt engine for this OS from the matching GitHub release |

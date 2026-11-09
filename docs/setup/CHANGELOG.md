@@ -1,5 +1,18 @@
 # Setup / packaging changelog
 
+## 0.3.3 (2026-11-09)
+
+- **Engine:** Qwen3.5 (`qwen35`) gives correct answers (four bugs fixed) and runs its
+  matmuls on the GPU: Qwen3.5-2B on an RTX 3050 4 GB, prefill 28 → 149 tok/s, decode
+  ~12 → ~32-36 tok/s (`docs/engine/CHANGELOG.md`).
+- **Hosted models** retry rate limits, 5xx/overloaded and network drops with backoff
+  (2-30 s or the provider's Retry-After, up to 5 retries; `docs/server/CHANGELOG.md`).
+- **Windows:** a Smart App Control / WDAC block on `fish.dll` (WinError 4551) is explained
+  instead of shown raw.
+- Docs: README and setup README no longer say the app is unreleased or "not a GPU engine".
+- Not in this release: an in-app updater (upgrade with `pip install -U imurun`), NEON
+  kernels for Apple Silicon, the keyless browser web-search helper.
+
 ## 2026-11-09 — packaging no longer ships stale files
 
 - `setup.py`: `build_py` now empties the copied part of the package (`services/`,

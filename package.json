@@ -1,6 +1,6 @@
 {
   "name": "imurun",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "IMURUN: local-first AI chat with its own C++ inference engine. This npm package is a thin launcher that installs the Python app from PyPI into ~/.imurun/venv and runs it.",
   "license": "MIT",
   "author": "ImuTechz <dev@imutechz.in>",
