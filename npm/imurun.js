@@ -8,9 +8,13 @@
  * dependencies of its own:
  *   1. finds Python 3.11+ (py -3.x / python3.x / python3 / python),
  *   2. creates ~/.imurun/venv if it is missing or broken,
- *   3. installs imurun==<this package's version> into it when the installed
- *      version differs (so npm and PyPI stay in lock step),
+ *   3. installs imurun==<this package's version> into it when it is missing or
+ *      OLDER than this launcher (a newer one installed by `imurun update` / the
+ *      in-app update is kept, never downgraded),
  *   4. runs `python -m imurun <args>` from that venv and passes its exit code on;
+ *      exit code 75 means "an update was applied, start me again": the launcher
+ *      runs it again with IMURUN_AFTER_UPDATE=1 (IMURUN_SUPERVISED=1 tells the
+ *      app a launcher does this; docs/setup/README.md "Updates");
  *      on its first run `imurun` installs the rest itself (voice, engine check,
  *      GPU check; see docs/setup/README.md), recorded in ~/.imurun/install-state.json.
  *
@@ -34,6 +38,7 @@ const path = require("path");
 const VERSION = require("../package.json").version;
 const IS_WIN = process.platform === "win32";
 const MIN = [3, 11];
+const EXIT_RESTART = 75; // the app asks to be started again after an update
 const PREFERRED_MAX = [3, 14]; // newest minor with binary wheels for aiohttp
 
 function say(msg) {
@@ -140,6 +145,25 @@ function createVenv(dir) {
   run(venvPython(dir), ["-m", "pip", "install", "--upgrade", "--quiet", "pip"], { stdio: "inherit" });
 }
 
+/** Numeric release parts of "0.4.1rc1" -> [0, 4, 1]; pre-release suffixes ignored. */
+function versionParts(v) {
+  const m = /^v?(\d+(?:\.\d+)*)/.exec(String(v || "").trim());
+  return m ? m[1].split(".").map(Number) : null;
+}
+
+/** True when `have` is an older release than `want` (unknown counts as older). */
+function olderThan(have, want) {
+  const a = versionParts(have);
+  const b = versionParts(want);
+  if (!a) return true;
+  if (!b) return false;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const d = (a[i] || 0) - (b[i] || 0);
+    if (d !== 0) return d < 0;
+  }
+  return false;
+}
+
 function installedVersion(py) {
   const r = run(py, ["-c", "import importlib.metadata as m; print(m.version('imurun'))"], {
     timeout: 30000,
@@ -221,28 +245,49 @@ function main() {
   const have = installedVersion(py);
   // With IMURUN_WHEEL the wanted version is the wheel's own (from its file
   // name), not this launcher's; if the name does not tell, install anyway
-  // rather than keep running whatever is already in the venv.
+  // rather than keep running whatever is already in the venv. That is an
+  // explicit choice, so it may downgrade. Without a wheel, only a MISSING or
+  // OLDER install is replaced: a newer one put there by `imurun update` / the
+  // in-app update is kept, never downgraded to this launcher's version.
   const wheel = process.env.IMURUN_WHEEL;
   const wanted = wheel ? distVersion(wheel) : VERSION;
-  if (process.env.IMURUN_REINSTALL === "1" || !have || !wanted || have !== wanted) {
+  const stale = wheel ? !wanted || have !== wanted : olderThan(have, wanted);
+  if (process.env.IMURUN_REINSTALL === "1" || !have || stale) {
     pipInstall(py);
   }
 
   // Ctrl+C reaches the child directly (same console / process group); the
   // launcher only waits for it and passes the exit status on.
-  // -P: keep the current directory off sys.path, so running `imurun` inside an
-  // untrusted folder cannot import that folder's imurun/ or json.py (Python 3.11+).
-  const child = spawn(py, ["-P", "-m", "imurun", ...args], { stdio: "inherit" });
   const ignore = () => {};
   process.on("SIGINT", ignore);
-  process.on("SIGTERM", () => child.kill("SIGTERM"));
-  child.on("error", (err) => {
-    say(`could not start ${py}: ${err.message}`);
-    process.exit(1);
-  });
-  child.on("exit", (code, signal) => {
-    process.exit(code === null ? (signal === "SIGINT" ? 130 : 1) : code);
-  });
+  let child = null;
+  process.on("SIGTERM", () => child && child.kill("SIGTERM"));
+  const launch = (afterUpdate) => {
+    // IMURUN_LAUNCHER/IMURUN_VENV tell the updater (services/update) that this
+    // venv belongs to the npm launcher, so it updates it with that venv's pip.
+    const env = Object.assign({}, process.env, {
+      IMURUN_SUPERVISED: "1",
+      IMURUN_LAUNCHER: "npm",
+      IMURUN_VENV: dir,
+    });
+    if (afterUpdate) env.IMURUN_AFTER_UPDATE = "1";
+    // -P: keep the current directory off sys.path, so running `imurun` inside an
+    // untrusted folder cannot import that folder's imurun/ or json.py (Python 3.11+).
+    child = spawn(py, ["-P", "-m", "imurun", ...args], { stdio: "inherit", env });
+    child.on("error", (err) => {
+      say(`could not start ${py}: ${err.message}`);
+      process.exit(1);
+    });
+    child.on("exit", (code, signal) => {
+      if (code === EXIT_RESTART) {
+        say("update applied; starting the new version ...");
+        launch(true);
+        return;
+      }
+      process.exit(code === null ? (signal === "SIGINT" ? 130 : 1) : code);
+    });
+  };
+  launch(false);
   return null;
 }
 

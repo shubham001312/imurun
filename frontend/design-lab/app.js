@@ -591,6 +591,11 @@
       IM.access.open();
       return true;
     }
+    /* `/update` checks for a newer IMURUN now (update.js). */
+    if (/^\/update$/.test(value) && IM.update) {
+      IM.update.command();
+      return true;
+    }
     if (value !== '/rename' && value !== '/rename-session') return false;
     var row = document.querySelector('.session.active');
     if (!row) {

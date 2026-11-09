@@ -440,6 +440,26 @@ API-REQUESTS #34).
 - Every animation stops under reduced motion (OS or the Customisation
   toggle); spinners slow down rather than vanish.
 
+## Updates
+
+`update.js` consumes `GET/POST /api/update` and the `update` SSE event
+(contract: `services/server/doc/README.md` "Update contract"). When the view
+has `prompt: true` and `available: true`, a modal is shown once per page load:
+**Update now** posts `apply` and shows progress from the events (`updating`
+"Downloading and installing...", `restart_pending` "Restarting..."), then
+polls `/health` until the new server answers and reloads; **Not now** posts
+`dismiss` (the server asks again after 3 launches); Esc or a click outside
+posts `later` (this launch only). The release notes link opens in a new tab
+(`rel=noopener`). Settings > Profile has an "About and updates" card with the
+same actions and an "Update available" badge. Update is disabled with the
+server's `applyBlocked` reason when `canApply` is false. The dialog also shows
+the server's `command` ("This will run: ...").
+
+`/update` in the composer (listed in the `slash.js` menu, run by `app.js`
+`handleCommand` like `/model` and `/permission`) posts `check`, then opens the
+pop-up when a newer version exists (whatever `prompt` says), else shows a
+toast with the result ("You are up to date (0.3.3)." or the check error).
+
 ## Keyboard shortcuts
 
 `Ctrl/Cmd K` search, `Enter` send (queues while a reply runs), `Shift Enter`

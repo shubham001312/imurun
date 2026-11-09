@@ -1270,6 +1270,7 @@ def report_gpu(info: dict) -> None:
 # deletes a file it did not write. IMURUN_NO_PATH=1 turns the PATH change off,
 # IMURUN_BIN_DIR=<dir> moves the launcher (tests and the CI smoke install).
 SHIM_MARK = "imurun-shim"
+SHIM_EXIT_RESTART = 75  # == services.update.EXIT_RESTART: "update applied, start me again"
 RC_BEGIN = "# >>> imurun >>>"
 RC_END = "# <<< imurun <<<"
 
@@ -1402,13 +1403,26 @@ def _shim_text() -> str:
             r = root.replace("%", "%%")
             lines.append(f'if defined PYTHONPATH (set "PYTHONPATH={r};%PYTHONPATH%") '
                          f'else (set "PYTHONPATH={r}")')
-        lines += [f"{py} -P -m imurun %*", "exit /b %errorlevel%", ""]
+        # Supervised restart (services/update, start.py): exit code 75 means an
+        # update was applied, so run the (new) app again in this console.
+        lines += ['set "IMURUN_SUPERVISED=1"', ":run",
+                  f"{py} -P -m imurun %*",
+                  f'if "%errorlevel%"=="{SHIM_EXIT_RESTART}" (set "IMURUN_AFTER_UPDATE=1" & goto run)',
+                  "exit /b %errorlevel%", ""]
         return "\r\n".join(lines)
     lines = ["#!/bin/sh", f"# {SHIM_MARK}: written by IMURUN setup; runs IMURUN with the Python below.",
              "# Safe to delete; `imurun install` writes it again."]
     if root:
         lines += [f'PYTHONPATH={shlex.quote(root)}"${{PYTHONPATH:+:$PYTHONPATH}}"', "export PYTHONPATH"]
-    lines += [f'exec {py} -P -m imurun "$@"', ""]
+    # A loop instead of `exec`, so exit code 75 (an update was applied) starts
+    # the new version (services/update, start.py).
+    lines += ["IMURUN_SUPERVISED=1; export IMURUN_SUPERVISED",
+              "while :; do",
+              f'  {py} -P -m imurun "$@"',
+              "  rc=$?",
+              f'  [ "$rc" -eq {SHIM_EXIT_RESTART} ] || exit "$rc"',
+              "  IMURUN_AFTER_UPDATE=1; export IMURUN_AFTER_UPDATE",
+              "done", ""]
     return "\n".join(lines)
 
 

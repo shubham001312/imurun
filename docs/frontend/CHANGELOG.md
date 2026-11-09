@@ -4,6 +4,28 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-09: Update pop-up and `/update` (ported onto the redesign, for 0.3.3)
+
+Written on 2026-11-03 but never merged; 0.3.0 and 0.3.2 shipped without it.
+Ported onto the current shell:
+
+- New `update.js` (loaded after `skills.js`): the launch pop-up (Update now /
+  Not now; Esc or a click outside = "later", this launch only), the command it
+  will run, progress from `update` SSE events, a `/health` poll and page reload
+  after the restart, and an "About and updates" card appended to Settings >
+  Profile (Check for updates / Update now / Release notes). `update` added to
+  `EVENT_TYPES` in `api.js`.
+- `/update` is one more entry in the slash menu (`slash.js` `COMMANDS`) and is
+  run by `app.js` `handleCommand` like `/model` and `/permission`: it checks
+  now, then opens the pop-up when a newer version exists, else shows a toast
+  with the result.
+- Not ported from the 2026-11-03 version: its general command set (`/help`,
+  `/new`, `/clear`, `/hardware`, `/settings`, `/voice`, `/export`, `/doctor`
+  and its own `/model`) and the inline `.cmd-note` output. The redesign
+  already has its own `/model`, `/connect` and `/permission`; the rest was not
+  part of the update feature.
+- Styles in `styles/agent.css` (`.update-*`), theme variables only.
+
 ## 2026-11-09: Chat messages read like a conversation, not a log
 
 The user called the chat "not good": every reply carried an "IMURUN" label, a

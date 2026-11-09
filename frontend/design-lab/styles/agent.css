@@ -544,3 +544,13 @@ body[data-reduced-motion="1"] .approval-card,
 body[data-reduced-motion="1"] .msg-sources .source-chip,
 body[data-reduced-motion="1"] .slash-menu { animation: none !important; }
 body[data-reduced-motion="1"] .approval-timer > span { transition: none !important; }
+
+/* The update pop-up and the Settings > Profile "About and updates" card (update.js). */
+.update-dialog .update-cmd { margin: 0 0 12px; font-size: 12px; color: var(--muted); word-break: break-word; }
+.update-dialog .update-progress { margin: 0 0 12px; font-weight: 600; }
+.update-dialog .update-notes { margin: 0 0 16px; font-size: 13px; }
+.update-dialog .update-notes a { color: inherit; text-decoration: underline; }
+.update-actions { flex-wrap: wrap; }
+.update-actions .update-skip { margin-right: auto; }
+.update-card .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.update-card-text { margin: 0; font-size: 13px; color: var(--muted); }

@@ -224,6 +224,15 @@ def build_server(
     except Exception as exc:  # noqa: BLE001 - the shell must come up regardless
         print(f"warm start: skipped ({type(exc).__name__}: {exc})", file=sys.stderr)
 
+    # Update check: count this launch and ask PyPI/GitHub in a background
+    # thread (3 s timeout, 6 h cache); the UI asks the user (/api/update).
+    try:
+        from ..update.routes import start_checker
+
+        start_checker(server)
+    except Exception as exc:  # noqa: BLE001 - never blocks or breaks start-up
+        print(f"update check: skipped ({type(exc).__name__}: {exc})", file=sys.stderr)
+
     # Production composition registers the eight connectors and any OAuth flow
     # whose client id is configured. Tests that inject their own registry keep
     # exactly that registry.

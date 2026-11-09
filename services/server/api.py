@@ -864,6 +864,11 @@ class ApiServer:
                 if path == "/api/resources/budget":
                     self._reply(200, server._governor.view())
                     return
+                if path == "/api/update":
+                    from ..update import routes as update_routes  # noqa: PLC0415
+
+                    self._reply(*update_routes.handle_get(server))
+                    return
                 if path == "/api/stack/status":
                     self._reply(200, server._stack.status())
                     return
@@ -1018,6 +1023,14 @@ class ApiServer:
                     if payload is None:
                         return
                     self._reply(*remote_routes.handle_post(server, path, payload))
+                    return
+                if path == "/api/update":
+                    from ..update import routes as update_routes  # noqa: PLC0415
+
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    self._reply(*update_routes.handle_post(server, payload))
                     return
                 if tuning_routes.is_post_route(path) or tool_routes.is_post_route(path):
                     payload = self._body()

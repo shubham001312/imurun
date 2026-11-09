@@ -78,6 +78,8 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | GET | `/api/resources` | Bearer | Memory/disk/CPU/folder sizes plus `governor` (resource governor view, see "Resource governor contract"). |
 | GET | `/api/resources/budget` | Bearer | Resource governor view alone. |
 | PUT/POST | `/api/resources` | Bearer | Change preset / dynamic / lowerPriority (`services/server/resources.py` `handle_update`; `PUT /api/settings/resources` does the same through the settings store). |
+| GET | `/api/update` | Bearer | Update status **UpdateView** (see "Update contract"). Never touches the network itself. |
+| POST | `/api/update` | Bearer | `{action: "check"\|"apply"\|"dismiss"\|"later"}` → `{ok, update: UpdateView}` (`services/update/`). |
 | GET | `/api/stack/status` | Bearer | Docker stack status. |
 | GET | `/api/settings` | Bearer | Known section names. |
 | GET | `/api/settings/{section}` | Bearer | One section, merged with defaults. |
@@ -415,6 +417,7 @@ to write disclaimers or bracketed notes about verification.
 | `tuning.ready` | `{job_id, model_id, parent, name, path, quant, size_bytes, eval{…}, action: {label: "Use it", method: "POST", path: "/api/models/select", body: {id}}}` — the UI offers the switch; the server never switches on its own |
 | `tuning.setup` | `{running, stage, percent, message, ok?, error?, venv_bytes?}` |
 | `tuning.feedback` | `{turn_id, session_id, rating, consented}` |
+| `update` | **UpdateView** (see "Update contract") on every change of the update check / apply state |
 
 Connector and MCP tools appear in `GET /api/tools` with categories
 `connector-read`, `connector-write` and `mcp`; their permission levels are in
@@ -584,6 +587,84 @@ model load reports its placement; otherwise as a heartbeat every 10 s **only
 while at least one `/api/events` client is connected** (no listener: no view
 is built and the GPU is not polled). A client that just connected should GET
 `/api/resources` once instead of waiting for the heartbeat.
+
+#### Update contract (`/api/update`, `update` event)
+
+Owner: setup (`services/update/`, `docs/setup/README.md` "Updates"). The server
+checks once per launch, in a background thread started after the warm start
+(never on the start-up path), against PyPI (`pypi.org/pypi/imurun/json`) and
+GitHub releases (`repos/shubham001312/imurun/releases/latest`), 3 s timeout
+each; the result is cached 6 h in `<data root>/update-state.json`
+(`~/.imurun/update-state.json`). Nothing is ever installed without the user
+choosing **Update**. `IMURUN_UPDATE_CHECK=0` turns the check off
+(`enabled: false`, `prompt: false`; `check`/`apply` still work on request);
+it is also off whenever `CI` or `PYTEST_CURRENT_TEST` is set, so tests and CI
+never touch the network or `~/.imurun`. The newer of the PyPI and GitHub
+versions wins, compared numerically (0.3.10 > 0.3.9, 0.4.0 > 0.4.0rc1). GitHub
+drafts and pre-releases, and any pre-release version string, are offered only
+to someone already running a pre-release. Requests carry only a User-Agent and
+an Accept header; nothing is logged but the error text of a failed check.
+
+| Method | Path | Body | Result |
+|---|---|---|---|
+| GET | `/api/update` | - | `200` **UpdateView**. Reads memory only (no network). |
+| POST | `/api/update` | `{"action": "check"}` | Re-check now, ignoring the 6 h cache. `202 {ok: true, update}` with `state: "checking"`; the result arrives as an `update` event (or GET again). |
+| POST | `/api/update` | `{"action": "apply"}` | The user chose **Update now**. `202 {ok: true, update}` with `state: "updating"`. On success the state becomes `restart_pending` (event); about 2 s later the server stops and the launcher starts the new version on the **same port** with a **new token**. The page must then poll `GET /health` until it answers and `location.reload()` (a native window is closed and reopened by the launcher itself). On failure `state: "error"` with `error` (e.g. "the checkout has local changes"); the old version keeps running. `409 {error, update}` when nothing is available, `canApply` is false, or an apply is already running. |
+| POST | `/api/update` | `{"action": "dismiss"}` | The user chose **Not now**: `dismissedVersion` is stored; the prompt comes back after **3 more launches**, or at once when a version newer than the dismissed one is published. `200 {ok: true, update}` (`prompt: false`). |
+| POST | `/api/update` | `{"action": "later"}` | Hide the prompt for the rest of this launch only (pop-up closed with X). Counts nothing. `200 {ok: true, update}`. |
+| POST | `/api/update` | other / missing `action` | `400 {error}` |
+
+**UpdateView** (also the data of every `update` SSE event, published on every
+change of `state`, `latest`, `prompt` or `error`):
+
+```jsonc
+{
+  "current": "0.4.0",            // the running version
+  "latest": "0.4.1",             // newest published version; null before the first check / offline
+  "available": true,             // latest > current
+  "source": "checkout",          // checkout | pip | pipx | uv | npm  (what "apply" updates, below)
+  "releaseNotesUrl": "https://github.com/shubham001312/imurun/releases/tag/v0.4.1",  // null when unknown
+  "prompt": true,                // show the "Update now / Not now" pop-up (policy above)
+  "state": "idle",               // idle | checking | updating | restart_pending | error
+  "error": null,                 // string when state == "error" (last check or apply failure)
+  "checkedAt": "2026-11-03T12:00:00Z",   // null before the first check
+  "enabled": true,               // false when IMURUN_UPDATE_CHECK=0
+  "canApply": true,              // false when apply would refuse (reason in applyBlocked)
+  "applyBlocked": null,          // e.g. "the checkout has local changes (git status)"
+  "command": "git pull --ff-only, then install.py --auto",   // what apply runs (for the dialog)
+  "dismissedVersion": null,      // set by "dismiss"
+  "launchesSinceDismiss": 0
+}
+```
+
+What `apply` runs, per `source` (`services/update/manager.py` `apply_plan`):
+
+| `source` | Detected by | Runs |
+|---|---|---|
+| `checkout` | not an installed package (the app root is not the `imurun` package folder) | `git pull --ff-only`, then `python install.py --auto`. Refused while `git status` shows local changes, without a `.git`, or without git. Pulls the checked-out branch, not the release tag. |
+| `npm` | `IMURUN_LAUNCHER=npm` (set by `npm/imurun.js`), or `sys.prefix` is `IMURUN_VENV` / `<data root>/venv` | `python -m pip install --upgrade imurun==<latest>` in that venv; the 0.3.3+ launcher keeps a newer install instead of reinstalling its own version |
+| `pipx` | `pipx` in the interpreter prefix | `pipx upgrade imurun` |
+| `uv` | `uv/.../tools` in the prefix (`uv tool install`) | `uv tool upgrade imurun` |
+| `pip` | anything else installed | `python -m pip install --upgrade imurun==<latest>` with the running interpreter |
+
+pip is pinned to the checked version so that a release that is on GitHub but
+not (yet) on PyPI fails with pip's error instead of "succeeding" without a
+change. On Windows, before running, the loaded `fish.dll` is renamed to
+`fish.dll.old-<pid>` and an unlocked copy put in its place, so pip/git can
+replace it while the server runs; start.py deletes stale `.old-*` copies on the
+next start. Restart: the server stops (closing the model), then start.py exits
+with **75** when `IMURUN_SUPERVISED=1` (the `imurun` launcher written by
+install.py and the npm launcher run the app again on 75, with
+`IMURUN_AFTER_UPDATE=1`), or otherwise starts a fresh interpreter with the
+same arguments itself and passes its exit code on.
+
+UI rules: show the pop-up only when `prompt` is true; **Update now** → POST
+`apply`; **Not now** → POST `dismiss`; closing it → POST `later`. A `/update`
+command should GET the view, POST `check` when `checkedAt` is null or old, and
+offer `apply` whenever `available` is true regardless of `prompt`. CLI
+equivalents: `imurun update` (check, then apply after a y/N question;
+`--check` only checks, `--yes` skips the question) and `imurun --version`
+(adds "update available: X" from the cache; no network).
 
 ### `C:\Users\imu\Desktop\ImuTechz\IMU CLI\imurun\services\server\models_api.py`
 
