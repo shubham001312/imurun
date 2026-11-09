@@ -1,0 +1,14 @@
+/* Settings > Use by API: the OpenAI-compatible API card (openai-settings.js). */
+.openai-api-root { display: grid; gap: 12px; margin-bottom: 18px; }
+.oai-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+.oai-head .settings-card-title { margin: 0; }
+.oai-line .v { user-select: all; }
+.oai-actions { display: flex; gap: 6px; align-items: center; }
+.oai-actions .btn { padding: 4px 10px; }
+.oai-rotate { margin-top: 10px; }
+.oai-card .md-codeblock { margin: 8px 0 10px; }
+.oai-card .md-code { white-space: pre; max-height: 360px; }
+.oai-clients-title { margin: 6px 0 4px; }
+@media (max-width: 640px) {
+  .oai-line { grid-template-columns: minmax(0, 1fr); }
+}
