@@ -101,6 +101,19 @@ _ACTION_REQUEST = re.compile(
     r"(?:desktop|documents|downloads|folder|directory)\b",
     re.IGNORECASE,
 )
+# Plan mode: the agent may look but not touch. Only these tool categories are
+# offered, and the executor refuses everything else (CallContext.allowed).
+PLAN_CATEGORIES = frozenset({"info", "network", "read", "connector-read", "agent"})
+PLAN_DIRECTIVE = "\n".join([
+    "# Plan mode",
+    "The user switched to Plan mode: do not change anything. You can read files, list folders",
+    "and search; writing, deleting and running commands are switched off in this mode.",
+    "Look at what you need, then answer with a plan:",
+    "1. A one-line goal.",
+    "2. Numbered steps, each naming the files to create or change and the commands to run.",
+    "3. Risks or open questions, if any.",
+    "End with: \"Switch to Build to carry out this plan.\"",
+])
 _NOT_RETRYABLE = ("Permission denied for", "The turn was stopped", "There is no tool called")
 _FAKE_RESULT_HEADER = re.compile(r"^\s*\[tool result[^\]]*\]\s*", re.IGNORECASE)
 
@@ -262,6 +275,7 @@ class AgentLoop:
         parent_stop=None,
         compact: bool | None = None,
         settings=None,
+        mode: str = "build",
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
@@ -297,6 +311,7 @@ class AgentLoop:
         # Settings store (profile) for the "About the user" block; None in
         # sub-agents and tests that do not care who the user is.
         self._settings = settings
+        self._mode = "plan" if str(mode or "").lower() == "plan" else "build"
         self._stopped = False
         self._kill = kill
         self._kill_id = (
@@ -337,6 +352,8 @@ class AgentLoop:
         if not prompt or not prompt.strip():
             raise ValueError("a prompt is required")
         state = _TurnState(question=prompt)
+        if self._mode == "plan":
+            self._restrict_to_reading()
         if self._compact is None:
             self._compact = model_profile.is_compact(self._raw_model)
         # A small model cannot drive tools: it copies the protocol's example
@@ -423,7 +440,7 @@ class AgentLoop:
                 continue
 
             refused = bool(_REFUSAL.search(answer_text or ""))
-            explained = (not refused and state.tool_steps == 0
+            explained = (self._mode != "plan" and not refused and state.tool_steps == 0
                          and bool(_ACTION_REQUEST.search(question or "")))
             if (not last and state.refusals < MAX_RETRIES and not state.tool_ok
                     and self._offers_action_tools() and (refused or explained)):
@@ -533,6 +550,18 @@ class AgentLoop:
                 messages.append({"role": "user", "content": note, "_kind": "note"})
 
     # ------------------------------------------------- bridge and recovery
+    def _restrict_to_reading(self) -> None:
+        """Plan mode: only read-only tools, enforced by the executor (``allowed``)."""
+        names: set[str] = set()
+        if self._executor is not None:
+            try:
+                tools = self._executor.offered(depth=self._depth)
+            except Exception:  # noqa: BLE001 - no catalogue means nothing is allowed
+                tools = []
+            names = {t.name for t in tools if getattr(t, "category", "info") in PLAN_CATEGORIES}
+        allowed = frozenset(names)
+        self._allowed = allowed if self._allowed is None else (self._allowed & allowed)
+
     def _remember(self, prompt: str) -> str:
         """Save a name the user states ("my name is ..."), by code (user_context.capture)."""
         if self._depth != 0 or self._directive is not None:
@@ -719,6 +748,8 @@ class AgentLoop:
             if persona:
                 parts.append(persona)
             parts.append(model_profile.COMPACT_DIRECTIVE if self._compact else DEFAULT_DIRECTIVE)
+            if self._mode == "plan":
+                parts.append(PLAN_DIRECTIVE)
             if self._depth == 0:
                 try:
                     parts.append(user_context.block(

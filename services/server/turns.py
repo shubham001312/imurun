@@ -207,6 +207,7 @@ class TurnRunner:
             server_ref=self,  # Pass TurnRunner as server reference for platform context
             language=turn.language,
             settings=getattr(self, "_settings", None),  # profile -> "About the user" (user_context.py)
+            mode=turn.mode,  # plan: read-only tools, enforced by the executor
         )
         holder["loop"] = loop
         with self._lock:
