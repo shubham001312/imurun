@@ -114,3 +114,32 @@ def test_null_text_fields_count_as_missing(server):
     path = f"/api/sessions/{session['id']}/rename"
     status, body = _raw(server, _post(server, path, b'{"name": null}'))
     assert status == 400
+
+
+def test_download_stream_finalises_the_download_generator(server, monkeypatch):
+    # The route returned from inside ``async for`` and closed the loop without
+    # shutdown_asyncgens(): the generator's cleanup (its open .part file and
+    # HTTP response) never ran ("Task was destroyed but it is pending!").
+    from services.server import api as api_module
+
+    closed = []
+
+    class Manager:
+        async def download_model(self, model_id, token=None):
+            try:
+                yield {"model_id": model_id, "status": "downloading", "percent": 50}
+                yield {"model_id": model_id, "status": "complete", "percent": 100}
+                yield {"model_id": model_id, "status": "never reached"}
+            finally:
+                closed.append(model_id)
+
+    monkeypatch.setattr(api_module, "_HAS_MODELS_API", True)
+    monkeypatch.setattr(api_module, "get_model_manager", lambda *a, **k: Manager())
+    request = _post(server, "/api/models/download", b'{"model_id": "m1"}')
+    with socket.create_connection(("127.0.0.1", server.port), timeout=10) as sock:
+        sock.sendall(request)
+        data = b""
+        while chunk := sock.recv(65536):
+            data += chunk
+    assert b'"status": "complete"' in data
+    assert closed == ["m1"]

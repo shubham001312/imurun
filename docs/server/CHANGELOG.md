@@ -32,6 +32,11 @@ CPU engine with Llama 3.2 1B) and probing every main route.
   `{"first_command": null}` created a session named "None" (also queued prompts, rename,
   skills, clients, persona). `null` now counts as missing, so those requests get their
   usual 400. Tests: `tests/test_api_bad_requests.py`.
+- **`POST /api/models/download` never finalised the download generator**
+  (`services/server/api.py`): the route returned from inside `async for` and closed its
+  event loop without `shutdown_asyncgens()`, so `ModelManager.download_model`'s cleanup
+  (open `.part` file, HTTP response) never ran; the log showed "Task was destroyed but it
+  is pending!" after every download request. Now finalised before the loop closes.
 
 ## 2026-11-03 — resource governor (resources owner)
 

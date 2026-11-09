@@ -1354,6 +1354,13 @@ class ApiServer:
                         except OSError:
                             pass
                     finally:
+                        # Finalise the download generator left mid-iteration
+                        # (the return above, or a client that hung up) so its
+                        # cleanup runs: the open .part file and HTTP response.
+                        try:
+                            loop.run_until_complete(loop.shutdown_asyncgens())
+                        except Exception:  # noqa: BLE001 - cleanup must not raise
+                            pass
                         loop.close()
                         self.close_connection = True
                     return
