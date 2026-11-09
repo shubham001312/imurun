@@ -3,7 +3,8 @@
  *
  * Every routine here is written from the GGUF block specification. The
  * reference is deliberately simple and exact: it is the correctness oracle
- * that the AVX2 path is validated against (see test/test_m1.cpp).
+ * that the AVX2 and NEON paths are validated against (test/test_m1.cpp,
+ * test/test_kernels.cpp).
  */
 #include <fish/quant.h>
 
@@ -620,11 +621,25 @@ void install_avx2_kernels() {
 #endif
 }
 
+bool neon_dotprod_available() {
+#if defined(FISH_HAVE_ARM_KERNELS) && FISH_HAVE_ARM_KERNELS
+    return fish_arm_dotprod();
+#else
+    return false;
+#endif
+}
+
+void install_neon_kernels() {
+#if defined(FISH_HAVE_ARM_KERNELS) && FISH_HAVE_ARM_KERNELS
+    fish_install_arm(g_kernels, &g_dot_f32, fish_arm_dotprod_allowed());
+#endif
+}
+
 namespace {
 // Installed before any model can load, so the dispatch pointers are never
 // observed in a half-initialised state.
 struct KernelInstaller {
-    KernelInstaller() { install_avx2_kernels(); }
+    KernelInstaller() { install_avx2_kernels(); install_neon_kernels(); }
 } g_kernel_installer;
 } // namespace
 
