@@ -42,6 +42,17 @@ CPU engine with Llama 3.2 1B) and probing every main route.
   they hard-coded `~/.imurun`, so a server on another data root reported
   `workspace: ~/.imurun/workspace` on `GET /api/permissions` and kept notes in the real
   home folder. They now use `services.paths.data_root()`. Test: `tests/test_data_root_paths.py`.
+- **A download could never finish when the HF metadata call failed**
+  (`services/model_manager.py` `_download_from_source`). The exact size came only from
+  `HfApi.repo_info`; when that failed (rate limit, API outage) the catalogue size was used,
+  and nine FISH-compatible entries were round approximations (checked today with HEAD and
+  a 4-byte Range on every source: all 23 sources live, `GGUF` magic, but e.g. Qwen2.5 7B
+  4.5e9 vs 4 683 074 240 served). A bigger file was deleted as "more bytes than expected"
+  and re-downloaded up to six times; a smaller one was "resumed" past its end; a valid
+  `.part` larger than the catalogue size was deleted before asking. Now the size comes from
+  the response (`Content-Length` / `Content-Range`), only an exact size may delete or skip
+  a `.part`, and a 416 whose total equals the bytes on disk counts as complete. The nine
+  catalogue sizes are corrected to the served values. Test: `tests/test_download_served_size.py`.
 
 ## 2026-11-03 — resource governor (resources owner)
 

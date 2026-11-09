@@ -91,6 +91,30 @@ def hf_source(repo_id: str, filename: str, size_bytes: int) -> dict:
     }
 
 
+def _range_total(headers) -> int:
+    """``<total>`` of a ``Content-Range: bytes */<total>`` (a 416 reply)."""
+    total = str(headers.get("content-range", "")).rsplit("/", 1)[-1].strip()
+    return int(total) if total.isdigit() else -1
+
+
+def _served_total(headers, status: int) -> int:
+    """Total file size from a download response, or 0 when it does not say.
+
+    206: ``Content-Range: bytes a-b/<total>``. 200: ``Content-Length`` (only
+    when the body is not content-encoded, where it would be the encoded size).
+    """
+    try:
+        if status == 206:
+            total = str(headers.get("content-range", "")).rsplit("/", 1)[-1].strip()
+            return int(total) if total.isdigit() else 0
+        if status == 200 and not headers.get("content-encoding"):
+            length = str(headers.get("content-length", "")).strip()
+            return int(length) if length.isdigit() else 0
+    except (TypeError, ValueError):
+        pass
+    return 0
+
+
 class SourceUnavailable(RuntimeError):
     """A single download source cannot be used.
 
@@ -191,8 +215,8 @@ RECOMMENDED_MODELS = {
         id="qwen2-5-1.5b-q4",
         name="Qwen 2.5 1.5B Instruct Q4_K_M",
         filename="Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
-        size_bytes=1_100_000_000,
-        size_gb=1.1,
+        size_bytes=986_048_768,
+        size_gb=1.0,
         source="hf",
         repo_id="bartowski/Qwen2.5-1.5B-Instruct-GGUF",
         description="Qwen 2.5 1.5B - excellent multilingual, great for edge",
@@ -201,7 +225,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Qwen2.5-1.5B-Instruct-GGUF",
                 "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf",
-                1_100_000_000,
+                986_048_768,
             ),
         ],
     ),
@@ -247,8 +271,8 @@ RECOMMENDED_MODELS = {
         id="qwen2-5-3b-q4",
         name="Qwen 2.5 3B Instruct Q4_K_M",
         filename="Qwen2.5-3B-Instruct-Q4_K_M.gguf",
-        size_bytes=2_000_000_000,
-        size_gb=2.0,
+        size_bytes=1_929_903_264,
+        size_gb=1.9,
         source="hf",
         repo_id="bartowski/Qwen2.5-3B-Instruct-GGUF",
         description="Qwen 2.5 3B - best multilingual small model, strong coding",
@@ -257,7 +281,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Qwen2.5-3B-Instruct-GGUF",
                 "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
-                2_000_000_000,
+                1_929_903_264,
             ),
         ],
     ),
@@ -265,8 +289,8 @@ RECOMMENDED_MODELS = {
         id="phi-3.5-mini-q4",
         name="Phi-3.5 Mini Instruct Q4_K_M",
         filename="Phi-3.5-mini-instruct-Q4_K_M.gguf",
-        size_bytes=2_300_000_000,
-        size_gb=2.3,
+        size_bytes=2_393_232_672,
+        size_gb=2.4,
         source="hf",
         repo_id="bartowski/Phi-3.5-mini-instruct-GGUF",
         description="Phi-3.5 Mini - improved reasoning and multilingual",
@@ -275,7 +299,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Phi-3.5-mini-instruct-GGUF",
                 "Phi-3.5-mini-instruct-Q4_K_M.gguf",
-                2_300_000_000,
+                2_393_232_672,
             ),
         ],
     ),
@@ -321,8 +345,8 @@ RECOMMENDED_MODELS = {
         id="qwen2-5-7b-q4",
         name="Qwen 2.5 7B Instruct Q4_K_M",
         filename="Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-        size_bytes=4_500_000_000,
-        size_gb=4.5,
+        size_bytes=4_683_074_240,
+        size_gb=4.7,
         source="hf",
         repo_id="bartowski/Qwen2.5-7B-Instruct-GGUF",
         description="Qwen 2.5 7B - best multilingual, top-tier coding",
@@ -331,7 +355,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Qwen2.5-7B-Instruct-GGUF",
                 "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
-                4_500_000_000,
+                4_683_074_240,
             ),
         ],
     ),
@@ -359,7 +383,7 @@ RECOMMENDED_MODELS = {
         id="qwen2-5-14b-q4",
         name="Qwen 2.5 14B Instruct Q4_K_M",
         filename="Qwen2.5-14B-Instruct-Q4_K_M.gguf",
-        size_bytes=9_000_000_000,
+        size_bytes=8_988_110_976,
         size_gb=9.0,
         source="hf",
         repo_id="bartowski/Qwen2.5-14B-Instruct-GGUF",
@@ -369,7 +393,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Qwen2.5-14B-Instruct-GGUF",
                 "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
-                9_000_000_000,
+                8_988_110_976,
             ),
         ],
     ),
@@ -377,8 +401,8 @@ RECOMMENDED_MODELS = {
         id="qwq-32b-q4",
         name="QwQ 32B Preview Q4_K_M",
         filename="QwQ-32B-Preview-Q4_K_M.gguf",
-        size_bytes=20_000_000_000,
-        size_gb=20.0,
+        size_bytes=19_851_336_544,
+        size_gb=19.9,
         source="hf",
         repo_id="bartowski/QwQ-32B-Preview-GGUF",
         description="QwQ 32B - Alibaba's reasoning model with visible thinking",
@@ -387,7 +411,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/QwQ-32B-Preview-GGUF",
                 "QwQ-32B-Preview-Q4_K_M.gguf",
-                20_000_000_000,
+                19_851_336_544,
             ),
         ],
     ),
@@ -420,8 +444,8 @@ RECOMMENDED_MODELS = {
         id="qwen2-5-32b-q4",
         name="Qwen 2.5 32B Instruct Q4_K_M",
         filename="Qwen2.5-32B-Instruct-Q4_K_M.gguf",
-        size_bytes=19_000_000_000,
-        size_gb=19.0,
+        size_bytes=19_851_336_576,
+        size_gb=19.9,
         source="hf",
         repo_id="bartowski/Qwen2.5-32B-Instruct-GGUF",
         description="Qwen 2.5 32B - flagship model, SOTA benchmarks",
@@ -430,7 +454,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Qwen2.5-32B-Instruct-GGUF",
                 "Qwen2.5-32B-Instruct-Q4_K_M.gguf",
-                19_000_000_000,
+                19_851_336_576,
             ),
         ],
     ),
@@ -438,8 +462,8 @@ RECOMMENDED_MODELS = {
         id="llama-3.1-70b-q4",
         name="Llama 3.1 70B Instruct Q4_K_M",
         filename="Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf",
-        size_bytes=40_000_000_000,
-        size_gb=40.0,
+        size_bytes=42_520_398_400,
+        size_gb=42.5,
         source="hf",
         repo_id="bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
         description="Llama 3.1 70B - Meta's flagship, strong general reasoning",
@@ -448,7 +472,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Meta-Llama-3.1-70B-Instruct-GGUF",
                 "Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf",
-                40_000_000_000,
+                42_520_398_400,
             ),
         ],
     ),
@@ -456,8 +480,8 @@ RECOMMENDED_MODELS = {
         id="qwen2-5-72b-q4",
         name="Qwen 2.5 72B Instruct Q4_K_M",
         filename="Qwen2.5-72B-Instruct-Q4_K_M.gguf",
-        size_bytes=41_000_000_000,
-        size_gb=41.0,
+        size_bytes=47_415_715_488,
+        size_gb=47.4,
         source="hf",
         repo_id="bartowski/Qwen2.5-72B-Instruct-GGUF",
         description="Qwen 2.5 72B - flagship, SOTA across all benchmarks",
@@ -466,7 +490,7 @@ RECOMMENDED_MODELS = {
             hf_source(
                 "bartowski/Qwen2.5-72B-Instruct-GGUF",
                 "Qwen2.5-72B-Instruct-Q4_K_M.gguf",
-                41_000_000_000,
+                47_415_715_488,
             ),
         ],
     ),
@@ -784,6 +808,9 @@ class ModelManager:
         # repo_info is best-effort: the direct URL carries the file even when
         # the metadata call is rate-limited or slow.
         total_size = int(source.get("size_bytes") or model_info.size_bytes or 0)
+        # Only an exact size (repo_info, or what a response reports) may delete
+        # or skip a .part; the catalogue's is often an approximation.
+        size_exact = False
         _require_download_libs()
         try:
             api = HfApi()
@@ -792,6 +819,7 @@ class ModelManager:
                 if sibling.rfilename == source["filename"]:
                     if sibling.size:
                         total_size = int(sibling.size)
+                        size_exact = True
                     break
             else:
                 raise SourceUnavailable(
@@ -816,11 +844,11 @@ class ModelManager:
 
         for attempt in range(1, max_attempts + 1):
             existing = part_path.stat().st_size if part_path.exists() else 0
-            if total_size > 0 and existing > total_size:
+            if size_exact and total_size > 0 and existing > total_size:
                 # A stale, larger part cannot be trusted.
                 part_path.unlink(missing_ok=True)
                 existing = 0
-            if total_size > 0 and existing == total_size:
+            if size_exact and total_size > 0 and existing == total_size:
                 break  # already complete; fall through to verification
 
             headers = dict(base_headers)
@@ -838,11 +866,24 @@ class ModelManager:
                             # The mirror ignored Range; start clean.
                             mode = "wb"
                             downloaded = 0
+                        elif status == 416 and existing > 0 and _range_total(
+                            response.headers
+                        ) == existing:
+                            # The .part already holds the whole file.
+                            total_size, size_exact = existing, True
+                            break
                         else:
                             code, message = classify_download_error(
                                 _StatusError(status, url)
                             )
                             raise SourceUnavailable(code, message)
+
+                        # The response is the authority on the file's size; the
+                        # catalogue's is often a round approximation, used here
+                        # whenever repo_info failed (rate limit, API outage).
+                        served = _served_total(response.headers, status)
+                        if served:
+                            total_size, size_exact = served, True
 
                         if attempt == 1 and downloaded == 0:
                             yield DownloadProgress(
