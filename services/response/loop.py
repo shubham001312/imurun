@@ -60,6 +60,7 @@ from . import bridge
 from . import context as ctxmod
 from . import issues
 from . import profile as model_profile
+from . import user_context
 from .profile import compact_context
 from .style import (DEFAULT_DIRECTIVE, FAKE_RESULT_NOTE, LIVE_DATA_RULE,
                     looks_like_fake_tool_result, scrub_disclaimers)
@@ -260,6 +261,7 @@ class AgentLoop:
         prefetch: bool = True,
         parent_stop=None,
         compact: bool | None = None,
+        settings=None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
@@ -292,6 +294,9 @@ class AgentLoop:
         # deciding there keeps weight loading off the request thread.
         self._compact = compact
         self._parent_stop = parent_stop
+        # Settings store (profile) for the "About the user" block; None in
+        # sub-agents and tests that do not care who the user is.
+        self._settings = settings
         self._stopped = False
         self._kill = kill
         self._kill_id = (
@@ -341,6 +346,9 @@ class AgentLoop:
         bridged = self._run_bridge(prompt, state)
         if bridged:
             prefetch_text = f"{prefetch_text}\n\n{bridged}" if prefetch_text else bridged
+        remembered = self._remember(prompt)
+        if remembered:
+            prefetch_text = f"{prefetch_text}\n\n{remembered}" if prefetch_text else remembered
         messages = self._initial_messages(prompt, prefetch_text)
         new_messages: list[dict] = []
         steps: list[Step] = []
@@ -525,6 +533,16 @@ class AgentLoop:
                 messages.append({"role": "user", "content": note, "_kind": "note"})
 
     # ------------------------------------------------- bridge and recovery
+    def _remember(self, prompt: str) -> str:
+        """Save a name the user states ("my name is ..."), by code (user_context.capture)."""
+        if self._depth != 0 or self._directive is not None:
+            return ""
+        try:
+            return user_context.capture(prompt, self._settings)
+        except Exception as exc:  # noqa: BLE001 - memory never breaks a turn
+            self._issue("memory-failed", error=f"{type(exc).__name__}: {exc}")
+            return ""
+
     def _offers_action_tools(self) -> bool:
         return any(t.name in ACTION_TOOLS for t in self._offered)
 
@@ -701,6 +719,12 @@ class AgentLoop:
             if persona:
                 parts.append(persona)
             parts.append(model_profile.COMPACT_DIRECTIVE if self._compact else DEFAULT_DIRECTIVE)
+            if self._depth == 0:
+                try:
+                    parts.append(user_context.block(
+                        self._settings, can_save=any(t.name == "facts" for t in self._offered)))
+                except Exception:  # noqa: BLE001 - never block a turn on the profile
+                    pass
         if self._language:
             # The user spoke this language (voice, docs/agentic/REQUESTS.md #13).
             from ..voice.languages import answer_directive
