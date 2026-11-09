@@ -50,7 +50,14 @@ INTENT_PATTERNS: dict[str, tuple[str, ...]] = {
         r"\bwhat time\b",
         r"\btime is it\b",
         r"\bcurrent time\b",
-        r"\bwhat(?:'s| is) the (?:date|day|week)\b",
+        # "what is the time (now)", "whats teh time", "tell me the time",
+        # "time now?", "the time in London" - the clock was never read for these.
+        r"\bwhat(?:'?s|\s+is)?\s+(?:the|teh|da)\s+time\b(?!\s*(?:complexity|limit|frame|series|"
+        r"travel|management|cost|signature|zone\s+of\s+a|step|budget|window|scale))",
+        r"\b(?:tell|give|show)\s+me\s+(?:the|teh)\s+time\b",
+        r"^\W*(?:the\s+)?time\s+(?:now|right\s+now|please)\W*$",
+        r"\b(?:the|teh)\s+time\s+(?:now|right\s+now|in\s+[a-z])",
+        r"\bwhat(?:'?s|\s+is)\s+(?:the|teh) (?:date|day|week)\b",
         r"\btoday(?:'s)? date\b",
         r"\bday of the week\b",
         r"\bwhat day\b",
