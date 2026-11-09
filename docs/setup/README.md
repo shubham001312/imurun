@@ -288,10 +288,23 @@ PyPI (project → Manage → Releases → Options → Yank). After that, a plain
 
 ### `'imurun' is not recognized` / `command not found: imurun`
 
-pip put the script in a folder that is not on PATH. pip prints a warning that names
-it: `%APPDATA%\Python\Python312\Scripts` for `--user` installs on Windows,
-`~/.local/bin` on Linux/macOS. Use `python -m imurun`, add that folder to PATH, or
-install with `pipx install imurun` (`pipx ensurepath` fixes PATH).
+The first `imurun` run sets the command up by itself. If `imurun` on PATH does not
+already start this install, setup writes a small launcher and puts its folder on your
+PATH for new terminals:
+
+| OS | Launcher | PATH change |
+|---|---|---|
+| Linux, macOS | `~/.local/bin/imurun` | a marked block in `~/.profile`, plus `~/.bashrc` / `~/.zshrc` when present or when that is your shell; fish: `~/.config/fish/conf.d/imurun.fish` |
+| Windows | `%USERPROFILE%\.imurun\cmd\imurun.cmd` | appended to the user `Path` (`HKCU\Environment`) |
+
+So it works after `pip install` into a venv, `pip install --user`, `npx imurun` and a
+source checkout (`run.sh` / `run.bat`). **Open a new terminal** afterwards; the current one
+keeps its old PATH. `imurun doctor` shows which `imurun` a terminal finds. Setup never
+overwrites a file it did not write (the launcher is marked `imurun-shim`). It never edits
+the PATH when `IMURUN_NO_PATH=1` is set or in CI. `IMURUN_BIN_DIR=<dir>` puts the launcher
+somewhere else. `imurun install --force` points the launcher at the install you run it from.
+To undo it, delete the launcher and the `# >>> imurun >>>` block. Until then, `python -m imurun`
+always works.
 
 ### `externally-managed-environment` (Debian/Ubuntu/Fedora, Homebrew Python)
 

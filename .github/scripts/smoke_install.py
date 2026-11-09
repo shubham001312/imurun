@@ -66,8 +66,11 @@ def main() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
+    # IMURUN_BIN_DIR + IMURUN_NO_PATH: the first run writes its `imurun` launcher into
+    # the scratch dir and leaves the runner's real PATH / profile alone.
+    cmd_dir = work / "cmd"
     env = dict(os.environ, IMURUN_DATA_ROOT=str(home), BROWSER="none", PYTHONIOENCODING="utf-8",
-               IMURUN_NO_VOICE="1")
+               IMURUN_NO_VOICE="1", IMURUN_BIN_DIR=str(cmd_dir), IMURUN_NO_PATH="1")
     env.pop("FISH_LIBRARY", None)
     env.pop("PYTHONPATH", None)
     proc = subprocess.Popen([str(exe), "--no-open", "--port", str(port)], cwd=work, env=env,
@@ -110,6 +113,7 @@ def main() -> int:
         problems.append(f"files written into site-packages/imurun: {new}")
     if not (home / "install-state.json").is_file():
         problems.append("the first run did not record install-state.json (automatic setup did not run)")
+    problems += _launcher_smoke(cmd_dir, work, env)
     if doctor.returncode != 0 or "Traceback" in doctor.stderr:
         problems.append(f"`imurun doctor` failed (exit {doctor.returncode}): {doctor.stderr[-500:]}")
     if args.npm:
@@ -130,6 +134,23 @@ def main() -> int:
     if not problems:
         print(f"SMOKE OK: {wheel.name}")
     return 1 if problems else 0
+
+
+def _launcher_smoke(cmd_dir: Path, work: Path, env: dict) -> list[str]:
+    """The `imurun` launcher setup wrote must start the installed app from anywhere."""
+    shim = cmd_dir / ("imurun.cmd" if os.name == "nt" else "imurun")
+    if not shim.is_file():
+        return [f"the first run did not write the `imurun` launcher ({shim})"]
+    clean = {k: v for k, v in env.items() if k != "PYTHONPATH"}
+    clean["PATH"] = os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep)
+                                    if "imurun-smoke" not in p)
+    cmd = ["cmd", "/c", str(shim), "--version"] if os.name == "nt" else [str(shim), "--version"]
+    r = subprocess.run(cmd, cwd=work, env=clean, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=120)
+    print("launcher:", shim, "->", r.stdout.strip(), r.stderr[-500:])
+    if r.returncode != 0 or not r.stdout.startswith("imurun "):
+        return [f"the `imurun` launcher {shim} does not run (exit {r.returncode})"]
+    return []
 
 
 def _npm_smoke(tgz: Path, wheel: Path, work: Path) -> list[str]:

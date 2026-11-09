@@ -1223,6 +1223,230 @@ def report_gpu(info: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Install state (~/.imurun/install-state.json) and the fast start-up check
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# The `imurun` command: reachable from any new terminal, however it was installed
+# --------------------------------------------------------------------------- #
+# pip into a venv, `pip install --user` on Windows, `npx imurun` and a source
+# checkout all leave a working app whose `imurun` command is not on PATH in a
+# new terminal. Setup closes that gap: if `imurun` does not already run this
+# interpreter, it writes a small launcher (marked with SHIM_MARK) into a user
+# bin folder and puts that folder on the user's PATH. It never overwrites or
+# deletes a file it did not write. IMURUN_NO_PATH=1 turns the PATH change off,
+# IMURUN_BIN_DIR=<dir> moves the launcher (tests and the CI smoke install).
+SHIM_MARK = "imurun-shim"
+RC_BEGIN = "# >>> imurun >>>"
+RC_END = "# <<< imurun <<<"
+
+
+def command_dir() -> Path:
+    override = os.environ.get("IMURUN_BIN_DIR")
+    if override:
+        return Path(override).expanduser()
+    if IS_WINDOWS:
+        return data_root() / "cmd"
+    return Path.home() / ".local" / "bin"
+
+
+def command_path() -> Path:
+    return command_dir() / ("imurun.cmd" if IS_WINDOWS else "imurun")
+
+
+def _norm(path: str | Path) -> str:
+    return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _on_path(folder: Path, path_value: str | None = None) -> bool:
+    parts = (os.environ.get("PATH", "") if path_value is None else path_value).split(os.pathsep)
+    return _norm(folder) in {_norm(os.path.expandvars(p)) for p in parts if p}
+
+
+def _script_dirs() -> set[str]:
+    """Folders where pip puts this interpreter's console scripts (env + user scheme)."""
+    import sysconfig  # noqa: PLC0415
+
+    dirs = {_norm(sysconfig.get_path("scripts"))}
+    try:
+        dirs.add(_norm(sysconfig.get_path("scripts", f"{os.name}_user")))
+    except KeyError:  # pragma: no cover - interpreter without a user scheme
+        pass
+    if sys.platform == "darwin":
+        try:
+            dirs.add(_norm(sysconfig.get_path("scripts", "osx_framework_user")))
+        except KeyError:
+            pass
+    return dirs
+
+
+def _command_runs_this(path: Path) -> bool:
+    """True when ``path`` (an `imurun` found on PATH) starts this interpreter's IMURUN."""
+    try:
+        head = path.read_bytes()[:4096].decode("utf-8", "replace")
+    except OSError:
+        return False
+    if SHIM_MARK in head:
+        return f'"{sys.executable}"' in head
+    if "IMURUN npm launcher" in head or "node_modules" in head:
+        # The npm launcher runs ~/.imurun/venv (or IMURUN_VENV).
+        venv = os.environ.get("IMURUN_VENV") or str(data_root() / "venv")
+        return _norm(sys.prefix) == _norm(venv)
+    if head.startswith("#!"):
+        shebang = head[2:].splitlines()[0].strip().strip('"')
+        return _norm(shebang) == _norm(sys.executable)
+    # A Windows console-script .exe: pip writes it next to (or for) this interpreter.
+    return _norm(path.parent) in _script_dirs()
+
+
+def _only_while_activated(path: Path) -> bool:
+    """A venv's own bin/Scripts is on PATH only while that venv is activated."""
+    if sys.prefix == sys.base_prefix:
+        return False
+    return _norm(path).startswith(_norm(sys.prefix) + os.sep)
+
+
+def _shim_text() -> str:
+    py = sys.executable
+    root = None if INSTALLED else str(ROOT)
+    if IS_WINDOWS:
+        lines = ["@echo off", f"rem {SHIM_MARK}: written by IMURUN setup; runs IMURUN with the Python below.",
+                 "rem Safe to delete; `imurun install` writes it again.", "setlocal"]
+        if root:
+            lines.append(f'set "PYTHONPATH={root};%PYTHONPATH%"')
+        lines += [f'"{py}" -m imurun %*', "exit /b %errorlevel%", ""]
+        return "\r\n".join(lines)
+    lines = ["#!/bin/sh", f"# {SHIM_MARK}: written by IMURUN setup; runs IMURUN with the Python below.",
+             "# Safe to delete; `imurun install` writes it again."]
+    if root:
+        lines += [f'PYTHONPATH="{root}${{PYTHONPATH:+:$PYTHONPATH}}"', "export PYTHONPATH"]
+    lines += [f'exec "{py}" -m imurun "$@"', ""]
+    return "\n".join(lines)
+
+
+def _rc_files() -> list[Path]:
+    """Shell start-up files that get the PATH line (existing ones, plus the login shell's)."""
+    home = Path.home()
+    shell = os.path.basename(os.environ.get("SHELL", ""))
+    files = [home / ".profile"]
+    # A login bash (macOS Terminal, Fedora) reads ~/.bash_profile and then skips
+    # ~/.profile, so an existing ~/.bash_profile needs the line too.
+    if (home / ".bash_profile").exists():
+        files.append(home / ".bash_profile")
+    for name, sh in ((".bashrc", "bash"), (".zshrc", "zsh")):
+        if (home / name).exists() or shell == sh:
+            files.append(home / name)
+    return files
+
+
+def _add_to_user_path(folder: Path) -> list[str]:
+    """Persist ``folder`` on the user's PATH for new terminals; returns what changed."""
+    changed: list[str] = []
+    if IS_WINDOWS:
+        import winreg  # noqa: PLC0415
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                            winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                value, kind = winreg.QueryValueEx(key, "Path")
+            except FileNotFoundError:
+                value, kind = "", winreg.REG_EXPAND_SZ
+            if not _on_path(folder, value):
+                new = f"{value.rstrip(';')};{folder}" if value else str(folder)
+                winreg.SetValueEx(key, "Path", 0, kind if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ)
+                                  else winreg.REG_EXPAND_SZ, new)
+                changed.append(r"HKCU\Environment\Path")
+        if changed:
+            try:  # tell Explorer (and so new terminals) that the environment changed
+                import ctypes  # noqa: PLC0415
+
+                ctypes.windll.user32.SendMessageTimeoutW(0xFFFF, 0x001A, 0, "Environment", 0x0002, 2000, None)
+            except (OSError, AttributeError):
+                pass
+        return changed
+    line = f'case ":$PATH:" in *":{folder}:"*) ;; *) export PATH="{folder}:$PATH" ;; esac'
+    block = f"\n{RC_BEGIN}  (added by IMURUN setup: the `imurun` command)\n{line}\n{RC_END}\n"
+    for rc in _rc_files():
+        try:
+            text = rc.read_text(encoding="utf-8") if rc.exists() else ""
+        except OSError:
+            continue
+        if RC_BEGIN in text or str(folder) in text:
+            continue
+        try:
+            with rc.open("a", encoding="utf-8") as fh:
+                fh.write(block)
+            changed.append(str(rc))
+        except OSError:
+            pass
+    fish = Path.home() / ".config" / "fish"
+    if fish.is_dir():
+        conf = fish / "conf.d" / "imurun.fish"
+        if not conf.exists():
+            try:
+                conf.parent.mkdir(parents=True, exist_ok=True)
+                conf.write_text(f"# {SHIM_MARK}\nfish_add_path -g {folder}\n", encoding="utf-8")
+                changed.append(str(conf))
+            except OSError:
+                pass
+    return changed
+
+
+def path_changes_allowed() -> bool:
+    return os.environ.get("IMURUN_NO_PATH") != "1" and not os.environ.get("CI")
+
+
+def ensure_command() -> dict:
+    """Make `imurun` start this IMURUN from a new terminal. Never fatal; returns the record."""
+    target = command_path()
+    found = shutil.which("imurun")
+    if found and _command_runs_this(Path(found)) and not _only_while_activated(Path(found)):
+        return {"ok": True, "path": found, "detail": "on PATH"}
+    record: dict = {"ok": False, "path": str(target)}
+    try:
+        existing = target.read_text(encoding="utf-8", errors="replace") if target.exists() else None
+    except OSError:
+        existing = None
+    if existing is not None and SHIM_MARK not in existing and not _command_runs_this(target):
+        record["detail"] = f"{target} belongs to another program; left alone"
+        record["hint"] = "run IMURUN with:  python -m imurun"
+        return record
+    if existing is None or SHIM_MARK in existing:
+        text = _shim_text()
+        if existing != text:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8", newline="")
+                if not IS_WINDOWS:
+                    target.chmod(0o755)
+            except OSError as exc:
+                record["detail"] = f"could not write {target}: {exc}"
+                return record
+    record["ok"] = True
+    if _on_path(target.parent):
+        record["detail"] = "launcher written" if not found else (
+            f"launcher written; another `imurun` comes first on PATH: {found}")
+        return record
+    if not path_changes_allowed():
+        record["detail"] = f"launcher written; {target.parent} is not on PATH (IMURUN_NO_PATH/CI)"
+        return record
+    try:
+        changed = _add_to_user_path(target.parent)
+    except OSError as exc:
+        record["detail"] = f"launcher written; could not update PATH: {exc}"
+        return record
+    record["path_updated"] = changed
+    record["detail"] = "launcher written, PATH updated: open a new terminal" if changed else (
+        "launcher written; PATH already set for new terminals")
+    return record
+
+
+def report_command(info: dict) -> None:
+    if not info.get("ok"):
+        ui.warn(f"`imurun` command: {info.get('detail')}")
+        if info.get("hint"):
+            ui.hint(info["hint"])
+        return
+    ui.ok(f"`imurun` command: {info.get('detail')} {ui.c(str(info.get('path')), 'grey')}")
+
+
 STATE_SCHEMA = 1
 
 
@@ -1290,6 +1514,8 @@ def quick_check() -> list[str]:
     if not st:
         reasons.append("first run in this Python environment")
         return reasons
+    if "command" not in st:
+        reasons.append("the `imurun` command is not set up yet")
     version = app_version()
     if st.get("imurun") != version:
         reasons.append(f"IMURUN changed ({st.get('imurun')} -> {version})")
@@ -1360,6 +1586,8 @@ def run_setup(*, python: str, window: bool, voice: bool, tuning: bool, force: bo
         return 1
     ui.ok(f"Data folder {home['root']}: " + (f"created {len(home['created'])} folder(s)"
           if home["created"] else "complete") + f", {len(home['present']) + len(home['created'])} in place")
+    command = ensure_command()
+    report_command(command)
     ui.step(1, total, "Python packages")
     if force or missing_modules():
         try:
@@ -1425,6 +1653,7 @@ def run_setup(*, python: str, window: bool, voice: bool, tuning: bool, force: bo
         "engine": engine,
         "gpu": gpu,
         "home": {"root": home["root"], "folders": len(home["present"]) + len(home["created"])},
+        "command": command,
     }
     path = write_env_state(entry)
     if path:
@@ -1456,6 +1685,16 @@ def doctor(port: int = 8732) -> int:
         for line in engine_build_instructions().splitlines():
             ui.hint(line)
     report_gpu(gpu_report())
+    found = shutil.which("imurun")
+    if found and _command_runs_this(Path(found)):
+        ui.ok(f"`imurun` command {ui.c(found, 'grey')}")
+    elif found:
+        ui.warn(f"`imurun` on PATH is another install: {found}")
+        ui.hint("this one: python -m imurun  (or `imurun install --force` to point the launcher here)")
+    else:
+        shim = command_path()
+        ui.warn("`imurun` is not on PATH in this terminal"
+                + (f" (launcher: {shim}; open a new terminal)" if shim.exists() else ""))
     root = data_root()
     ui.ok(f"home dir {ui.c(str(root), 'grey')}")
     home = ensure_home_layout(root)

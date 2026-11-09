@@ -11,6 +11,18 @@
   earlier build, even with `IMURUN_BUNDLE_ENGINE=0`. Reproduced: a deleted
   `services/zz_stale.py` and `bin/fish.dll` both showed up in the next pure wheel. Now the
   second build matches a clean one (289 files).
+- **`imurun` works from any new terminal, however it was installed** (`install.ensure_command`,
+  run by the first-run setup and recorded as `command` in `install-state.json`). Before this,
+  `pip install` into a venv, `pip install --user` on Windows, `npx imurun` and a checkout
+  all left `imurun` off PATH in a new terminal. If `imurun` does not already run this
+  interpreter, setup writes a marked launcher (`~/.local/bin/imurun`; Windows:
+  `~/.imurun/cmd/imurun.cmd`) and adds its folder to the user PATH (shell rc block / HKCU
+  `Path`). A command that is on PATH only because a venv is activated does not count.
+  Foreign files are never overwritten. `IMURUN_NO_PATH=1` and CI skip the PATH change;
+  `IMURUN_BIN_DIR` moves the launcher. `imurun doctor` reports it. The CI smoke install now
+  runs the launcher too. Verified on Linux: after a fresh wheel install and first run,
+  a new login shell and a new interactive bash both resolve `imurun` → `imurun 0.3.0`.
+  The Windows branch is written but has not been run yet.
 - `.github/workflows/workflow.yml`: **releases are automatic.** A push to `main` whose
   `pyproject.toml` version has no `v<version>` tag yet runs the whole pipeline and then
   creates the tag and the GitHub Release, publishes to PyPI (trusted publishing, already
