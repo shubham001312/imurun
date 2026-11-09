@@ -336,12 +336,28 @@ def _activate(server: Any, provider: Provider, model_id: str) -> bool:
     client = client_for(server, provider)
     if client is None:
         return False
-    context = settings_for(server).provider_prefs(provider)["contexts"].get(model_id)
+    settings = settings_for(server)
+    context = settings.provider_prefs(provider)["contexts"].get(model_id)
+
+    def remember(mid: str, value: int) -> None:
+        # A window the provider reported (model details or a context-length
+        # error) is kept, so Stats and the prompt budget use the real size.
+        contexts = dict(settings.provider_prefs(provider)["contexts"])
+        if contexts.get(mid) != value:
+            contexts[mid] = int(value)
+            settings.update_provider(provider, contexts=contexts)
+
+    if hasattr(client, "_on_context"):
+        client._on_context = remember
     engine.attach_remote(client)
     try:
-        return bool(engine.select_remote(model_id, context=context))
+        chosen = bool(engine.select_remote(model_id, context=context))
     except TypeError:  # an engine facade without the context argument
-        return bool(engine.select_remote(model_id))
+        chosen = bool(engine.select_remote(model_id))
+    if chosen and not context and callable(getattr(client, "fetch_context", None)):
+        # Off the request path: one GET /models/{id} to the provider.
+        threading.Thread(target=client.fetch_context, name="imurun-context-lookup", daemon=True).start()
+    return chosen
 
 
 def attach(server: Any, engine: Any, home: Path | str) -> None:

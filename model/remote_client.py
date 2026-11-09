@@ -24,6 +24,8 @@ of it before it is shown.
 """
 from __future__ import annotations
 
+import urllib.parse
+
 import asyncio
 import ipaddress
 import json
@@ -42,6 +44,10 @@ logger = logging.getLogger(__name__)
 # What the agent loop budgets for. Hosted windows are usually larger; a model
 # whose catalogue entry says it is smaller gets its own, smaller, budget.
 CONTEXT_TOKENS = 32768
+# Upper bound for a window a provider reports (some publish 1M+).
+MAX_CONTEXT_TOKENS = 2_097_152
+_CONTEXT_IN_ERROR = re.compile(
+    r"(?:maximum|max)\s+(?:context|input)\s+(?:length|window|size)\s+(?:is|of)\s+(\d[\d,]{2,})", re.I)
 # A hostile or broken server must not exhaust memory.
 MAX_LIST_BODY = 16_000_000     # one /models page (OpenRouter's full list is a few MB)
 MAX_ERROR_BODY = 65_536
@@ -216,6 +222,7 @@ class OpenAICompatClient:
         self._key = key if callable(key) else (lambda value=key: value)
         self._model = model
         self._context: int | None = None
+        self._on_context = None  # set by services/remote/hosted.py to save a learned window
         self._hosts = tuple(h.lower() for h in hosts if h)
         self._base = check_base(base_url, self._hosts, label)
         self._host = (urlsplit(self._base).hostname or "").lower()
@@ -265,9 +272,45 @@ class OpenAICompatClient:
         return self.configured
 
     def context_limit(self) -> int:
+        """The prompt budget IMURUN keeps a chat within: the model's window, but
+        at most CONTEXT_TOKENS, so a long chat does not send 200k tokens (and
+        their cost) on every turn. ``model_info`` reports the real window."""
         if self._context:
             return max(1024, min(self._context, CONTEXT_TOKENS))
         return CONTEXT_TOKENS
+
+    @property
+    def context_known(self) -> bool:
+        return bool(self._context)
+
+    def learn_context(self, value: int | None) -> bool:
+        """Record a window reported by the provider (model details or an error)."""
+        if isinstance(value, int) and 1024 <= value <= MAX_CONTEXT_TOKENS and value != self._context:
+            self._context = value
+            if self._on_context is not None:
+                try:
+                    self._on_context(self._model, value)
+                except Exception:  # noqa: BLE001 - saving is a convenience
+                    pass
+            return True
+        return False
+
+    def fetch_context(self) -> int | None:
+        """Ask the provider for this model's details (GET /models/{id}); OpenAI-
+        compatible servers that publish a window return it there."""
+        if not self._model or self._context:
+            return self._context
+        try:
+            with self._request("GET", "/models/" + urllib.parse.quote(self._model, safe="/:"),
+                               timeout=15) as response:
+                data = json.loads(response.read(MAX_ERROR_BODY * 50) or b"{}")
+        except Exception:  # noqa: BLE001 - many providers do not offer this route
+            return None
+        item = data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), dict) else data
+        value = _context_of(item) if isinstance(item, dict) else None
+        if value:
+            self.learn_context(value)
+        return value
 
     def selected_name(self) -> str:
         return f"{display_name(self._model)} ({self.label})" if self._model else ""
@@ -275,7 +318,9 @@ class OpenAICompatClient:
     def model_info(self) -> dict:
         return {"remote": True, "provider": self.provider, "provider_label": self.label,
                 "model": self._model, "name": display_name(self._model),
-                "context": self._context or CONTEXT_TOKENS}
+                "context": self.context_limit(),          # what a chat may use (budget)
+                "context_window": self._context,          # the model's real window, when known
+                "context_known": bool(self._context)}
 
     def stats(self) -> dict:
         return dict(self._stats)
@@ -334,6 +379,9 @@ class OpenAICompatClient:
         detail = scrub(detail, token)[:200]
         code = exc.code
         lowered = detail.lower()
+        found = _CONTEXT_IN_ERROR.search(detail)
+        if found:
+            self.learn_context(int(found.group(1).replace(",", "")))
         where = f" (get one at {self._key_url})" if self._key_url else ""
         if 300 <= code < 400:
             return RemoteError(f"{self.label} answered with a redirect; it was not followed, so the key "

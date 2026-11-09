@@ -220,12 +220,30 @@
     else usage = 'Room for about ' + full(inUse - used) + ' more tokens in this chat.';
     html += '<p class="sv-note">' + esc(usage) + '</p>';
 
-    var rows = detail('Window in use', full(inUse) + ' tokens');
+    /* Hosted model whose provider does not publish its window (NVIDIA's list
+     * has none): the number is IMURUN's working budget, not the model's size. */
+    var unknownRemote = engine.remote && info.context_known === false;
+    var window_ = engine.remote ? num(info.context_window) : null;
+    var rows;
+    if (engine.remote) {
+      rows = detail('Model window', window_ ? full(window_) + ' tokens'
+        : 'not published by ' + (info.provider_label || 'the provider'));
+      rows += detail('Used per chat', full(inUse) + ' tokens');
+    } else {
+      rows = detail('Window in use', full(inUse) + ' tokens');
+    }
     if (maximum) rows += detail('Model maximum', full(maximum) + ' tokens');
     if (saved && !engine.remote) rows += detail('Saved in Settings', full(saved) + ' tokens');
     html += '<dl class="sv-list">' + rows + '</dl>';
 
     var notes = [];
+    if (unknownRemote) {
+      notes.push((info.provider_label || 'The provider') + ' does not list this model\'s window, so IMURUN keeps chats within ' +
+        full(inUse) + ' tokens. If the model reports its limit, the real size is saved and shown here.');
+    } else if (window_ && window_ > inUse) {
+      notes.push('The model accepts ' + full(window_) + ' tokens; IMURUN sends at most ' + full(inUse) +
+        ' per reply to keep hosted replies fast and their cost down.');
+    }
     if (maximum && inUse < maximum) {
       notes.push('The model supports up to ' + full(maximum) + ' tokens; this run uses ' + full(inUse) + '.');
     }
