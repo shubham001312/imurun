@@ -705,12 +705,33 @@
     // The folder the agent works in, so it is clear where code will be written.
     var projectPath = byId('home-project-path');
     var api = window.__imurun_api;
-    if (projectPath && api && api.getPermissions) {
-      api.getPermissions().then(function (view) {
-        var values = (view && (view.values || view)) || {};
-        var root = values.workspaceRoot || (view && view.workspace) || '';
-        if (root) { projectPath.textContent = '\u200e' + root + '\u200e'; projectPath.title = root; }
-      }, function () {});
+    function showProject(view) {
+      var values = (view && (view.values || view)) || {};
+      var root = values.workspaceRoot || (view && view.workspace) || '';
+      if (root && projectPath) { projectPath.textContent = '\u200e' + root + '\u200e'; projectPath.title = root; }
+    }
+    if (projectPath && api && api.getPermissions) api.getPermissions().then(showProject, function () {});
+    var change = byId('home-project-change');
+    if (change) {
+      change.addEventListener('click', function () {
+        if (!api || !api.pickWorkspaceFolder) { openSettings('permissions'); return; }
+        change.disabled = true;
+        change.textContent = 'Choose in the dialog…';
+        api.pickWorkspaceFolder().then(function (view) {
+          if (view && view.cancelled) return;
+          showProject(view);
+          if (IM.toast) IM.toast({ tone: 'success', kicker: 'Workspace', title: 'Working folder changed',
+            text: (view && (view.workspace || (view.values && view.values.workspaceRoot))) || '' });
+        }, function (error) {
+          // No dialog on this machine (headless, no zenity): type the path in Settings instead.
+          if (IM.toast) IM.toast({ tone: 'error', kicker: 'Workspace', title: 'Could not open the folder dialog',
+            text: (error && error.message) || 'Set the folder in Settings, Permissions.' });
+          openSettings('permissions');
+        }).then(function () {
+          change.disabled = false;
+          change.textContent = 'Change folder';
+        });
+      });
     }
     var quick = byId('home-quick');
     var homePrompt = byId('home-prompt');

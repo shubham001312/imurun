@@ -45,7 +45,7 @@
     '        <div class="home-project" id="home-project">',
     '          <svg class="home-project-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/></svg>',
     '          <span class="home-project-main"><span class="home-project-k">Working in</span><code id="home-project-path">your workspace</code></span>',
-    '          <button class="btn ghost home-project-change" type="button" data-home-goto="settings" data-home-section="permissions">Change folder</button>',
+    '          <button class="btn ghost home-project-change" type="button" id="home-project-change">Change folder</button>',
     '        </div>',
     '        <p class="home-greeting" id="home-greeting">Welcome back</p>',
     '        <h1 class="home-title">What should we build?</h1>',

@@ -906,6 +906,13 @@
     return fetchAPI('/api/permissions', { method: 'POST', body: JSON.stringify(changes || {}) });
   }
 
+  /* Show the computer's own folder dialog (the server runs on this machine) and
+   * make the chosen folder the workspace. Resolves {cancelled: true} when the
+   * dialog was closed, else the permissions view. */
+  async function pickWorkspaceFolder() {
+    return fetchAPI('/api/permissions/pick-folder', { method: 'POST', body: '{}' });
+  }
+
   async function getAgent() {
     return fetchAPI('/api/agent');
   }
@@ -1159,6 +1166,7 @@
     answerApproval,
     getPermissions,
     setPermissions,
+    pickWorkspaceFolder,
     getAgent,
     setAgent,
     shareLocation,
