@@ -253,7 +253,7 @@
 
   function actions() {
     var list = [
-      { kind: 'Action', label: 'New chat', hint: 'Alt+N', run: function () { IM.shell.createSession('New chat'); } },
+      { kind: 'Action', label: 'New chat', hint: 'Alt+N', run: function () { IM.shell.newChat(); } },
       { kind: 'Action', label: 'Show performance and model', hint: MOD + '+.', run: function () { toggleStats(true); } },
       { kind: 'Action', label: 'Keyboard shortcuts', hint: '?', run: openShortcuts },
       { kind: 'Action', label: 'Rename current session', hint: 'F2', run: function () { IM.shell.renameActive(); } },
@@ -542,7 +542,7 @@
     }
     if (event.altKey && !mod && (key === 'n' || key === 'N' || event.code === 'KeyN')) {
       event.preventDefault();
-      IM.shell.createSession('New chat');
+      IM.shell.newChat();
       return;
     }
     if (event.altKey && !mod && /^Digit[1-7]$/.test(event.code || '')) {

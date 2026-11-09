@@ -39,9 +39,36 @@ def new_session_id(first_command: str) -> str:
     return f"{slugify(first_command)}-{secrets.token_hex(2)}"
 
 
+NAME_MAX = 44
+_FILLER = re.compile(
+    r"^(?:(?:hey|hi|hello|ok|okay|so)[,!]\s+|hey\s+)?"
+    r"(?:(?:please|pls|can you|could you|would you|will you|i want you to|help me)\s+)?",
+    re.IGNORECASE,
+)
+
+
 def derive_name(first_command: str) -> str:
-    name = re.sub(r"[\x00-\x1f]", " ", first_command).strip()[:60].rstrip()
-    return name or "Untitled session"
+    """A short title for a session, from its first message.
+
+    The first line of real text (code fences skipped), without markdown,
+    URLs shortened to their host, polite openers dropped, cut at a word
+    boundary with an ellipsis. Never more than NAME_MAX + 1 characters.
+    """
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", first_command or "")
+    text = re.sub(r"```.*?(?:```|$)", "\n", text, flags=re.DOTALL)  # fenced code
+    line = next((ln for ln in text.splitlines() if re.search(r"\w", ln)), "")
+    line = re.sub(r"https?://([^/\s?#]+)\S*", r"\1", line)           # URL -> host
+    line = re.sub(r"[`*_~#>|\[\]]+", " ", line)                        # markdown marks
+    line = re.sub(r"\s+", " ", line).strip(" -:;,")
+    line = _FILLER.sub("", line).strip()
+    line = line.rstrip(" ?!.:;,")
+    if not re.search(r"\w", line):
+        return "Untitled session"
+    if len(line) > NAME_MAX:
+        cut = line[:NAME_MAX + 1]
+        cut = cut[:cut.rfind(" ")] if " " in cut else line[:NAME_MAX]
+        line = cut.rstrip(" ,;:-") + "…"
+    return line[0].upper() + line[1:]
 
 
 def _safe_filename(session_id: str) -> str:

@@ -4,6 +4,37 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-09: Workspace layout, home launchpad, draft chats
+
+- **Side panel** is a tool rail: New chat on top (Alt N), pages grouped under
+  Workspace (Home, Chat, Sessions) and Agent (Skills, Persona, Apps) with line
+  icons, Recent sessions, and Settings plus the engine status in the footer.
+  Collapsed, it is a 56 px icon rail, where it used to show only the logo.
+  Long names end in "…" instead of running past the edge.
+- **Settings** is one sheet with an index of 4 groups instead of 17 flat tabs:
+  Workspace (Profile, Appearance, Usage), Models (Models, Engine, Resources,
+  Voice, Fine-tuning), Agent (Agent, Tools, Permissions, Web search) and
+  Connections (Apps, MCP servers, Use by API, API clients). "API" and
+  "Use by API" were easy to mix up; the first is now "API clients". Labels
+  are in sentence case. Models shows one download button at a time, and line
+  icons replace the emoji.
+- **Home** is a launchpad instead of a landing page: a greeting, "What are we
+  working on?" and the composer, then Recent work (name and time, without the
+  internal id) and This machine (engine, model and apps, each with its state
+  and the next action).
+- **New chat no longer creates an empty session.** The button, Alt+N and the
+  palette open a draft; the session is created when the first message is
+  sent, so nothing is left behind by a click. Before this, every click saved
+  a session called "New chat".
+- **Session names read like titles** (`services/sessions/session.derive_name`):
+  the first line of real text, without markdown or code fences, URLs shortened
+  to their host, "please"/"can you" dropped, cut at a word with "…" (44
+  characters at most). Before this: the raw first 60 characters, often cut
+  mid-word. Tests: `tests/test_session_names.py`.
+- All styling is in `styles/workspace.css` and uses only theme variables.
+  Checked: the default light theme, ImuTechz Console (dark), mobile width,
+  and the collapsed panel.
+
 ## 2026-11-03: Hardware card and GPU chip
 
 - New `hardware.js`: a "Hardware" card at the top of Settings > Resource

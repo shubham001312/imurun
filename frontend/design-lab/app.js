@@ -186,7 +186,7 @@
     pageCrumb.appendChild(sep);
     pageCrumb.appendChild(document.createTextNode(' '));
     var strong = document.createElement('strong');
-    strong.textContent = session ? (session.name || 'Untitled') + ' · ' + session.id : 'No session';
+    strong.textContent = session ? (session.name || 'Untitled') + ' · ' + session.id : 'New chat';
     pageCrumb.appendChild(strong);
   }
 
@@ -380,6 +380,16 @@
       if (IM.chat) await IM.chat.loadTranscript(id);
     }
     if (IM.chat && !isMobile()) IM.chat.focusComposer();
+  }
+
+  /* "New chat" opens an empty composer; the session itself is created (and
+   * named from the message) by chat.js when the first message is sent, so
+   * clicking New chat and walking away leaves nothing behind. */
+  function newChat() {
+    setActiveSession(null);
+    setPage('chat', { force: true });  /* a draft has no session yet */
+    if (IM.chat) IM.chat.clear();
+    if (IM.chat && IM.chat.focusComposer) IM.chat.focusComposer();
   }
 
   async function createSession(firstCommand) {
@@ -585,7 +595,7 @@
       return '<button class="home-recent-row" type="button" data-open-session="' + escapeHtml(session.id) + '">' +
         '<span class="dot" aria-hidden="true"></span><span class="home-recent-main">' +
         '<strong>' + escapeHtml(session.name || 'Untitled session') + '</strong>' +
-        '<span>' + escapeHtml(session.id + ' · ' + util.formatTimeAgo(sessionTime(session))) + '</span>' +
+        '<span>' + escapeHtml(util.formatTimeAgo(sessionTime(session))) + '</span>' +
         '</span></button>';
     }).join('');
   }
@@ -619,7 +629,12 @@
       unreachable: 'Server unreachable'
     };
     if (dot) dot.className = 'dot ' + (engineState === 'ready' ? 'is-online' : (engineState === 'provisioning' ? 'is-pending' : 'is-offline'));
-    if (engine) engine.textContent = labels[engineState];
+    var homeLabels = {
+      ready: engineLabel ? 'Online · ' + engineLabel : 'Online',
+      provisioning: 'Starting up, or not installed yet',
+      unreachable: 'Server unreachable'
+    };
+    if (engine) engine.textContent = homeLabels[engineState];
     var eventsNote = state.events === 'offline' ? ' · live updates off' : (state.events === 'reconnecting' ? ' · reconnecting' : '');
     if (statusText) statusText.textContent = labels[engineState].toLowerCase() + eventsNote;
     if (statusPulse) {
@@ -629,6 +644,11 @@
     }
     var statusRow = document.querySelector('.side-foot .status');
     if (statusRow) statusRow.dataset.state = engineState;
+    var modelDot = byId('home-model-dot');
+    if (modelDot) {
+      modelDot.className = 'dot ' + (status && status.selected_model ? 'is-online'
+        : (state.modelsDownloaded > 0 ? 'is-pending' : 'is-offline'));
+    }
     if (model) {
       if (status && status.selected_model) model.textContent = status.selected_model;
       else if (state.modelsDownloaded === 0) model.textContent = 'No model downloaded';
@@ -642,6 +662,12 @@
   IM.bus.on('models', function () { renderStatus(state.status); });
 
   function bindHome() {
+    var greeting = byId('home-greeting');
+    if (greeting) {
+      var hour = new Date().getHours();
+      greeting.textContent = hour < 5 ? 'Working late' : hour < 12 ? 'Good morning'
+        : hour < 18 ? 'Good afternoon' : 'Good evening';
+    }
     var quick = byId('home-quick');
     var homePrompt = byId('home-prompt');
     if (quick && homePrompt) {
@@ -660,7 +686,7 @@
         var session = await createSession(value);
         if (button) {
           button.disabled = false;
-          button.textContent = 'Start session';
+          button.textContent = 'Start chat';
         }
         if (session) {
           homePrompt.value = '';
@@ -686,7 +712,7 @@
 
     ['home-new-session', 'new-session', 'new-session-empty', 'sidebar-new-chat'].forEach(function (id) {
       var button = byId(id);
-      if (button) button.addEventListener('click', function () { createSession(id === 'sidebar-new-chat' ? 'New chat' : 'New session'); });
+      if (button) button.addEventListener('click', newChat);
     });
   }
 
@@ -1424,6 +1450,7 @@
     currentPage: function () { return currentPage; },
     openSettings: openSettings,
     createSession: createSession,
+    newChat: newChat,
     activateSession: activateSession,
     deleteSession: deleteSessionById,
     handleCommand: handleCommand,
