@@ -9,9 +9,10 @@ update when it lands.
    Qwen 2.5 1.5B, Qwen 3 0.6B, Phi-3.5 mini, Gemma 2 2B, Mixtral (MoE). Fix
    what breaks, add rows to `docs/engine/ARCHITECTURES.md`.
 2. **Prefill kernel throughput** (currently ~100 tok/s on 1B): process 2–4 weight
-   rows per activation load; AVX-512 VNNI (`vpdpbusd`) and AVX2-VNNI paths;
-   ARM NEON `sdot` kernels for Apple silicon and phones (the scalar path is the
-   only ARM path today).
+   rows per activation load; AVX-512 VNNI (`vpdpbusd`) and AVX2-VNNI paths.
+   ARM NEON kernels (`sdot` + plain) shipped in 0.3.4 (`src/quant_arm.cpp`); still to
+   do on ARM: whole-model Mac benchmarks, NEON for the f32 attention / norm loops, and
+   a Metal (or MoltenVK) GPU path for macOS.
 3. **KV cache in f16** (halves memory, lets the planner give longer context).
 4. **IQ2/IQ3 and TQ quant kernels** so the smallest files run on 4 GB devices.
 5. **True tiered residency**: pinned staging buffers, explicit per-layer load
