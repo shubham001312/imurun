@@ -147,3 +147,24 @@
   .side-new { transition: none; }
   .side-new:hover { transform: none; }
 }
+
+/* --------------------------------------------------------- proportions */
+/* One column for the whole conversation: messages and the composer share it,
+ * and it scales with the window (about 80% of the main area) instead of a
+ * fixed 760 px strip under a full-width composer. */
+:root { --studio-col: clamp(600px, 80%, 1100px); }
+@media (min-width: 1700px) { :root { --studio-col: clamp(600px, 78%, 1200px); } }
+@media (max-width: 860px) { :root { --studio-col: 100%; } }
+
+.transcript > .msg,
+.transcript > .queued { max-width: var(--studio-col); }
+.transcript .msg.assistant > .bubble { font-size: 15.5px; line-height: 1.68; }
+.transcript .msg.assistant > .bubble > :not(.md-codeblock):not(.md-table-wrap) { max-width: 96ch; }
+.transcript .msg.user > .bubble { max-width: min(78%, 80ch); font-size: 15px; }
+
+.composer > * { width: 100%; max-width: var(--studio-col); margin-left: auto; margin-right: auto; }
+.composer .input-wrap textarea { font-size: 15px; }
+
+/* Home uses the same proportion, a little wider for its two columns. */
+.page-home > * { width: 100%; max-width: clamp(640px, 82%, 1180px); }
+.home-grid { grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); }
