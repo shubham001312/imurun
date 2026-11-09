@@ -1,0 +1,366 @@
+/* Chat messages: the reading view of a conversation.
+ *
+ * Loaded after workspace.css and every theme, and written in the same
+ * language: sentence case, theme variables only, line icons, hairlines, the
+ * accent only for what is active or primary.
+ *
+ * - One centred column. The user's turn is a subtle bubble on the right;
+ *   the reply is plain text at full column width with a ~72ch measure.
+ * - No "IMURUN" / "YOU" labels (kept for screen readers only).
+ * - Under a reply: one collapsed "Searched the web · 4 sources" row, then a
+ *   compact icon row (Copy, Read aloud, thumbs, Teach, "8.5 s") that shows
+ *   on hover or keyboard focus of the message and always on touch screens.
+ * - Plan mode replies carry a "Plan" tag and a "Switch to Build" button.
+ */
+
+/* ---------------------------------------------------------------- layout */
+
+.transcript > .msg {
+  align-self: center;
+  width: 100%;
+  max-width: 760px;
+  min-width: 0;
+}
+.transcript > .msg.user {
+  align-self: center;
+  align-items: flex-end;
+}
+/* A new turn starts a little further down than the reply it follows. */
+.transcript > .msg.user:not(:first-child) { margin-top: 10px; }
+
+/* Who said what is clear from the layout; the label stays for screen readers. */
+.transcript .msg > .who {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+  white-space: nowrap; border: 0;
+}
+
+/* ------------------------------------------------------------ user turn */
+
+.transcript .msg.user > .bubble {
+  max-width: min(82%, 62ch);
+  padding: 9px 14px;
+  border: 1px solid var(--line);
+  border-radius: 18px 18px 6px 18px;
+  background: var(--surface-2);
+  box-shadow: none;
+  color: var(--text);
+}
+.transcript .msg.user > .bubble .md-p {
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.transcript .msg.is-queued > .bubble { border-style: dashed; }
+
+/* ------------------------------------------------------------ the reply */
+
+.transcript .msg.assistant > .bubble {
+  padding: 2px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  overflow-wrap: anywhere;
+}
+.transcript .msg.assistant > .bubble::before,
+.transcript .msg.assistant > .bubble::after { display: none; }
+
+/* Reading measure for prose; code and tables may use the full column. */
+.transcript .msg.assistant > .bubble > :not(.md-codeblock):not(.md-table-wrap) { max-width: 72ch; }
+.transcript .msg.assistant .bubble .md-p { margin: 0 0 12px; line-height: 1.65; }
+.transcript .msg.assistant .bubble .md-p:last-child { margin-bottom: 0; }
+
+/* ------------------------------------------------------------- markdown */
+
+.transcript .bubble .md-h { margin: 22px 0 8px; line-height: 1.3; letter-spacing: -.005em; }
+.transcript .bubble > .md-h:first-child { margin-top: 2px; padding-bottom: 0; border-bottom: 0; }
+.transcript .bubble h1.md-h { font-size: 20px; }
+.transcript .bubble h5.md-h,
+.transcript .bubble h6.md-h { text-transform: none; letter-spacing: 0; color: var(--text); }
+
+.transcript .bubble .md-list { margin: 0 0 12px; padding-left: 22px; line-height: 1.65; }
+.transcript .bubble .md-list li { margin: 4px 0; }
+.transcript .bubble .md-list li::marker { color: var(--muted-soft, var(--muted)); font-weight: 400; }
+.transcript .bubble .md-list .md-list { margin: 4px 0 2px; }
+
+.transcript .bubble .md-quote { margin: 0 0 12px; border-left-color: var(--line-strong); }
+
+.transcript .bubble .md-code-inline { color: var(--text); }
+
+.transcript .bubble .md-table-wrap {
+  margin: 6px 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.transcript .bubble .md-table { margin: 0; }
+.transcript .bubble .md-table th {
+  font: 600 12.5px/1.4 var(--font);
+  letter-spacing: 0; text-transform: none;
+  color: var(--text);
+  background: var(--surface-2);
+}
+.transcript .bubble .md-table tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+.transcript .bubble .md-table tbody tr:last-child td { border-bottom: 0; }
+
+/* Code: the language in plain words, a quiet Copy, sideways scroll for
+ * long lines (never the page). */
+.transcript .bubble .md-codeblock { margin: 6px 0 14px; max-width: 100%; }
+.transcript .bubble .md-codehead { padding: 5px 6px 5px 12px; }
+.transcript .bubble .md-codeblock.is-open .md-codehead { background: inherit; }
+.transcript .bubble .md-lang {
+  font: 500 11.5px/1.4 var(--mono);
+  letter-spacing: 0; text-transform: none;
+  color: inherit; opacity: .8;
+}
+.transcript .bubble .md-copy {
+  padding: 2px 9px;
+  border-radius: 6px;
+  font: 500 11.5px/1.4 var(--font);
+}
+.transcript .bubble .md-code { max-width: 100%; overflow-x: auto; }
+
+/* ----------------------------------------------- folded rows (one style) */
+
+/* The finished tool / thought pill above the answer and the sources row
+ * under it read as the same kind of thing: a quiet row that opens. */
+.transcript .msg:not(.is-thinking):not(.is-streaming) .thinking:not(.is-live) > summary,
+.reply-disclosure {
+  min-height: 28px;
+  padding: 3px 11px 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  font: 500 12.5px/1.3 var(--font);
+  color: var(--muted);
+}
+.transcript .msg:not(.is-thinking):not(.is-streaming) .thinking:not(.is-live) > summary:hover,
+.reply-disclosure:hover { border-color: var(--line-strong); color: var(--text); }
+.transcript .msg .thinking[open] > summary,
+.reply-disclosure[aria-expanded="true"] { border-color: var(--line-strong); color: var(--text); }
+
+.reply-disclosure {
+  display: inline-flex; align-items: center; gap: 7px;
+  max-width: 100%;
+  cursor: pointer;
+  transition: border-color var(--dur-base, .2s), color var(--dur-base, .2s);
+}
+.reply-disclosure:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.reply-disclosure-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* chevron, as on the pill */
+.reply-disclosure::after {
+  content: ""; flex: none;
+  width: 6px; height: 6px; margin: 0 0 2px 1px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg); opacity: .7;
+  transition: transform .24s var(--ease-std, ease);
+}
+.reply-disclosure[aria-expanded="true"]::after { transform: rotate(-135deg) translate(-2px, -2px); }
+.reply-ico {
+  width: 14px; height: 14px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.reply-ico.reply-ok { stroke: var(--ok-hue, var(--success)); stroke-width: 1.9; }
+
+/* ---------------------------------------------------------------- sources */
+
+.transcript .msg-sources { margin-top: 12px; max-width: 100%; }
+.reply-source-panel {
+  margin-top: 8px; padding: 4px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.reply-source-panel[hidden] { display: none; }
+.reply-source-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.reply-source { min-width: 0; }
+.transcript .reply-source .source-chip {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; max-width: 100%; min-width: 0;
+  padding: 6px 8px;
+  border: 0; border-radius: 8px;
+  background: transparent; color: var(--text);
+  font: 13px/1.35 var(--font);
+  transform: none;
+}
+.transcript .reply-source .source-chip:hover { background: var(--surface-2); transform: none; }
+.transcript .reply-source .source-chip.is-cited { background: var(--surface-2); box-shadow: var(--focus-ring); }
+.transcript .reply-source .source-title {
+  flex: 1 1 auto; min-width: 0; max-width: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.transcript .reply-source .source-domain {
+  flex: 0 1 auto; max-width: 40%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 12px/1.3 var(--font); color: var(--muted);
+}
+.transcript .reply-source .source-n { margin: 0; color: var(--muted-soft, var(--muted)); }
+.reply-source .source-snippet {
+  margin: 0 8px 6px 38px;
+  font: 12.5px/1.5 var(--font); color: var(--muted);
+}
+.msg-sources.has-citations .reply-source .source-snippet { margin-left: 60px; }
+.reply-sources:not(.show-snippets) .source-snippet { display: none; }
+.reply-source-panel .msg-sources-toggle {
+  margin: 2px 8px 4px;
+  font: 500 12px/1.4 var(--font);
+  color: var(--muted);
+}
+.reply-source-panel .msg-sources-toggle:hover { color: var(--text); text-decoration: underline; }
+
+/* Verified without a list, or not verified live: a small note, same place. */
+.reply-evidence { margin-top: 12px; }
+
+/* Skills (or a bare tool-call count when the frames were missed). */
+.transcript .msg-agent-foot { margin-top: 10px; gap: 6px; }
+.transcript .msg-agent-foot .msg-agent-k {
+  font: 500 12px/1 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--muted-soft, var(--muted));
+}
+.transcript .msg-agent-foot .skill-chip,
+.transcript .msg-agent-foot .tool-chip {
+  border-color: var(--line); background: transparent; color: var(--muted);
+  font: 500 12px/1.5 var(--font);
+}
+
+/* Live search status: quiet, the same shape as the pill. */
+.transcript .msg .web-search-indicator {
+  width: fit-content; max-width: 100%;
+  margin: 2px 0 10px; padding: 4px 11px; font-size: 12.5px;
+}
+
+/* Inside the opened pill: step and research labels in sentence case. */
+.transcript .msg .thinking-body.is-multi .trace-step::before,
+.transcript .msg .research-k {
+  font: 600 11.5px/1.3 var(--font);
+  letter-spacing: 0; text-transform: none;
+}
+
+/* "Stopped", "Recovered after the stream dropped", "Queued for the next step" */
+.transcript .msg-chip { font: 500 12px/1.5 var(--font); }
+
+/* ----------------------------------------------------------- the actions */
+
+.transcript .msg-actions {
+  display: flex; align-items: center; gap: 2px; flex-wrap: wrap;
+  margin-top: 6px; min-height: 28px;
+  opacity: 0;
+  transition: opacity var(--dur-base, .2s) var(--ease-std, ease);
+}
+.transcript .msg:hover > .msg-actions,
+.transcript .msg:focus-within > .msg-actions,
+.transcript .msg-actions:has(.is-active),
+.transcript .msg-actions:has(.msg-meta.is-open) { opacity: 1; }
+@media (hover: none), (pointer: coarse) {
+  .transcript .msg-actions { opacity: 1; }
+}
+/* polish.css faded each button; the row does it now. */
+.transcript .msg-actions .msg-action { opacity: 1; }
+
+/* Icon buttons. The text stays inside (other modules relabel it: "Copied",
+ * "Stop reading", "Taught") but is not drawn; the icon is a mask, so it
+ * follows the theme colour. aria-label / title carry the name. */
+.transcript .msg-actions .msg-action {
+  display: inline-grid; place-items: center;
+  width: 28px; height: 28px; min-width: 28px; padding: 0;
+  border: 0; border-radius: 7px;
+  background: transparent; color: var(--muted);
+  font-size: 0; line-height: 0;
+}
+.transcript .msg-actions .msg-action:hover { background: var(--surface-2); color: var(--text); border: 0; }
+.transcript .msg-actions .msg-action:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.transcript .msg-actions .msg-copy::before,
+.transcript .msg-actions .msg-speak::before,
+.transcript .msg-actions .fb-teach::before {
+  content: "";
+  width: 16px; height: 16px;
+  background: currentColor;
+  -webkit-mask: var(--ico) center / contain no-repeat;
+  mask: var(--ico) center / contain no-repeat;
+}
+.transcript .msg-copy {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='8.5' y='8.5' width='11.5' height='11.5' rx='2.5'/%3E%3Cpath d='M15.5 8.5V6.5A2.5 2.5 0 0 0 13 4H6.5A2.5 2.5 0 0 0 4 6.5V13a2.5 2.5 0 0 0 2.5 2.5h2'/%3E%3C/svg%3E");
+}
+.transcript .msg-copy.is-done {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E");
+  color: var(--ok-hue, var(--success));
+}
+.transcript .msg-speak {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 9.5h3.5L12 5.5v13l-4.5-4H4z'/%3E%3Cpath d='M15.5 9.2a4 4 0 0 1 0 5.6M18.2 6.6a7.6 7.6 0 0 1 0 10.8'/%3E%3C/svg%3E");
+}
+.transcript .msg-speak.is-active,
+.transcript .msg-speak[aria-pressed="true"] {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linejoin='round'%3E%3Crect x='7' y='7' width='10' height='10' rx='2'/%3E%3C/svg%3E");
+  color: var(--accent); background: var(--accent-soft);
+}
+.transcript .msg-actions .fb-teach {
+  --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14.5 5.5l4 4L9 19H5v-4z'/%3E%3Cpath d='M12.5 7.5l4 4'/%3E%3C/svg%3E");
+}
+.transcript .msg-actions .fb-btn svg { width: 16px; height: 16px; }
+.transcript .msg-actions .fb-btn.is-on { color: var(--accent); background: var(--accent-soft); }
+.transcript .msg-actions .fb-btn[data-fb="down"].is-on { color: var(--text); background: var(--surface-2); }
+.transcript .msg-actions .fb-group { gap: 2px; margin-left: 4px; padding-left: 4px; border-left: 1px solid var(--line); }
+
+/* The numbers: one quiet "8.5 s" at the end of the row; every figure is in
+ * its tooltip, and a click (or Enter) spells them out in place. */
+.transcript .msg-actions .msg-meta {
+  order: 9;
+  margin: 0 0 0 6px; padding: 3px 6px;
+  border: 0; border-radius: 6px;
+  background: transparent;
+  font: 500 11.5px/1.4 var(--font);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-soft, var(--muted));
+  cursor: pointer;
+  white-space: nowrap;
+}
+.transcript .msg-actions .msg-meta:hover { background: var(--surface-2); color: var(--muted); }
+.transcript .msg-actions .msg-meta:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.transcript .msg-actions .msg-meta.is-open { white-space: normal; color: var(--muted); }
+
+/* --------------------------------------------------------------- Plan mode */
+
+.reply-tags { display: flex; gap: 6px; margin: 0 0 6px; }
+.reply-tag {
+  display: inline-flex; align-items: center;
+  padding: 1px 8px;
+  border: 1px solid var(--line-strong); border-radius: 999px;
+  font: 600 11.5px/1.5 var(--font);
+  color: var(--muted);
+}
+.reply-plan-cta { margin-top: 14px; }
+.reply-plan-go.btn {
+  padding: 6px 12px;
+  border-color: var(--accent-line);
+  color: var(--accent);
+  font: 550 13px/1.3 var(--font);
+}
+.reply-plan-go.btn:hover { background: var(--accent-soft); border-color: var(--accent); }
+/* Only the newest reply offers it: an older plan is ambiguous once the
+ * conversation has moved on. */
+.transcript > .msg.assistant:not(:last-child) > .reply-plan-cta { display: none; }
+
+/* ------------------------------------------------------------ empty state */
+
+.transcript .chat-empty-mark {
+  display: inline-grid; place-items: center;
+  width: 44px; height: 44px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--muted); font-size: 18px;
+}
+.transcript .chat-empty h2 { font-weight: 550; }
+
+@media (max-width: 640px) {
+  .transcript .msg.user > .bubble { max-width: 90%; }
+  .reply-source .source-snippet { margin-left: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .transcript .msg-actions, .reply-disclosure, .reply-disclosure::after { transition: none; }
+}
+body[data-reduced-motion="1"] .transcript .msg-actions,
+body[data-reduced-motion="1"] .reply-disclosure,
+body[data-reduced-motion="1"] .reply-disclosure::after { transition: none; }

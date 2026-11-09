@@ -4,6 +4,58 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-09: Chat messages read like a conversation, not a log
+
+The user called the chat "not good": every reply carried an "IMURUN" label, a
+stats line, three text buttons, a "Sources" heading with chips, a "Used
+web_search" footer and a "Verified · 4 sources" badge, several saying the
+same thing. New: `styles/chat.css` (after workspace.css) and `reply.js`
+(chat.js is at its size limit); edits in `chat.js`, `activity.js`, `index.html`.
+
+- **Layout.** One centred 760 px column. The user's turn is a subtle bubble on
+  the right; the reply is plain text at full column width (prose capped at
+  ~72ch, line height 1.65, more room between turns). The mono all-caps
+  "IMURUN" / "YOU" labels are gone (still there for screen readers).
+- **Numbers.** "114 tok • 28.5 tok/s • prefill 1.48 s • 8.45 s" is now a
+  quiet "8.5 s" at the end of the action row. Its tooltip and accessible name
+  hold every figure; click or Enter spells them out in place. Nothing was
+  dropped, and `turn.stats` still feeds the Performance drawer.
+- **Actions.** Copy, Read aloud, thumbs up / down and Teach are one row of
+  28 px line icons with tooltips and aria-labels, shown on hover or keyboard
+  focus of the message, always on touch screens, and kept visible while a
+  reply is being read aloud. The icons are CSS masks, so voice.js /
+  voice-server.js ("Stop reading"), copy ("Copied") and feedback.js
+  ("Taught") still relabel the same buttons and the icon follows (stop, check).
+- **Sources.** One collapsed row, "Searched the web · 4 sources", with a
+  check when the server marked the answer verified (it replaces "Verified ·
+  4 sources" and the "Sources" heading). Open, each source is one line:
+  initial, title (ellipsis), domain; "Show snippets" adds the snippets. A
+  `[n]` citation opens the list before jumping to item n. The live "Found N
+  sources / Search finished" status is removed once the reply is in (a
+  search that failed or found nothing still says so). "Not verified live"
+  sits in the same place when there are no sources.
+- **Tools.** The folded pill above the answer names the tools ("Used
+  web_search", "Used web_search and web_fetch", "Used 5 tools") and opens to
+  the same tool rows with arguments and output. The "Used web_search" footer
+  that repeated it is gone; the footer now only shows skills when no tool ran
+  and the bare count when the tool frames were missed. The pill and the
+  sources row share one style; trace and research labels are sentence case.
+- **Markdown.** Headings, lists (muted markers), tables (sentence-case header
+  row, hairline frame) and code blocks (language in plain words, quiet Copy,
+  sideways scroll inside the block) restyled for the reading view.
+- **Plan mode.** A reply generated while the composer was on Plan (read at
+  send time, `Turn.mode`) gets a "Plan" tag and a "Switch to Build and do
+  this" button under it. The button switches the composer to Build and sends
+  "Carry out the plan above." in the same session; it shows only on the
+  newest reply. Plan turn ids are remembered in `localStorage`
+  (`imurun.chat.planTurns`, last 200) so the tag survives a reload.
+- Empty state: a line icon instead of the diamond glyph. Thinking indicator,
+  streaming caret, approval cards, queued / stopped / recovered chips and
+  error cards are unchanged apart from sentence-case chips.
+- Checked in headless Chrome on the response gallery and a replayed
+  transcript (light and ImuTechz Console dark, 1280 px and 390 px, no
+  horizontal page scroll).
+
 ## 2026-11-09: Access level beside the composer, /permission, type-to-focus
 
 - `access.js`: an "Access" pill next to Plan / Build and a `/permission` (or
