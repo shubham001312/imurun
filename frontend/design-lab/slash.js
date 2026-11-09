@@ -4,7 +4,8 @@
  *   IMURUN.slash.refresh()     reload GET /api/skills
  *
  * Typing "/" at the start of the message or after a space lists the stored
- * skills (GET /api/skills) and the `/rename` command. Arrow keys move, Enter
+ * skills (GET /api/skills) and the `/rename`, `/model` and `/connect` commands (sent,
+ * they are run by IMURUN.shell.handleCommand, not the server). Arrow keys move, Enter
  * or Tab inserts "/<id> ", Esc closes. The server injects a skill when the
  * prompt contains `/<id>` (docs/agentic/README.md section 5), so inserting
  * the token is all the UI has to do. Skills the message already names are
@@ -20,7 +21,11 @@
   var util = IM.util;
   var STALE_MS = 30000;
   var LIMIT = 8;
-  var COMMANDS = [{ id: 'rename', name: 'Rename this session', description: 'Opens the rename dialog.', command: true }];
+  var COMMANDS = [
+    { id: 'rename', name: 'Rename this session', description: 'Opens the rename dialog.', command: true },
+    { id: 'model', name: 'Choose a model', description: 'Opens the model picker. /model <name> switches straight to that model.', command: true },
+    { id: 'connect', name: 'Connect a hosted provider', description: 'Add an API key for NVIDIA, OpenRouter, DeepSeek and more. /connect nvidia opens that one.', command: true }
+  ];
 
   var skills = [];
   var loadedAt = 0;

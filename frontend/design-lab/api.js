@@ -927,9 +927,44 @@
 
   /* ----------------------------------------------------------- Model files */
 
+  /* The local catalogue. The same reply also carries `hosted` (every
+   * connected provider's enabled models) and `selected`; they are kept in
+   * lastModels and announced on the bus as 'models.hosted' for the model
+   * picker (hosted-models.js), so models.js keeps its plain list. */
+  let lastModels = null;
   async function listModels() {
     const data = await fetchAPI('/api/models');
+    lastModels = data && typeof data === 'object' ? data : null;
+    const bus = window.IMURUN && window.IMURUN.bus;
+    if (bus && lastModels) bus.emit('models.hosted', lastModels.hosted || []);
     return (data && data.models) || [];
+  }
+
+  /* ------------------------------------------------- Hosted model providers */
+
+  function providerPath(id, rest) {
+    return `/api/remote/${encodeURIComponent(id)}${rest || ''}`;
+  }
+
+  async function listProviders() {
+    return fetchAPI('/api/remote');
+  }
+
+  async function providerModels(id, refresh) {
+    return fetchAPI(providerPath(id, '/models') + (refresh ? '?refresh=1' : ''));
+  }
+
+  /* body: {key} — the custom provider also takes {base_url, name, no_key}. */
+  async function saveProviderKey(id, body) {
+    return fetchAPI(providerPath(id, '/key'), { method: 'POST', body: JSON.stringify(body || {}) });
+  }
+
+  async function saveProviderModels(id, enabled) {
+    return fetchAPI(providerPath(id, '/models'), { method: 'POST', body: JSON.stringify({ enabled: enabled }) });
+  }
+
+  async function removeProvider(id) {
+    return fetchAPI(providerPath(id, '/key'), { method: 'DELETE' });
   }
 
   async function deleteModel(id) {
@@ -1108,6 +1143,12 @@
     setAgent,
     shareLocation,
     listModels,
+    get lastModels() { return lastModels; },
+    listProviders,
+    providerModels,
+    saveProviderKey,
+    saveProviderModels,
+    removeProvider,
     deleteModel,
     selectModel,
     downloadModel,

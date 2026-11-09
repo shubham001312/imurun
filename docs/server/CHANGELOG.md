@@ -2,6 +2,47 @@
 
 The API contract itself is documented in `services/server/doc/README.md`.
 
+## 2026-11-09 — hosted model providers and the model picker
+
+- **Providers** (`services/remote/providers.py`): NVIDIA, OpenRouter, DeepSeek, OpenAI, Groq,
+  Together, Mistral and "Custom (OpenAI-compatible)", each with a fixed base URL and host
+  allow-list, key format hint, key page and suggested models. One stdlib client serves them all
+  (`model/remote_client.py`, `OpenAICompatClient`); `NvidiaClient` is now its NVIDIA preset.
+  Provider differences handled: OpenRouter's attribution headers and paginated list, OpenAI's
+  `max_completion_tokens` and fixed sampling on reasoning models, Mistral without
+  `stream_options`, Together's bare-array list, NVIDIA's public list (verified with a one-token
+  call), servers without `/models`, `reasoning`/`reasoning_content` deltas, mid-stream `error`
+  events. Errors are per provider with a `kind` (bad key, out of credits, rate limit, model gone,
+  unreachable).
+- **Routes** (`services/remote/hosted.py`): `GET /api/remote`, `GET/POST /api/remote/<p>`,
+  `/api/remote/<p>/models`, `/api/remote/<p>/key`, `DELETE /api/remote/<p>/key`. Ids are
+  `<provider>:<model>` through `POST /api/models/select`; `GET /api/models` gains `hosted`. The
+  choice is restored on restart.
+- **Bug fixed: the NVIDIA routes were never reachable.** `services/remote/nvidia.py` defined
+  `handle_get` / `handle_post` / `handle_delete` / `select` / `model_entries`, but `api.py` never
+  dispatched to them, so `/api/remote/nvidia*` answered 404 and `nvidia:<id>` in
+  `/api/models/select` answered "that model is not downloaded". They are wired now; the
+  `nvidia:` ids, the `model.nvidia` secret and the version-1 `remote_models.json` keep working.
+- **G5 hardened**: urllib follows redirects and resends `Authorization` to the new host; hosted
+  calls now never follow a redirect, re-check every URL (pagination links too) against the
+  provider's host and port, and bypass proxies on loopback. A custom key is bound to the origin
+  (scheme, host, port) it was saved for (`key_origin` in the preference file); on an address
+  change the old key and origin are dropped before the new address is written, so a failed save
+  never pairs an old key with a new host. Provider error text is scrubbed of the key and of
+  key-shaped strings (OpenAI echoes part of a wrong key). Found by a security pass: a key pasted
+  with a line break made `http.client` raise a `ValueError` quoting the whole `Authorization`
+  header, which reached the last-resort `logger.exception`; keys with whitespace or non-printable
+  characters are now refused up front, and the client converts that error to a clean one.
+  Response reads are capped (16 MB model list, 64 KB error body).
+- **UI** (`frontend/design-lab/hosted-models.js`, `styles/hosted-models.css`): a model picker
+  (`/model`, `/model <name>`, Ctrl/Cmd+M, the composer's model button); `/connect` and
+  `/connect <provider>` open the connect dialog, which leads to Choose models and then the picker
+  narrowed to that provider; Settings > Models opens with a "Hosted providers" intro row
+  (Connect a provider) and ends with the full Hosted providers card (Connect / Change key,
+  Choose models, Remove).
+- Tests: `tests/test_remote_providers.py` (26, against a fake provider on 127.0.0.1,
+  `tests/remote_fakes.py`). No real provider was called.
+
 ## 2026-11-09 — `/v1` request bodies hardened like `/api/*`
 
 - `services/server/openai_api.py` `_read_body`: a negative Content-Length is now a 400. A read

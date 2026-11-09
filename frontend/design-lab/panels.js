@@ -255,6 +255,8 @@
     var list = [
       { kind: 'Action', label: 'New chat', hint: 'Alt+N', run: function () { IM.shell.newChat(); } },
       { kind: 'Action', label: 'Show performance and model', hint: MOD + '+.', run: function () { toggleStats(true); } },
+      { kind: 'Action', label: 'Choose a model', hint: MOD + '+M', run: function () { if (IM.modelPicker) IM.modelPicker.open(''); } },
+      { kind: 'Action', label: 'Connect a hosted model provider', hint: 'NVIDIA, OpenRouter, DeepSeek…', run: function () { if (IM.modelPicker) IM.modelPicker.connect(''); } },
       { kind: 'Action', label: 'Keyboard shortcuts', hint: '?', run: openShortcuts },
       { kind: 'Action', label: 'Rename current session', hint: 'F2', run: function () { IM.shell.renameActive(); } },
       { kind: 'Action', label: 'Response gallery', hint: 'preview every reply style', run: openGallery },
@@ -412,6 +414,7 @@
     ['Alt N', 'New chat'],
     [MOD + ' B', 'Show or hide the sidebar'],
     [MOD + ' .', 'Performance and model panel'],
+    [MOD + ' M', 'Choose a model (or type /model)'],
     ['Alt 1 – 7', 'Home, Chat, Sessions, Connect, Skills, Persona, Settings'],
     ['F2', 'Rename the focused session in the sidebar'],
     ['Delete', 'Delete the focused session in the sidebar'],
@@ -508,7 +511,7 @@
   var PAGES = ['home', 'chat', 'sessions', 'connect', 'skills', 'persona', 'settings'];
 
   function anyDialogOpen() {
-    return ['palette', 'shortcuts', 'rename'].some(function (id) {
+    return ['palette', 'shortcuts', 'rename', 'model-picker', 'provider-connect', 'provider-models'].some(function (id) {
       var node = byId(id);
       return node && !node.hidden;
     });

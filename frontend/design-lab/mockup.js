@@ -329,7 +329,7 @@
     '          </section>',
     '          <section class="settings-section" data-settings-panel="models" hidden>',
     '            <div class="settings-section-head">',
-    '              <div><div class="settings-label">Models</div><h2 class="settings-section-title">Model management</h2><p>Download and manage GGUF models for the FISH engine. Models are stored locally in the models directory.</p></div>',
+    '              <div><div class="settings-label">Models</div><h2 class="settings-section-title">Model management</h2><p>Download GGUF models that run on this computer with the FISH engine, or connect a hosted provider to use its models over the internet.</p></div>',
     '              <button class="btn primary" type="button" id="download-first-model" >Download a model</button>',
     '            </div>',
     '            <div class="panel settings-card" id="models-empty-state" hidden>',
