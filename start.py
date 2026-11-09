@@ -11,6 +11,17 @@ Single entry point to start the server (Windows / macOS / Linux).
     python start.py --get-engine    # download the prebuilt FISH engine for this OS
     python start.py --skip-setup    # do not run the automatic install step
 
+Restart after an update (services/update, POST /api/update {action: "apply"}):
+the update service sets services.update.RESTART; the wait loop below stops
+the server (which closes the model) and then
+  * exits with code 75 (EXIT_RESTART) when a launcher supervises this process
+    (IMURUN_SUPERVISED=1: the `imurun` shim written by install.py and the npm
+    launcher run the command again on 75, with IMURUN_AFTER_UPDATE=1), or
+  * starts a fresh interpreter with the same arguments plus
+    --restart-after-update itself, waits for it and passes its exit code on.
+After an update the browser is not opened again (the open tab reloads itself);
+a native window is closed and reopened.
+
 Every start runs install.quick_check() (a few ms: state file, find_spec,
 stat; no engine load). When something is missing (first run, new version,
 missing package, changed engine) it runs `install.py --here --auto` with the
@@ -45,6 +56,9 @@ import install  # noqa: E402 - stdlib-only helpers that live next to this file
 DEFAULT_PORT = 8732
 PROJECT_PACKAGES = ("services", "model")
 REEXEC_ENV = "IMURUN_REEXEC"
+EXIT_RESTART = 75                      # == services.update.EXIT_RESTART
+SUPERVISED_ENV = "IMURUN_SUPERVISED"   # a launcher restarts us on EXIT_RESTART
+AFTER_UPDATE_ENV = "IMURUN_AFTER_UPDATE"
 
 
 # --------------------------------------------------------------------------- #
@@ -231,13 +245,20 @@ def has_webview():
         return False
 
 
+def after_update(args):
+    return bool(getattr(args, "restart_after_update", False)) or os.getenv(AFTER_UPDATE_ENV) == "1"
+
+
 def resolve_open_mode(args):
     if args.no_open or os.getenv("IMURUN_NO_BROWSER", "0") == "1":
         return "none"
     if args.browser:
-        return "browser"
+        # After an update the open tab polls /health and reloads itself.
+        return "none" if after_update(args) else "browser"
     if has_webview():
         return "window"
+    if after_update(args):
+        return "none"
     if args.window:
         print(
             "Native window support is not installed; opening the browser instead.\n"
@@ -265,7 +286,7 @@ WINDOW_SCRIPT = Path(__file__).resolve().parent / "window.py"
 WINDOW_STARTUP_GRACE = 6.0
 
 
-def run_window(url):
+def run_window(url, stop=None):
     """Show the UI in a native window; return when the user closes it.
 
     The window runs in a separate process (`window.py`): nothing that goes
@@ -307,7 +328,16 @@ def run_window(url):
     print("Close the IMURUN window (or press Ctrl+C) to stop.\n", flush=True)
     started = time.monotonic()
     try:
-        _, err = proc.communicate()
+        while True:
+            try:
+                _, err = proc.communicate(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if stop is not None and stop.is_set():
+                    # An update was applied: close this window; the restarted
+                    # process opens a new one.
+                    _close_window()
+                    return True
     except KeyboardInterrupt:
         _close_window()
         return True
@@ -333,14 +363,71 @@ def run_window(url):
     return False
 
 
-def wait_forever():
+def wait_forever(stop=None):
+    while stop is None or not stop.is_set():
+        time.sleep(0.5)
+
+
+def _restart_event():
+    """services.update.RESTART, or an Event that never fires if it is unavailable."""
+    try:
+        from services.update import RESTART
+
+        return RESTART
+    except Exception:  # noqa: BLE001
+        return threading.Event()
+
+
+def _cleanup_old_engines():
+    """Remove `fish.dll.old-<pid>` copies left by an update (services/update)."""
+    try:
+        from services.update import remove_stale_engine_copies
+
+        remove_stale_engine_copies([Path(ROOT) / "bin", install.user_engine_dir()])
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def restart_command(argv=None):
+    rest = [a for a in (sys.argv[1:] if argv is None else argv) if a != "--restart-after-update"]
+    if install.INSTALLED:
+        return [sys.executable, "-m", "imurun", *rest, "--restart-after-update"]
+    return [sys.executable, os.path.abspath(__file__), *rest, "--restart-after-update"]
+
+
+def restart_after_update(argv=None):
+    """Start the updated version (see the module docstring for the mechanism)."""
+    ui = install.ui
+    if os.environ.get(SUPERVISED_ENV) == "1":
+        ui.info("Update applied; the launcher starts the new version.")
+        sys.exit(EXIT_RESTART)
+    ui.info("Update applied; starting the new version...")
+    env = dict(os.environ)
+    env.pop(REEXEC_ENV, None)
+    try:
+        proc = subprocess.Popen(restart_command(argv), env=env)
+    except OSError as exc:
+        ui.fail(f"Could not restart ({exc}); start IMURUN again.")
+        sys.exit(1)
     while True:
-        time.sleep(1)
+        try:
+            sys.exit(proc.wait())
+        except KeyboardInterrupt:
+            continue
 
 
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def _version_text():
+    try:
+        from imurun.cli import version_line
+
+        return version_line()
+    except Exception:  # noqa: BLE001
+        return f"imurun {install.app_version()}"
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="IMURUN - Local AI Chat with FISH Engine",
@@ -362,9 +449,10 @@ def parse_args(argv=None):
                        help="pip install missing requirements into the current Python")
     parser.add_argument("--skip-setup", action="store_true",
                         help="do not run the automatic install step (also: IMURUN_SKIP_SETUP=1)")
+    parser.add_argument("--restart-after-update", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--get-engine", action="store_true",
                         help="download the prebuilt FISH engine for this OS into ~/.imurun/bin and exit")
-    parser.add_argument("--version", action="version", version=f"imurun {install.app_version()}")
+    parser.add_argument("--version", action="version", version=_version_text())
     return parser.parse_args(argv)
 
 
@@ -384,6 +472,12 @@ def get_engine():
 
 
 def main(argv=None):
+    raw = sys.argv[1:] if argv is None else list(argv)
+    if raw and raw[0] in ("doctor", "install", "update"):
+        # The `imurun` shim of a checkout runs start.py; subcommands live in imurun/cli.py.
+        from imurun.cli import main as cli_main
+
+        sys.exit(cli_main(raw))
     args = parse_args(argv)
     install.use_system_certificates()  # OS trust store for every HTTPS call (unknown-CA failures)
     # IMURUN_STARTUP_TRACE=<seconds>: dump every thread's stack to stderr if
@@ -406,6 +500,7 @@ def main(argv=None):
 
     ensure_dependencies(args)
     ensure_installed(args)
+    _cleanup_old_engines()
 
     # Set model path via env if provided
     if args.model:
@@ -479,15 +574,18 @@ def main(argv=None):
         ui.ok(f"Server running at {ui.c(url, 'cyan', 'bold')}")
         ui.hint(f"Runtime config: {runtime_path}")
 
+        restart = _restart_event()
         mode = resolve_open_mode(args)
-        if mode == "window" and run_window(url):
+        shown = mode == "window" and run_window(url, restart)
+        if shown and not restart.is_set():
             ui.info("Window closed.")
             return
-        if mode in ("window", "browser"):
-            open_browser_later(url)
-        ui.line(ui.c("  Press Ctrl+C to stop", "grey"))
-        ui.line()
-        wait_forever()
+        if not restart.is_set():
+            if mode in ("window", "browser"):
+                open_browser_later(url)
+            ui.line(ui.c("  Press Ctrl+C to stop", "grey"))
+            ui.line()
+            wait_forever(restart)
     except KeyboardInterrupt:
         ui.line()
         ui.info("Shutting down...")
@@ -495,6 +593,8 @@ def main(argv=None):
         server.stop()
         clear_runtime(cfg.data_root)
         ui.ok("Stopped.")
+    if _restart_event().is_set():
+        restart_after_update(argv)
 
 
 def _stop_on_signals():

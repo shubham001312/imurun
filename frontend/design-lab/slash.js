@@ -4,7 +4,7 @@
  *   IMURUN.slash.refresh()     reload GET /api/skills
  *
  * Typing "/" at the start of the message or after a space lists the stored
- * skills (GET /api/skills) and the `/rename`, `/model` and `/connect` commands (sent,
+ * skills (GET /api/skills) and the `/rename`, `/model`, `/connect` and `/update` commands (sent,
  * they are run by IMURUN.shell.handleCommand, not the server). Arrow keys move, Enter
  * or Tab inserts "/<id> ", Esc closes. The server injects a skill when the
  * prompt contains `/<id>` (docs/agentic/README.md section 5), so inserting
@@ -25,7 +25,8 @@
     { id: 'rename', name: 'Rename this session', description: 'Opens the rename dialog.', command: true },
     { id: 'model', name: 'Choose a model', description: 'Opens the model picker. /model <name> switches straight to that model.', command: true },
     { id: 'permission', name: 'Access level', description: 'Manual, Ask for changes or Auto: how much IMURUN may do without asking.', command: true },
-    { id: 'connect', name: 'Connect a hosted provider', description: 'Add an API key for NVIDIA, OpenRouter, DeepSeek and more. /connect nvidia opens that one.', command: true }
+    { id: 'connect', name: 'Connect a hosted provider', description: 'Add an API key for NVIDIA, OpenRouter, DeepSeek and more. /connect nvidia opens that one.', command: true },
+    { id: 'update', name: 'Check for updates', description: 'Checks PyPI and GitHub now and offers to install a newer IMURUN.', command: true }
   ];
 
   var skills = [];

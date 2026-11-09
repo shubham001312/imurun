@@ -31,8 +31,9 @@ pip install -U imurun              # upgrade (also from the old 0.1.x CLI, see b
 ```
 
 > **Status 2026-11-09:** this app is published on PyPI and npm (0.3.0, 0.3.2, 0.3.3).
-> 0.3.x has no in-app updater yet; upgrade with `pip install -U imurun` (or
-> `pipx upgrade imurun`, `npm i -g imurun@latest`). The old 0.1.x CLI's own
+> 0.3.0 and 0.3.2 have no updater: upgrade them once with `pip install -U imurun` (or
+> `pipx upgrade imurun`, `npm i -g imurun@latest`). From 0.3.3 on the app checks for new
+> releases itself ("Updates" below; `imurun update`). The old 0.1.x CLI's own
 > `imurun update` also reaches 0.3.x through npm.
 
 | Command | What it does |
@@ -43,6 +44,7 @@ pip install -U imurun              # upgrade (also from the old 0.1.x CLI, see b
 | `imurun doctor [--port N]` | Python, core packages, frontend, engine (loads it and prints the ABI), Vulkan loader + GPU driver, home dir, models dir, install state, port free |
 | `imurun install [--force] [--no-voice] [--tuning] [--no-build]` | runs the installer into this interpreter (= `python install.py --here ...`) |
 | `imurun --get-engine` | downloads the prebuilt engine for this OS from the matching GitHub release |
+| `imurun update [--check] [--yes]` | checks PyPI/GitHub and installs a newer version the way this copy was installed (see "Updates") |
 | `python -m imurun ...` | the same, when the `Scripts`/`bin` folder is not on PATH |
 
 `imurun` takes the same flags as `start.py` (table below) plus `--version` and
@@ -86,9 +88,14 @@ package directory.
    `apt install python3 python3-venv`) and exits;
 2. creates `~/.imurun/venv`, or recreates it if it is broken;
 3. installs `imurun==<npm package version>` there (with `[window]` on Windows/macOS,
-   retrying without it if that fails), and only when the installed version differs.
+   retrying without it if that fails), only when nothing is installed or the installed
+   version is **older** (from 0.3.3; 0.3.0-0.3.2 reinstalled on any difference, so they
+   undid an update made inside the venv). A newer one put there by `imurun update` / the
+   in-app update is kept. With `IMURUN_WHEEL` the wheel's version must match exactly.
    Later starts take about a second;
-4. runs `python -m imurun <args>` and passes on its exit code.
+4. runs `python -P -m imurun <args>` with `IMURUN_LAUNCHER=npm`, `IMURUN_VENV=<venv>` and
+   `IMURUN_SUPERVISED=1`, and passes on its exit code; exit code 75 (an update was
+   applied) runs it again (see "Updates").
 
 Environment variables: `IMURUN_PYTHON` (interpreter to use), `IMURUN_VENV` (venv
 location), `IMURUN_WHEEL` (install a local wheel instead of PyPI, used for testing),
@@ -96,6 +103,53 @@ location), `IMURUN_WHEEL` (install a local wheel instead of PyPI, used for testi
 shows the venv and the Python it would use.
 
 Building the packages yourself and cutting a release: `docs/setup/RELEASE.md`.
+
+## Updates
+
+From **0.3.3** IMURUN checks for a new version and offers it; nothing is installed
+until you choose to. 0.3.0 and 0.3.2 have no updater, so getting to 0.3.3 is a
+one-time manual step (below).
+
+- **When it checks:** once per launch, in a background thread after the server is up
+  (never on the start-up path), against PyPI and the GitHub "latest release", 3 s
+  timeout each. The result is cached 6 h in `~/.imurun/update-state.json`. Offline,
+  the check just fails quietly. `IMURUN_UPDATE_CHECK=0` turns the automatic check off;
+  it is also off under `CI` and pytest. Pre-releases are offered only if you run one.
+- **The pop-up:** **Update now** or **Not now**. "Not now" comes back after 3 more
+  launches, or at once when an even newer version is published. Closing it (Esc)
+  hides it for this launch only. Settings > Profile > "About and updates" and the
+  `/update` command check on demand.
+- **From a terminal:** `imurun update` (check, show the command, ask y/N),
+  `imurun update --check` (only check), `imurun update --yes` (no question).
+  `imurun --version` adds "update available: X" from the cache (no network).
+- **What runs** depends on how IMURUN was installed:
+
+  | Installed with | Update runs |
+  |---|---|
+  | `pip install imurun` | `python -m pip install --upgrade imurun==<new>` (same interpreter) |
+  | `pipx install imurun` | `pipx upgrade imurun` |
+  | `uv tool install imurun` | `uv tool upgrade imurun` |
+  | `npx imurun` / `npm i -g imurun` | pip into `~/.imurun/venv` (`imurun==<new>`); the npm launcher package itself is not changed |
+  | source checkout | `git pull --ff-only`, then `python install.py --auto`; refused while `git status` shows local changes |
+
+- **Restart:** after a successful update the server stops (closing the model) and the
+  new version starts on the same port; the open page reloads itself, a native window
+  is closed and reopened. The `imurun` command written by setup and the npm launcher
+  restart the app themselves (exit code 75); `python start.py`, `run.bat` and pip's own
+  `imurun` start a fresh process. On Windows the loaded `fish.dll` is first renamed to
+  `fish.dll.old-<pid>` (a loaded DLL cannot be overwritten, but it can be renamed) and
+  the next start deletes it. If the update fails, the old version keeps running and the
+  pop-up shows pip's or git's last lines.
+
+**Getting to 0.3.3 the first time** (one manual step; after that the app offers updates):
+
+| You have | Run |
+|---|---|
+| 0.3.0 / 0.3.2 via pip | `python -m pip install --upgrade imurun` (the same Python you installed it with; `pip install -U imurun` if `pip` is that one) |
+| 0.3.0 / 0.3.2 via pipx | `pipx upgrade imurun` |
+| 0.3.0 / 0.3.2 via npm | `npm i -g imurun@latest` (global), or `npx imurun@latest` once. The new launcher installs 0.3.3 into `~/.imurun/venv`. Updating only the venv does not stick with a 0.3.0-0.3.2 launcher: it reinstalls its own version on the next start |
+| a source checkout | `git pull`, then `run.bat` / `./run.sh` (or `python install.py`) |
+| the old 0.1.x CLI (Bun/TypeScript) | npm-installed: its own `imurun update` runs `npm install -g imurun@latest`, which brings the 0.3.x launcher (needs Python 3.11+). pip-installed: its `imurun update` runs `pip install --upgrade imurun`, which only reaches 0.3.x on Python 3.11+ (otherwise pip silently stays on 0.1.11, see Troubleshooting). From `npx`: it tells you to run `npx imurun@latest`. A 0.1.x source checkout: its `git pull --ff-only` brings this app, then use `run.bat` / `./run.sh`. The standalone `imurun-<os>-<arch>` binary cannot update itself to 0.3.x (0.3.x releases have no such asset, the download 404s): install with pip or npm instead |
 
 ## What gets installed, and when (automatic setup)
 

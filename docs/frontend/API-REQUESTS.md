@@ -506,3 +506,10 @@ needs these to use it:
     available and used: `engine.model.context` (n_ctx in use) and
     `engine.model.context_train` (GGUF context length), both only while the
     model is loaded; `last_generation.context_used` / `context_size`.
+
+## Update progress detail (P3)
+
+`GET /api/update` and the `update` event have no download/install phase. While
+`state: "updating"` the pop-up can only say "Downloading and installing...".
+Request: optional `phase: "downloading" | "installing"` (and `progress` 0-1)
+in UpdateView. The UI already reads `phase` when present.

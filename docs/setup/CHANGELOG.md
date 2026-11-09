@@ -10,8 +10,42 @@
 - **Windows:** a Smart App Control / WDAC block on `fish.dll` (WinError 4551) is explained
   instead of shown raw.
 - Docs: README and setup README no longer say the app is unreleased or "not a GPU engine".
-- Not in this release: an in-app updater (upgrade with `pip install -U imurun`), NEON
-  kernels for Apple Silicon, the keyless browser web-search helper.
+- **In-app updates** (below). 0.3.0 / 0.3.2 users upgrade by hand once
+  (`pip install -U imurun`, `pipx upgrade imurun`, `npm i -g imurun@latest`); from 0.3.3 on
+  the app offers each new release itself.
+- Not in this release: NEON kernels for Apple Silicon, the keyless browser web-search helper.
+
+### In-app updates (0.3.3)
+
+0.3.0 and 0.3.2 shipped without an update system: the one written on 2026-11-03 was
+never merged. It is now ported onto the current code (`docs/setup/README.md` "Updates",
+contract in `services/server/doc/README.md` "Update contract"):
+
+- `services/update/`: per-launch background check of PyPI + GitHub latest release (3 s
+  timeout each, 6 h cache in `~/.imurun/update-state.json`, newer one wins, numeric
+  compare so 0.3.10 > 0.3.9), the "Not now = ask again after 3 launches" policy, and
+  apply per install: pip, pipx, uv tool, the npm launcher's venv, source checkout. Off
+  with `IMURUN_UPDATE_CHECK=0`, and always off under `CI` / pytest. `GET/POST
+  /api/update` and an `update` SSE event; `imurun update [--check] [--yes]`;
+  `imurun --version` adds "update available: X" from the cache.
+- `start.py`: after an applied update the server stops and either exits 75 for a
+  supervising launcher (`IMURUN_SUPERVISED=1`) or starts a fresh interpreter itself.
+  Stale `fish.dll.old-<pid>` copies (the Windows locked-DLL swap) are removed on start.
+- `install.py`: the existing `imurun` launcher (`~/.imurun/cmd/imurun.cmd`,
+  `~/.local/bin/imurun`) now loops on exit code 75 instead of `exec`-ing / exiting.
+- `npm/imurun.js`: keeps an installed version that is newer than the launcher
+  (it used to reinstall its own version on any difference, which would have undone
+  every update), passes `IMURUN_LAUNCHER=npm`, `IMURUN_VENV` and `IMURUN_SUPERVISED=1`,
+  and restarts the app on exit code 75.
+- Changed against the 2026-11-03 version while porting: pip/npm updates pin
+  `imurun==<latest>` (a bare `-U` "succeeds" with no change when GitHub has the release
+  before PyPI does); pre-releases are offered only to pre-release users; `uv tool`
+  installs are recognised; its separate PATH shim (`%LOCALAPPDATA%\Programs\imurun\bin`,
+  its own registry writer) was dropped in favour of the launcher `main` already has;
+  its general slash commands were not ported (frontend CHANGELOG).
+- Not verified yet: a real end-to-end update from one published version to the next
+  (needs 0.3.3 and a later release on PyPI). Tested with mocked PyPI/GitHub, the
+  launcher loop under `cmd.exe`, and a headless server answering `GET /api/update`.
 
 ## 2026-11-09 — packaging no longer ships stale files
 
