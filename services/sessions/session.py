@@ -58,7 +58,7 @@ def derive_name(first_command: str) -> str:
     text = re.sub(r"```.*?(?:```|$)", "\n", text, flags=re.DOTALL)  # fenced code
     line = next((ln for ln in text.splitlines() if re.search(r"\w", ln)), "")
     line = re.sub(r"https?://([^/\s?#]+)\S*", r"\1", line)           # URL -> host
-    line = re.sub(r"[`*_~#>|\[\]]+", " ", line)                        # markdown marks
+    line = re.sub(r"~~|[`*_#>|\[\]]+", " ", line)                      # markdown marks (~ alone is a path)
     line = re.sub(r"\s+", " ", line).strip(" -:;,")
     line = _FILLER.sub("", line).strip()
     line = line.rstrip(" ?!.:;,")

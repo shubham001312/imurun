@@ -42,3 +42,8 @@ def test_blank_or_symbol_only_input_falls_back():
 
 def test_control_characters_never_survive():
     assert "\x00" not in derive_name("hello\x00world") and derive_name("hello\x00world") == "Hello world"
+
+
+def test_shell_paths_keep_their_tilde():
+    assert derive_name("!ls ~/Desktop") == "!ls ~/Desktop"
+    assert derive_name("~~old~~ new plan") == "Old new plan"
