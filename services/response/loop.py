@@ -80,10 +80,24 @@ LIVE_NUDGE = False  # see _needs_live_nudge
 MAX_RETRIES = 3
 ACTION_TOOLS = frozenset({"shell", "file_read", "file_list", "file_write", "make_dir"})
 _REFUSAL = re.compile(
-    r"\b(?:i|we)\s+(?:can(?:not|'t|’t| not)|am\s+(?:not\s+able|unable)\s+to|"
-    r"(?:do\s+not|don't|don’t)\s+have\s+(?:the\s+)?(?:ability|access|permission)s?|have\s+no\s+(?:way|access))"
-    r"[^.!?\n]{0,80}?\b(?:run|execute|access|reach|open|read|list|see|use|interact)\w*"
-    r"[^.!?\n]{0,60}?\b(?:commands?|shell|terminal|computer|system|machine|files?|folders?|director(?:y|ies)|desktop|tools?)\b",
+    r"(?:\b(?:i|we)\s+(?:can(?:not|'t|’t| not)|am\s+(?:not\s+able|unable)\s+to|"
+    r"(?:do\s+not|don't|don’t)\s+have(?:\s+\w+){0,3}?\s+(?:ability|access|permission)s?|"
+    r"have\s+no(?:\s+\w+){0,2}?\s+(?:way|access))"
+    r"|\bas\s+an?\s+(?:ai|virtual\s+assistant|language\s+model|text-based)\b)"
+    r"[^.!?\n]{0,90}?\b(?:run|execute|access|reach|open|read|list|see|use|interact|create|write|make)\w*"
+    r"[^.!?\n]{0,70}?\b(?:commands?|shell|terminal|computer|system|machine|files?|folders?|"
+    r"director(?:y|ies)|desktop|tools?|device)\b",
+    re.IGNORECASE,
+)
+# "Do it" requests: an action on files/folders/projects of this computer. When
+# the model answers one of these with instructions instead of a tool call, it
+# is sent back to act (shares the refusal budget).
+_ACTION_REQUEST = re.compile(
+    r"\b(?:create|make|build|write|save|generate|set\s*up|scaffold|delete|remove|move|rename|copy|"
+    r"list|show|open|run|install|edit|update|fix)\b[^.?!\n]{0,80}?\b(?:files?|folders?|"
+    r"director(?:y|ies)|websites?|site|project|app|desktop|documents|downloads|repo|script|page|"
+    r"html|css|readme)\b|\b(?:what'?s|what\s+is|what\s+are)\s+(?:on|in)\s+(?:my|the)\s+"
+    r"(?:desktop|documents|downloads|folder|directory)\b",
     re.IGNORECASE,
 )
 _NOT_RETRYABLE = ("Permission denied for", "The turn was stopped", "There is no tool called")
@@ -400,20 +414,29 @@ class AgentLoop:
                                  "_kind": "note"})
                 continue
 
+            refused = bool(_REFUSAL.search(answer_text or ""))
+            explained = (not refused and state.tool_steps == 0
+                         and bool(_ACTION_REQUEST.search(question or "")))
             if (not last and state.refusals < MAX_RETRIES and not state.tool_ok
-                    and self._offers_action_tools() and _REFUSAL.search(answer_text or "")):
+                    and self._offers_action_tools() and (refused or explained)):
                 state.refusals += 1
+                tools = ", ".join(sorted(t.name for t in self._offered if t.name in ACTION_TOOLS))
                 steps.append(Step(index - 1, raw, kind="retry"))
                 messages.append({"role": "assistant", "content": answer_text, "_kind": "draft"})
-                messages.append({"role": "user", "_kind": "note", "content": (
-                    "[note] You do have tools that act on this computer: "
-                    + ", ".join(sorted(t.name for t in self._offered if t.name in ACTION_TOOLS))
-                    + ". Do not say you cannot. Call the right tool now with one tool block; the user "
-                    "approves anything risky. If the request is genuinely impossible, say exactly why."
-                )})
-                self._mark("G3-loop", self._session_id,
-                           f"refused although tools were offered; retry {state.refusals} of {MAX_RETRIES}")
-                self._issue("refusal", attempt=state.refusals, detail=answer_text[:300])
+                if refused:
+                    note = ("[note] You do have tools that act on this computer: " + tools + ". Do not say "
+                            "you cannot. Call the right tool now with one tool block; the user approves "
+                            "anything risky. If the request is genuinely impossible, say exactly why.")
+                else:
+                    note = ("[note] The user asked you to do this on their computer, not to explain how. "
+                            "Do it now with the tools (" + tools + "): make_dir and file_write create real "
+                            "folders and files (paths like ~/Desktop/demo/index.html work), shell runs "
+                            "commands, file_list shows what is in a folder. Call one tool now; after the "
+                            "work is done, answer briefly with what you did.")
+                messages.append({"role": "user", "_kind": "note", "content": note})
+                kind = "refusal" if refused else "explained-instead-of-acting"
+                self._mark("G3-loop", self._session_id, f"{kind}; retry {state.refusals} of {MAX_RETRIES}")
+                self._issue(kind, attempt=state.refusals, detail=answer_text[:300])
                 continue
 
             if not last and self._needs_live_nudge(question, answer_text, state):

@@ -45,10 +45,29 @@ class Workspace:
     """Resolve and check paths against the current workspace root."""
 
     root_getter: Callable[[], Path | str]
+    # Folders the user approved besides the root (Settings > Permissions,
+    # ``extraRoots``; Desktop and Documents by default). Same rules inside
+    # them: protected and system paths are still refused.
+    extra_getter: Callable[[], list] | None = None
 
     @classmethod
     def fixed(cls, root: Path | str) -> "Workspace":
         return cls(lambda: root)
+
+    @property
+    def extra_roots(self) -> list[Path]:
+        if self.extra_getter is None:
+            return []
+        try:
+            raw = list(self.extra_getter() or [])
+        except Exception:  # noqa: BLE001 - a broken setting means no extras
+            return []
+        out: list[Path] = []
+        for item in raw:
+            path = Path(os.path.realpath(os.path.expanduser(str(item))))
+            if not is_filesystem_root(path) and path not in out:
+                out.append(path)
+        return out
 
     @property
     def root(self) -> Path:
@@ -81,16 +100,19 @@ class Workspace:
             given = Path(os.path.expanduser(text))
             candidate = given if given.is_absolute() else root / given
         resolved = Path(os.path.realpath(candidate))
-        if not _inside(resolved, root):
+        container = root if _inside(resolved, root) else next(
+            (extra for extra in self.extra_roots if _inside(resolved, extra)), None)
+        if container is None:
+            allowed = ", ".join(str(p) for p in [root, *self.extra_roots])
             raise WorkspaceError(
-                f"{text or '.'} is outside the workspace ({root}). "
-                "Use a path inside the workspace."
+                f"{text or '.'} is outside the folders IMURUN may use ({allowed}). "
+                "Use a path inside one of them, or add the folder in Settings > Permissions."
             )
         decision = check_action(
             {"kind": kind if kind in ("file_read", "file_write", "file_delete") else "file_read",
              "path": str(resolved)},
-            project_root=str(root),
-            user_data_root=str(root),
+            project_root=str(container),
+            user_data_root=str(container),
         )
         if decision.kind == "deny":
             raise WorkspaceError("; ".join(decision.reasons) or "that path is protected")

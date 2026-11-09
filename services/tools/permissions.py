@@ -57,6 +57,8 @@ from ..safety.decisions import DANGEROUS_COMMANDS, Decision
 from .workspace import Workspace, WorkspaceError, default_workspace, is_filesystem_root
 
 MODES = ("ask", "allow-reads", "allow-all")
+# Folders the agent may use besides the workspace, unless the user changes it.
+DEFAULT_EXTRA_ROOTS = ("~/Desktop", "~/Documents")
 DEFAULT_MODE = "allow-reads"
 
 # Setting toggle that switches each category off. Categories not listed here
@@ -146,7 +148,7 @@ class PermissionPolicy:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def __post_init__(self) -> None:
-        self.workspace = Workspace(self._root)
+        self.workspace = Workspace(self._root, self._extra_roots)
 
     # --------------------------------------------------------------- settings
     def values(self) -> dict[str, Any]:
@@ -162,6 +164,7 @@ class PermissionPolicy:
         values = {
             "mode": mode,
             "workspaceRoot": str(raw.get("workspaceRoot") or ""),
+            "extraRoots": _roots_list(raw.get("extraRoots", DEFAULT_EXTRA_ROOTS)),
             "readFiles": bool(raw.get("readFiles", True)),
             "writeFiles": bool(raw.get("writeFiles", True)),
             "runShell": bool(raw.get("runShell", True)),
@@ -178,6 +181,9 @@ class PermissionPolicy:
         root = self.values()["workspaceRoot"]
         return Path(os.path.expanduser(root)) if root else default_workspace()
 
+    def _extra_roots(self) -> list[str]:
+        return list(self.values()["extraRoots"])
+
     def update(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Validate and store a change from ``POST /api/permissions``."""
         if self.settings is None:
@@ -188,6 +194,24 @@ class PermissionPolicy:
             if mode not in MODES:
                 raise ValueError(f"mode must be one of {', '.join(MODES)}")
             changes["mode"] = mode
+        if "extraRoots" in payload:
+            raw = payload["extraRoots"]
+            if not isinstance(raw, list) or len(raw) > 20:
+                raise ValueError("extraRoots must be a list of up to 20 folders")
+            cleaned = []
+            for item in raw:
+                text = str(item or "").strip()
+                if not text:
+                    continue
+                path = Path(os.path.expanduser(text))
+                if not path.is_absolute():
+                    raise ValueError(f"{text} must be an absolute path (or start with ~)")
+                if is_filesystem_root(path):
+                    raise ValueError(f"{text} is a whole drive")
+                if path.exists() and not path.is_dir():
+                    raise ValueError(f"{text} is not a folder")
+                cleaned.append(text)
+            changes["extraRoots"] = cleaned
         if "workspaceRoot" in payload:
             root = str(payload["workspaceRoot"] or "").strip()
             if root:
@@ -360,3 +384,11 @@ def _clamp(value: Any, low: int, high: int, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(low, min(high, number))
+
+
+def _roots_list(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return list(DEFAULT_EXTRA_ROOTS)
+    return [str(item).strip() for item in raw if str(item or "").strip()][:20]

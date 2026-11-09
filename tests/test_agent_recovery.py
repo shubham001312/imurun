@@ -207,3 +207,36 @@ def test_issue_log_rotates(tmp_path, monkeypatch):
     for i in range(10):
         issues.record("tool-failed", error="e" * 50, attempt=i, path=path)
     assert path.with_name("x.log.1").exists() and path.stat().st_size < 600
+
+
+# ------------------------------------------- the user's own transcript
+
+def test_virtual_assistant_refusal_from_the_field_is_caught(tmp_path, log):
+    shell = FakeShell()
+    model = FakeModel([
+        "As a virtual assistant, I don't have direct access to your physical desktop.",
+        call("shell", command="ls ~/Desktop"), "Your Desktop has file-a and file-b."])
+    result = loop(model, make(tmp_path, shell)).run("whats on my desktop")
+    assert shell.commands == ["ls ~/Desktop"] and result.answer.startswith("Your Desktop")
+    assert [e["kind"] for e in log()] == ["refusal"]
+
+
+def test_explaining_instead_of_doing_is_sent_back(tmp_path, log):
+    shell = FakeShell()
+    model = FakeModel([
+        "I can guide you through the process of creating a simple website. Step 1: ...",
+        call("shell", command="mkdir -p ~/Desktop/demo"), "Created ~/Desktop/demo with the site."])
+    result = loop(model, make(tmp_path, shell)).run(
+        "create a website for me (demo) in a folder of desktop in html css")
+    assert shell.commands == ["mkdir -p ~/Desktop/demo"]
+    note = model.seen[1][-1]["content"]
+    assert note.startswith("[note] The user asked you to do this on their computer")
+    assert [e["kind"] for e in log()] == ["explained-instead-of-acting"]
+    assert result.answer.startswith("Created")
+
+
+def test_plain_questions_are_never_pushed_to_use_tools(tmp_path, log):
+    model = FakeModel(["CSS grid lays out items in rows and columns."])
+    result = loop(model, make(tmp_path, FakeShell())).run("explain how css grid works")
+    assert len(model.seen) == 1 and result.answer.startswith("CSS grid")
+    assert log() == []

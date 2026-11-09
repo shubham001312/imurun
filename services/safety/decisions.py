@@ -173,9 +173,18 @@ def _system_path(path: str) -> bool:
     return any(candidate == _norm(prefix) or candidate.startswith(_norm(prefix) + os.sep) for prefix in SYSTEM_PREFIXES)
 
 
+# Credential folders in the user's home: never read or written by a tool,
+# whatever folders the user approves.
+_HOME_SECRET_DIRS = (".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".gcloud",
+                     os.path.join(".config", "gh"), os.path.join(".config", "gcloud"),
+                     os.path.join(".imurun", "secrets"), os.path.join(".local", "share", "keyrings"))
+
+
 def _protected(path: str, project_root: str, extra: tuple[str, ...]) -> bool:
     candidate = _norm(path)
-    roots = (GUARDRAIL_DIR, os.path.join(project_root, ".git")) + tuple(extra)
+    home = os.path.expanduser("~")
+    secret_roots = tuple(os.path.join(home, d) for d in _HOME_SECRET_DIRS)
+    roots = (GUARDRAIL_DIR, os.path.join(project_root, ".git")) + secret_roots + tuple(extra)
     for root in roots:
         base = _norm(root)
         if candidate == base or candidate.startswith(base + os.sep):
