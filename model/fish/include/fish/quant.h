@@ -164,9 +164,11 @@ bool merge_row(GgmlType type, const void* src, const float* base, const float* d
                void* dst, uint64_t n, MergeStats* stats,
                MergeRounding rounding = MergeRounding::Stochastic, uint64_t seed = 0);
 
-// ---- dispatch hook used by the AVX2 build --------------------------------
-// The scalar implementations live in quant.cpp. quant_x86.cpp installs
-// faster function pointers at startup when the CPU supports them.
+// ---- dispatch hooks used by the SIMD builds -------------------------------
+// The scalar implementations live in quant.cpp. quant_x86.cpp (AVX2) and
+// quant_arm.cpp (NEON) install faster function pointers at startup when the
+// build and the CPU support them; `name` then reads "avx2", "neon-dotprod"
+// or "neon" (fish_kernel_name()).
 typedef float (*dot_f32_fn)(const void*, const float*, uint64_t);
 typedef float (*dot_q8_fn)(const void*, const Q8Act*, uint64_t);
 typedef float (*dot_q8k_fn)(const void*, const Q8ActK*, uint64_t);
@@ -185,6 +187,8 @@ const QuantKernels& quant_kernels();
 const QuantKernels& scalar_kernels();   // the reference table, for tests
 void install_avx2_kernels();      // no-op when the CPU or build lacks AVX2
 bool avx2_available();
+void install_neon_kernels();      // no-op off arm64; FISH_NEON_DOTPROD=0 forces plain NEON
+bool neon_dotprod_available();    // arm64 build and the CPU has SDOT (ARMv8.2 DotProd)
 
 #if defined(FISH_HAVE_X86_KERNELS) && FISH_HAVE_X86_KERNELS
 // Implemented in quant_x86.cpp (compiled with per-function AVX2 targets, so
@@ -192,6 +196,18 @@ bool avx2_available();
 void  fish_install_x86(QuantKernels& k,
                        float (**dot_f32)(const float*, const float*, uint64_t));
 bool  fish_x86_avx2();
+#endif
+
+#if defined(FISH_HAVE_ARM_KERNELS) && FISH_HAVE_ARM_KERNELS
+// Implemented in quant_arm.cpp. Fills `k` (and *dot_f32 when non-null) with
+// the NEON set: the SDOT variant when allow_dotprod and the CPU has it
+// (returns true), else plain NEON (returns false). Tests call it on a copy of
+// scalar_kernels() to check both variants against the reference.
+bool  fish_install_arm(QuantKernels& k,
+                       float (**dot_f32)(const float*, const float*, uint64_t),
+                       bool allow_dotprod);
+bool  fish_arm_dotprod();
+bool  fish_arm_dotprod_allowed();  // false when FISH_NEON_DOTPROD=0
 #endif
 
 } // namespace fish

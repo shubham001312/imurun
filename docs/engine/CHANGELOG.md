@@ -1,5 +1,37 @@
 # Engine changelog
 
+## 2026-11-09 — NEON kernels for arm64 (Apple Silicon)
+
+**Before.** arm64 builds had no SIMD path: `quant_x86.cpp` (AVX2) was the only
+fast kernel set, so Macs ran the scalar reference kernels for every matmul
+(and the macOS build has no GPU backend), which is why Mac speed was poor.
+
+**Changes.** `src/quant_arm.cpp` + `src/quant_arm_kernels.inc` implement every
+`QuantKernels` slot the AVX2 set does: Q8Act / Q8ActK activation quantisation
+(byte-identical to scalar: same amax, same d/id, FCVTNS ties-to-even = lrintf),
+Q4_0 / Q8_0 x int8, Q4_K / Q5_K / Q6_K x Q8ActK, the four weights x f32 dots and
+`dot_f32_fast`. Two variants from one body: `neon-dotprod` (SDOT, installed when
+the baseline has DotProd, as Apple clang's does, or a runtime check finds it:
+getauxval / sysctl / IsProcessorFeaturePresent) and plain `neon` (vmull_s8 +
+vpadalq_s16) for ARMv8.0 cores; `FISH_NEON_DOTPROD=0` forces plain.
+`fish_kernel_name()` reports which. CMake compiles it when the target arch is
+arm64/aarch64 (`FISH_ARM`, `FISH_HAVE_ARM_KERNELS`); x86 builds are unchanged.
+
+**Tests.** New model-free `fish_test_kernels` (random and quantize_row()-built
+blocks, every slot vs scalar, quantiser byte-identity incl. exact ties, short
+timing); the macOS arm64 CI job now runs it for both variants. On x86,
+`fish_test_kernels_emu` runs the NEON code against a scalar model of the
+intrinsics (`test/neon_emu/arm_neon.h`): all slots pass there; this checks the
+kernel logic, not real NEON codegen. Cross-compiled cleanly for aarch64-macos and
+aarch64-linux with zig's clang (SDOT emitted in both; Linux via target attribute
++ runtime check); not compiled with aarch64 GCC. x86 `fish_test_m1` /
+`fish_test_m2` / `fish_test_kernels` pass unchanged (AVX2).
+
+**Not yet.** Not measured on a Mac: speed-up unknown until the CI job (kernel
+timings) or a real M-series run. No Metal/MoltenVK GPU path on macOS; the
+attention / norm / RoPE f32 loops in ops.cpp and model.cpp are still plain C++
+(auto-vectorised only).
+
 ## 2026-11-09 — Qwen3.5 on the GPU: prefill 5×, decode 2.5–3×
 
 **Before.** `qwen35` loads forced `gpu_layers = 0` (the Vulkan span has no

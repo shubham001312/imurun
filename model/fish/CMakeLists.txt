@@ -38,11 +38,30 @@ set(FISH_CORE
     src/c_api.cpp
 )
 
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i.86)$")
+# SIMD kernel set per target architecture: quant_x86.cpp (AVX2, runtime
+# CPUID check) or quant_arm.cpp (NEON, + SDOT when the CPU has DotProd).
+# On Apple the target is CMAKE_OSX_ARCHITECTURES when it names one arch
+# (CI passes arm64); a universal build gets the scalar kernels only, because
+# each kernel file is compiled for a single architecture here.
+set(FISH_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}")
+if(APPLE AND CMAKE_OSX_ARCHITECTURES)
+    list(LENGTH CMAKE_OSX_ARCHITECTURES _fish_n_arch)
+    if(_fish_n_arch EQUAL 1)
+        set(FISH_TARGET_ARCH "${CMAKE_OSX_ARCHITECTURES}")
+    else()
+        set(FISH_TARGET_ARCH "universal")
+        message(STATUS "FISH: universal macOS build - SIMD kernels disabled (scalar only)")
+    endif()
+endif()
+
+set(FISH_X86 0)
+set(FISH_ARM 0)
+if(FISH_TARGET_ARCH MATCHES "^(x86_64|AMD64|amd64|i.86)$")
     list(APPEND FISH_CORE src/quant_x86.cpp)
     set(FISH_X86 1)
-else()
-    set(FISH_X86 0)
+elseif(FISH_TARGET_ARCH MATCHES "^(arm64|ARM64|aarch64|AARCH64|arm64e)$")
+    list(APPEND FISH_CORE src/quant_arm.cpp)
+    set(FISH_ARM 1)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -172,7 +191,8 @@ endif()
 
 add_library(fish SHARED ${FISH_CORE})
 target_include_directories(fish PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_definitions(fish PRIVATE FISH_HAVE_X86_KERNELS=${FISH_X86})
+target_compile_definitions(fish PRIVATE FISH_HAVE_X86_KERNELS=${FISH_X86}
+                                        FISH_HAVE_ARM_KERNELS=${FISH_ARM})
 if(WIN32)
     # MinGW would otherwise emit libfish.dll; the product loads fish.dll.
     set_target_properties(fish PROPERTIES PREFIX "")
@@ -245,11 +265,12 @@ if(FISH_BUILD_TESTS)
     set(FISH_TEST_SOURCES ${FISH_CORE})
     list(REMOVE_ITEM FISH_TEST_SOURCES src/c_api.cpp)
 
-    foreach(name m1 m2 m5 gpu)
+    foreach(name m1 m2 m5 gpu kernels)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test/test_${name}.cpp)
             add_executable(fish_test_${name} test/test_${name}.cpp ${FISH_TEST_SOURCES})
             target_include_directories(fish_test_${name} PRIVATE include src)
             target_compile_definitions(fish_test_${name} PRIVATE FISH_HAVE_X86_KERNELS=${FISH_X86}
+                                       FISH_HAVE_ARM_KERNELS=${FISH_ARM}
                                        FISH_HAVE_VULKAN=$<BOOL:${FISH_VK_ENABLED}>)
             if(MINGW)
                 target_link_options(fish_test_${name} PRIVATE -static)
@@ -261,6 +282,23 @@ if(FISH_BUILD_TESTS)
             endif()
         endif()
     endforeach()
+
+    # The NEON kernels run on x86 too, against a scalar model of the NEON
+    # intrinsics (test/neon_emu/arm_neon.h), so their indexing and arithmetic
+    # are checked against the scalar reference without ARM hardware. Only the
+    # quant sources are needed; the arm set replaces AVX2 in this binary.
+    if(FISH_X86 AND NOT MSVC)
+        add_executable(fish_test_kernels_emu test/test_kernels.cpp
+                       src/gguf.cpp src/quant.cpp src/quantize.cpp src/quant_arm.cpp)
+        target_include_directories(fish_test_kernels_emu PRIVATE include src)
+        target_compile_definitions(fish_test_kernels_emu PRIVATE
+                                   FISH_HAVE_X86_KERNELS=0 FISH_HAVE_ARM_KERNELS=1
+                                   FISH_NEON_EMULATE=1)
+        target_include_directories(fish_test_kernels_emu BEFORE PRIVATE test/neon_emu)
+        if(MINGW)
+            target_link_options(fish_test_kernels_emu PRIVATE -static)
+        endif()
+    endif()
 endif()
 
 install(TARGETS fish

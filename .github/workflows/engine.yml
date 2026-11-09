@@ -13,8 +13,9 @@
 # opened at run time and shaders come from shaders/prebuilt when glslc is
 # absent), so no Vulkan SDK is installed: Windows uses the MSYS2 headers
 # package, Linux a pinned clone of KhronosGroup/Vulkan-Headers.
-# The C++ tests need a GGUF model, so they are compiled (FISH_BUILD_TESTS) but
-# not run here.
+# The C++ acceptance tests need a GGUF model, so they are compiled
+# (FISH_BUILD_TESTS) but not run here; the model-free kernel test
+# (fish_test_kernels: NEON vs the scalar reference) runs on the macOS arm64 job.
 name: Engine
 
 on:
@@ -169,6 +170,11 @@ jobs:
           cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=OFF \
                 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=arm64
           ninja -C build
+      - name: Kernel test (NEON vs scalar, no model)
+        working-directory: model/fish
+        run: |
+          ./build/fish_test_kernels
+          FISH_NEON_DOTPROD=0 ./build/fish_test_kernels --no-bench
       - name: Sign libfish.dylib (Developer ID + notarization, else ad-hoc)
         working-directory: model/fish
         env:
