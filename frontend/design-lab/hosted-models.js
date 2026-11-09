@@ -232,6 +232,17 @@
     return trigger;
   }
 
+  /* The model the engine reports as loaded, even when it is not in the
+   * downloaded list (e.g. started with FISH_MODEL or a path): the button must
+   * never say "No model yet" while a model is answering. */
+  function engineModelName() {
+    var status = IM.state && IM.state.status;
+    var name = status && status.selected_model ? String(status.selected_model) : '';
+    if (!name) return '';
+    name = name.split(/[\\/]/).pop();
+    return name.replace(/\.gguf$/i, '');
+  }
+
   function updateTrigger() {
     var button = ensureTrigger();
     if (!button) return;
@@ -241,6 +252,7 @@
     var label;
     if (switching) label = 'Switching model…';
     else if (row) label = row.remote ? row.name + ' · ' + row.provider : row.name;
+    else if (engineModelName()) label = engineModelName();  /* loaded from outside the models folder */
     else if (!data.loaded) label = 'Loading models…';
     else label = allRows().length ? 'Choose a model' : 'No model yet';
     text.textContent = label;
@@ -333,7 +345,7 @@
     if (!rows.length) {
       html += '<p class="mp-empty" role="presentation">' + (query
         ? 'No model matches “' + esc(query) + '”.'
-        : (data.loaded ? 'No model yet. Download one in Settings, Models, or add a provider below.' : 'Loading models…')) + '</p>';
+        : (data.loaded ? (engineModelName() ? 'Running ' + esc(engineModelName()) + ', loaded from outside the models folder. Download a model in Settings, Models, or add a provider below to switch.' : 'No model yet. Download one in Settings, Models, or add a provider below.') : 'Loading models…')) + '</p>';
     }
     rows.forEach(function (row, index) {
       if (row.group !== group) {
@@ -977,6 +989,7 @@
         }
       });
       IM.bus.on('server:model.switch.done', function () { setTimeout(updateTrigger, 0); });
+      IM.bus.on('status', function () { updateTrigger(); });  /* engine model loaded/changed */
     }
     /* Ctrl/Cmd+M: no browser or app shortcut uses it here (panels.js has
      * K . B / and Alt N). macOS may keep Cmd+M for "minimise window". */
