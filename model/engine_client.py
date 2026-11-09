@@ -2,10 +2,12 @@
 
 A thin facade over ``SyncFishModelClient`` that the server composes. It
 exists so the server never imports engine details and so a second compute
-path can slot in behind the same methods. That second path is now
-``NvidiaClient`` (``model/nvidia_client.py``): when the user selects an
-NVIDIA-hosted model, generation, status and the model name route there;
-selecting a local model routes back to FISH. ``remote`` tells the agent loop
+path can slot in behind the same methods. That second path is a hosted
+model (``OpenAICompatClient`` in ``model/remote_client.py``: NVIDIA,
+OpenRouter, DeepSeek, OpenAI, Groq, Together, Mistral or a custom server):
+when the user selects one, generation, status and the model name route
+there; selecting a local model routes back to FISH. ``attach_remote``
+swaps in the selected provider's client. ``remote`` tells the agent loop
 which kind of model it is (a hosted model always gets the full prompt).
 """
 from __future__ import annotations
@@ -19,7 +21,7 @@ class EngineModelClient:
 
     def __init__(self, fish=None, remote=None) -> None:
         self._fish = fish
-        self._remote = remote          # NvidiaClient (or None)
+        self._remote = remote          # OpenAICompatClient (or None)
         self._use_remote = False
 
     # ------------------------------------------------------------- hosted path
@@ -35,11 +37,14 @@ class EngineModelClient:
     def attach_remote(self, client) -> None:
         self._remote = client
 
-    def select_remote(self, model_id: str) -> bool:
-        """Route generation to the hosted model ``model_id``."""
+    def select_remote(self, model_id: str, context: int | None = None) -> bool:
+        """Route generation to the hosted model ``model_id`` on the attached client."""
         if self._remote is None or not model_id:
             return False
-        self._remote.set_model(model_id)
+        try:
+            self._remote.set_model(model_id, context=context)
+        except TypeError:  # a client without the context argument
+            self._remote.set_model(model_id)
         self._use_remote = bool(self._remote.configured)
         return self._use_remote
 
@@ -73,7 +78,7 @@ class EngineModelClient:
     @property
     def engine(self) -> str:
         if self.remote:
-            return "nvidia"
+            return str(getattr(self._remote, "provider", "") or "remote")
         return "fish" if self.fish_available else "none"
 
     @property
@@ -89,7 +94,7 @@ class EngineModelClient:
 
     def status(self) -> dict:
         if self.remote:
-            return {"engine": "nvidia", "available": True, "loaded": True, "remote": True,
+            return {"engine": self.engine, "available": True, "loaded": True, "remote": True,
                     "model": self._remote.model_info(), "last_generation": self._remote.stats()}
         status = {"engine": self.engine, "available": self.available, "loaded": self.loaded}
         # Only describe the model when it is already resident: status polling

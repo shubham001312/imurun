@@ -268,6 +268,43 @@ ninja -C build
 - macOS: `xcode-select --install`, `brew install cmake ninja`.
 - Linux: `sudo apt install build-essential cmake ninja-build`.
 
+## Use hosted models (NVIDIA, OpenRouter, DeepSeek, …)
+
+Besides the models on this computer, IMURUN can answer with a model that runs
+on a provider's servers: NVIDIA (build.nvidia.com, free developer keys),
+OpenRouter, DeepSeek, OpenAI, Groq, Together, Mistral, or any server with an
+OpenAI-compatible API (vLLM, LM Studio, Ollama, LiteLLM, a company gateway).
+Replies then need an internet connection, and the provider sees what you send.
+
+1. Get a key from the provider's site (the connect dialog links to the page).
+2. Type `/connect` in the message box (or `/connect nvidia`, `/connect openrouter`,
+   `/connect deepseek` … to go straight to one), or press **Connect a provider**
+   at the top of **Settings > Models**, or pick **Add a provider** in the model
+   picker.
+3. Paste the key and press **Verify and save**. IMURUN checks it with one
+   request to that provider and stores it in the system keychain (else an
+   encrypted file under the data folder). It is only ever sent to that
+   provider's own address and is never shown again; the app shows `****abcd`.
+4. **Choose models** opens next: tick the models you want, press **Save and pick
+   a model**, and pick one to switch to it.
+5. Later, open the model picker with **Ctrl M** (macOS ⌘ M, when the system does
+   not keep it for "minimise"), `/model`, or the model button under the message
+   box. It lists local and hosted models together; `/model <name>` switches
+   straight to a model when the name matches only one.
+
+For **Custom (OpenAI-compatible)** enter the base URL, the part before
+`/chat/completions` (for example `https://llm.example.com/v1` or
+`http://localhost:11434/v1`). It must be `https`; plain `http` is only accepted
+for this computer (`localhost`, `127.0.0.1`). Tick **This server needs no key**
+for local servers without one. If the server has no model list, type the model
+ids in **Choose models**.
+
+Keys can also come from the environment: `NVIDIA_API_KEY`, or
+`IMURUN_<PROVIDER>_API_KEY` (`IMURUN_OPENROUTER_API_KEY`, `IMURUN_DEEPSEEK_API_KEY`,
+`IMURUN_OPENAI_API_KEY`, `IMURUN_GROQ_API_KEY`, `IMURUN_TOGETHER_API_KEY`,
+`IMURUN_MISTRAL_API_KEY`). The selected model is restored on the next start;
+picking a local model switches back to FISH. Routes: `services/server/doc/README.md`.
+
 ## Use IMURUN from other apps (OpenAI-compatible API, OpenClaw)
 
 IMURUN serves an OpenAI-compatible API on the same loopback server, so any app

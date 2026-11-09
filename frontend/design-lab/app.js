@@ -572,6 +572,20 @@
 
   function handleCommand(text) {
     var value = String(text || '').trim();
+    /* `/model` opens the model picker; `/model <name>` switches (hosted-models.js).
+     * The regexes need a space or the end after the word, so a skill named
+     * "/models" or "/connector" still reaches the server. */
+    var model = /^\/model(?:\s+([\s\S]+))?$/.exec(value);
+    if (model && IM.modelPicker) {
+      IM.modelPicker.command(model[1] || '');
+      return true;
+    }
+    /* `/connect` adds a hosted provider; `/connect nvidia` opens that one. */
+    var connect = /^\/connect(?:\s+([\s\S]+))?$/.exec(value);
+    if (connect && IM.modelPicker) {
+      IM.modelPicker.connectCommand(connect[1] || '');
+      return true;
+    }
     if (value !== '/rename' && value !== '/rename-session') return false;
     var row = document.querySelector('.session.active');
     if (!row) {
