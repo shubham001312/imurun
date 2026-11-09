@@ -156,7 +156,7 @@ jobs:
 
   macos:
     name: Engine (macOS arm64, clang)
-    runs-on: macos-14
+    runs-on: macos-latest   # Apple Silicon; macos-14 was retired by GitHub
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:

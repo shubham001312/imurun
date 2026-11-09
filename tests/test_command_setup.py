@@ -19,7 +19,9 @@ def home(tmp_path, monkeypatch):
     """A scratch HOME, bin dir and PATH; nothing reaches the real profile."""
     h = tmp_path / "home"
     h.mkdir()
-    bin_dir = tmp_path / "bin"
+    # Inside the fake profile: on Windows a launcher folder outside the user
+    # profile is refused (install._safe_dir), and USERPROFILE points at `h`.
+    bin_dir = h / "bin"
     monkeypatch.setenv("HOME", str(h))
     monkeypatch.setenv("USERPROFILE", str(h))
     monkeypatch.setenv("IMURUN_DATA_ROOT", str(h / ".imurun"))

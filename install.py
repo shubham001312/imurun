@@ -1289,12 +1289,17 @@ def _safe_dir(folder: Path) -> str | None:
     command (and, on Windows, plant DLLs). POSIX: it must be owned by this
     user and not group/world-writable; anything else is refused.
     """
-    if IS_WINDOWS:
-        home = _norm(Path.home())
-        return None if _norm(folder).startswith(home + os.sep) else f"{folder} is outside the user profile"
     probe = folder
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
+    if IS_WINDOWS:
+        # realpath expands 8.3 short names (C:\\Users\\RUNNER~1 -> C:\\Users\\runneradmin)
+        # and junctions for existing paths; comparing raw strings refused folders
+        # that are inside the profile. The missing tail under `probe` cannot leave it.
+        home = _norm(os.path.realpath(Path.home()))
+        real = _norm(os.path.realpath(probe))
+        inside = real == home or real.startswith(home.rstrip(os.sep) + os.sep)
+        return None if inside else f"{folder} is outside the user profile"
     try:
         st = probe.stat()
     except OSError as exc:
