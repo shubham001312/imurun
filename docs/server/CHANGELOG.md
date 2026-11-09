@@ -62,6 +62,10 @@ CPU engine with Llama 3.2 1B) and probing every main route.
   file with **422** `{error: <engine message>, reason: "load_failed"}` instead of 500
   (`services/server/turns.py` `_select_model`, `api.py`). Tests:
   `tests/test_fish_adapter_binding.py`, `tests/test_api_bad_requests.py`.
+- **`GET /api/stack/status` reported a file as the stack root** (`services/server/stack.py`
+  `locate_root`): with no `docker-compose.yml` anywhere it returned `stack.py` itself, so
+  `root` was `.../services/server/stack.py` and `compose_file`
+  `.../stack.py/docker-compose.yml`. Now its folder. Test: `tests/test_stack_root.py`.
 
 ## 2026-11-03 — resource governor (resources owner)
 
