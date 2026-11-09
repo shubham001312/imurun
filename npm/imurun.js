@@ -230,7 +230,9 @@ function main() {
 
   // Ctrl+C reaches the child directly (same console / process group); the
   // launcher only waits for it and passes the exit status on.
-  const child = spawn(py, ["-m", "imurun", ...args], { stdio: "inherit" });
+  // -P: keep the current directory off sys.path, so running `imurun` inside an
+  // untrusted folder cannot import that folder's imurun/ or json.py (Python 3.11+).
+  const child = spawn(py, ["-P", "-m", "imurun", ...args], { stdio: "inherit" });
   const ignore = () => {};
   process.on("SIGINT", ignore);
   process.on("SIGTERM", () => child.kill("SIGTERM"));

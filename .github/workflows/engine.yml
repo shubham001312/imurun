@@ -24,6 +24,14 @@ on:
         description: "Sign the libraries (release builds; only when signing is configured)"
         type: boolean
         default: false
+    secrets:
+      AZURE_CLIENT_ID: {required: false}
+      AZURE_TENANT_ID: {required: false}
+      AZURE_SUBSCRIPTION_ID: {required: false}
+      APPLE_CERT_P12: {required: false}
+      APPLE_CERT_PASSWORD: {required: false}
+      APPLE_ID: {required: false}
+      APPLE_APP_PASSWORD: {required: false}
   workflow_dispatch:
 
 # Code signing (publisher identity; without it Windows Smart App Control /
@@ -39,8 +47,10 @@ on:
 #     ("Developer ID Application: <name> (<team>)"), APPLE_TEAM_ID; secrets
 #     APPLE_CERT_P12 (base64), APPLE_CERT_PASSWORD, APPLE_ID, APPLE_APP_PASSWORD.
 
-permissions:
-  contents: read
+# No top-level `permissions:`: a called workflow can only narrow the caller's
+# token, and naming one permission here would drop the `id-token: write` that
+# workflow.yml grants for the Azure signing login (OIDC). ci.yml calls this
+# with contents: read only, so CI and fork PRs stay read-only.
 
 env:
   VULKAN_HEADERS_TAG: v1.3.296
@@ -54,7 +64,7 @@ jobs:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
-      - uses: msys2/setup-msys2@v2
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e  # v2.33.0
         with:
           msystem: UCRT64
           update: true
@@ -70,14 +80,14 @@ jobs:
           ninja -C build
       - name: Azure login (code signing)
         if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
-        uses: azure/login@v3
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906  # v3.1.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Sign fish.dll (Authenticode, Azure Artifact Signing)
         if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
-        uses: azure/artifact-signing-action@v2
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82  # v2.0.0
         with:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}

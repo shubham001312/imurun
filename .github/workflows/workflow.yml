@@ -56,6 +56,8 @@ jobs:
       publish: ${{ steps.gate.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the gate checks that a release commit is on main
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -81,10 +83,21 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
           build=true; publish=false
+          # Publishing (and signing) only ever happens for code on main: a tag
+          # must point at a commit of main, a manual real run must be on main.
+          on_main() {
+            git fetch --quiet origin main &&
+              git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD
+          }
           case "$GITHUB_EVENT_NAME:$GITHUB_REF_TYPE" in
-            push:tag)  publish=true ;;
+            push:tag)
+              if on_main; then publish=true
+              else echo "::error::tag $GITHUB_REF_NAME is not on main - refusing to publish"; exit 1; fi ;;
             workflow_dispatch:*)
-              [ "$DRY_RUN" = "false" ] && publish=true ;;
+              if [ "$DRY_RUN" = "false" ]; then
+                if [ "$GITHUB_REF" = "refs/heads/main" ]; then publish=true
+                else echo "::error::real releases run from main only ($GITHUB_REF)"; exit 1; fi
+              fi ;;
             push:branch)
               # exit 0: tag exists, 2: no such tag, anything else: lookup failed
               # (stop rather than guess - a wrong "not tagged" would re-release).
@@ -128,7 +141,14 @@ jobs:
     uses: ./.github/workflows/engine.yml
     with:
       sign: ${{ needs.check.outputs.publish == 'true' }}
-    secrets: inherit
+    secrets:   # only the signing credentials, never NPM_TOKEN & co.
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+      APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
 
   wheels:
     name: wheel (${{ matrix.platform }})
@@ -235,7 +255,7 @@ jobs:
       - name: Build provenance attestations (verifiable identity of every file)
         # Anyone can check that a file was built by this repository's release
         # workflow:  gh attestation verify <file> -R shubham001312/imurun
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f  # v3.2.0
         with:
           subject-path: |
             assets/*
@@ -308,7 +328,7 @@ jobs:
           # Works with an NPM_TOKEN secret, or without one when a trusted
           # publisher for this repository + workflow.yml is configured on
           # npmjs.com (npm >= 11.5 exchanges the OIDC credential itself).
-          npm install -g "npm@>=11.5"
+          npm install -g npm@11.21.2   # exact: this job holds NODE_AUTH_TOKEN
           npm publish --access public --provenance
       - name: Deprecate the old 0.1.x CLI on npm
         # Needs NPM_TOKEN (trusted publishing covers `publish` only). Best effort:

@@ -11,6 +11,21 @@
   earlier build, even with `IMURUN_BUNDLE_ENGINE=0`. Reproduced: a deleted
   `services/zz_stale.py` and `bin/fish.dll` both showed up in the next pure wheel. Now the
   second build matches a clean one (289 files).
+- **Security review fixes** (independent review of the setup and CI changes; no Critical findings):
+  - The `imurun` launcher and the npm launcher run `python -P -m imurun`. Without `-P`, typing
+    `imurun` inside an untrusted folder imported that folder's `imurun/` or `json.py`. A test
+    reproduces the attack and fails without `-P`.
+  - The Windows launcher never leaves an empty `PYTHONPATH` entry, which would put the cwd on
+    `sys.path`. Its folder is always under the user profile, never next to a relocated data root.
+  - A launcher folder that every user, or a shared group, can write to is refused.
+  - The launcher write is atomic and never follows a planted symlink.
+  - Paths are shell-quoted (sh, fish), and `%` is escaped for cmd. The `.cmd` file is written
+    in the OEM code page, and a non-string registry `Path` value is left alone.
+  - Release: tags and manual runs publish and sign only when the commit is on `main`.
+    `engine.yml` no longer narrows the token, so the Azure OIDC login can work. Only the signing
+    secrets are passed to it (no more `secrets: inherit`). Actions that run with signing
+    credentials are pinned by commit SHA, and npm is pinned to an exact version in the job that
+    holds `NODE_AUTH_TOKEN`.
 - **Certificates.** HTTPS (model downloads, `--get-engine`, connectors) is verified against the
   OS trust store via `truststore` (new dependency, injected at start by `start.py` / `install.py`).
   This fixes "unable to get local issuer certificate" behind corporate proxies and on the

@@ -1275,8 +1275,38 @@ def command_dir() -> Path:
     if override:
         return Path(override).expanduser()
     if IS_WINDOWS:
-        return data_root() / "cmd"
+        # Always under the user profile, never next to a relocated data root:
+        # IMURUN_DATA_ROOT=D:\\... would put a folder every local user may write
+        # to (non-system drive roots grant Authenticated Users Modify) on PATH.
+        return Path.home() / ".imurun" / "cmd"
     return Path.home() / ".local" / "bin"
+
+
+def _safe_dir(folder: Path) -> str | None:
+    """Why ``folder`` must not hold the launcher / go on PATH, or None when it is fine.
+
+    A folder on PATH that another user can write to lets them shadow any
+    command (and, on Windows, plant DLLs). POSIX: it must be owned by this
+    user and not group/world-writable; anything else is refused.
+    """
+    if IS_WINDOWS:
+        home = _norm(Path.home())
+        return None if _norm(folder).startswith(home + os.sep) else f"{folder} is outside the user profile"
+    probe = folder
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        st = probe.stat()
+    except OSError as exc:
+        return f"cannot inspect {probe}: {exc}"
+    if st.st_uid != os.getuid():
+        return f"{probe} is owned by another user"
+    if st.st_mode & 0o002:
+        return f"{probe} is writable by every user"
+    if st.st_mode & 0o020 and st.st_gid != os.getgid():
+        # Group-writable is fine for the user's own private group (most distros).
+        return f"{probe} is writable by a shared group"
+    return None
 
 
 def command_path() -> Path:
@@ -1316,7 +1346,7 @@ def _command_runs_this(path: Path) -> bool:
     except OSError:
         return False
     if SHIM_MARK in head:
-        return f'"{sys.executable}"' in head
+        return _py_token() in head
     if "IMURUN npm launcher" in head or "node_modules" in head:
         # The npm launcher runs ~/.imurun/venv (or IMURUN_VENV).
         venv = os.environ.get("IMURUN_VENV") or str(data_root() / "venv")
@@ -1335,22 +1365,67 @@ def _only_while_activated(path: Path) -> bool:
     return _norm(path).startswith(_norm(sys.prefix) + os.sep)
 
 
+def _cmd_quote(value: str) -> str:
+    """A path for a .cmd file: double-quoted, % doubled (cmd expands it even in quotes)."""
+    return '"' + value.replace("%", "%%") + '"'
+
+
+def _py_token() -> str:
+    """How the launcher spells this interpreter (also how a launcher is recognised)."""
+    import shlex  # noqa: PLC0415
+
+    return _cmd_quote(sys.executable) if IS_WINDOWS else shlex.quote(sys.executable)
+
+
 def _shim_text() -> str:
-    py = sys.executable
+    # -P: do not put the current directory on sys.path. `python -m` normally
+    # does, so typing `imurun` inside an untrusted folder would import that
+    # folder's imurun/ or json.py (pip's own console scripts never do that).
+    import shlex  # noqa: PLC0415
+
+    py = _py_token()
     root = None if INSTALLED else str(ROOT)
     if IS_WINDOWS:
         lines = ["@echo off", f"rem {SHIM_MARK}: written by IMURUN setup; runs IMURUN with the Python below.",
                  "rem Safe to delete; `imurun install` writes it again.", "setlocal"]
         if root:
-            lines.append(f'set "PYTHONPATH={root};%PYTHONPATH%"')
-        lines += [f'"{py}" -m imurun %*', "exit /b %errorlevel%", ""]
+            # Never leave an empty PYTHONPATH entry: "" on sys.path is the cwd.
+            r = root.replace("%", "%%")
+            lines.append(f'if defined PYTHONPATH (set "PYTHONPATH={r};%PYTHONPATH%") '
+                         f'else (set "PYTHONPATH={r}")')
+        lines += [f"{py} -P -m imurun %*", "exit /b %errorlevel%", ""]
         return "\r\n".join(lines)
     lines = ["#!/bin/sh", f"# {SHIM_MARK}: written by IMURUN setup; runs IMURUN with the Python below.",
              "# Safe to delete; `imurun install` writes it again."]
     if root:
-        lines += [f'PYTHONPATH="{root}${{PYTHONPATH:+:$PYTHONPATH}}"', "export PYTHONPATH"]
-    lines += [f'exec "{py}" -m imurun "$@"', ""]
+        lines += [f'PYTHONPATH={shlex.quote(root)}"${{PYTHONPATH:+:$PYTHONPATH}}"', "export PYTHONPATH"]
+    lines += [f'exec {py} -P -m imurun "$@"', ""]
     return "\n".join(lines)
+
+
+def _write_launcher(target: Path, text: str) -> None:
+    """Atomic write that never follows a symlink planted at ``target``."""
+    import tempfile  # noqa: PLC0415
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if IS_WINDOWS:
+        # cmd.exe reads batch files in the console (OEM) code page, not UTF-8.
+        try:
+            data = text.encode("oem")
+        except (UnicodeEncodeError, LookupError):
+            data = ("@chcp 65001 >nul\r\n" + text).encode("utf-8")
+    else:
+        data = text.encode("utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=".imurun-", dir=target.parent)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        if not IS_WINDOWS:
+            os.chmod(tmp, 0o755)
+        os.replace(tmp, target)  # replaces a symlink itself, never its target
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _rc_files() -> list[Path]:
@@ -1380,6 +1455,8 @@ def _add_to_user_path(folder: Path) -> list[str]:
                 value, kind = winreg.QueryValueEx(key, "Path")
             except FileNotFoundError:
                 value, kind = "", winreg.REG_EXPAND_SZ
+            if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ) or not isinstance(value, str):
+                raise OSError("the user Path in the registry is not a string value; left unchanged")
             if not _on_path(folder, value):
                 new = f"{value.rstrip(';')};{folder}" if value else str(folder)
                 winreg.SetValueEx(key, "Path", 0, kind if kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ)
@@ -1393,7 +1470,10 @@ def _add_to_user_path(folder: Path) -> list[str]:
             except (OSError, AttributeError):
                 pass
         return changed
-    line = f'case ":$PATH:" in *":{folder}:"*) ;; *) export PATH="{folder}:$PATH" ;; esac'
+    import shlex  # noqa: PLC0415
+
+    q = shlex.quote(str(folder))
+    line = f'case ":$PATH:" in *:{q}:*) ;; *) export PATH={q}":$PATH" ;; esac'
     block = f"\n{RC_BEGIN}  (added by IMURUN setup: the `imurun` command)\n{line}\n{RC_END}\n"
     for rc in _rc_files():
         try:
@@ -1414,7 +1494,8 @@ def _add_to_user_path(folder: Path) -> list[str]:
         if not conf.exists():
             try:
                 conf.parent.mkdir(parents=True, exist_ok=True)
-                conf.write_text(f"# {SHIM_MARK}\nfish_add_path -g {folder}\n", encoding="utf-8")
+                conf.write_text(f"# {SHIM_MARK}\nfish_add_path -g {shlex.quote(str(folder))}\n",
+                                encoding="utf-8")
                 changed.append(str(conf))
             except OSError:
                 pass
@@ -1432,6 +1513,15 @@ def ensure_command() -> dict:
     if found and _command_runs_this(Path(found)) and not _only_while_activated(Path(found)):
         return {"ok": True, "path": found, "detail": "on PATH"}
     record: dict = {"ok": False, "path": str(target)}
+    unsafe = _safe_dir(target.parent)
+    if unsafe:
+        record["detail"] = f"not writing a launcher: {unsafe}"
+        record["hint"] = "run IMURUN with:  python -m imurun"
+        return record
+    if target.is_symlink() and not found:
+        record["detail"] = f"{target} is a symlink to something else; left alone"
+        record["hint"] = "run IMURUN with:  python -m imurun"
+        return record
     try:
         existing = target.read_text(encoding="utf-8", errors="replace") if target.exists() else None
     except OSError:
@@ -1444,10 +1534,7 @@ def ensure_command() -> dict:
         text = _shim_text()
         if existing != text:
             try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(text, encoding="utf-8", newline="")
-                if not IS_WINDOWS:
-                    target.chmod(0o755)
+                _write_launcher(target, text)
             except OSError as exc:
                 record["detail"] = f"could not write {target}: {exc}"
                 return record

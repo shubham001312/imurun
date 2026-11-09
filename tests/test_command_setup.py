@@ -39,7 +39,7 @@ def test_writes_launcher_without_touching_path_when_disabled(home, monkeypatch):
     shim = install.command_path()
     assert info["ok"] and shim.parent == bin_dir and shim.is_file()
     text = shim.read_text(encoding="utf-8")
-    assert install.SHIM_MARK in text and f'"{sys.executable}" -m imurun' in text
+    assert install.SHIM_MARK in text and f"{install._py_token()} -P -m imurun" in text
     assert "IMURUN_NO_PATH" in info["detail"]
     assert not (h / ".profile").exists() and not (h / ".bashrc").exists()
 
@@ -103,7 +103,7 @@ def test_stale_launcher_is_repointed(home, monkeypatch):
     monkeypatch.setattr(install.shutil, "which", lambda name, *a, **k: str(shim))
     info = install.ensure_command()
     assert info["ok"]
-    assert f'"{sys.executable}"' in shim.read_text(encoding="utf-8")
+    assert install._py_token() in shim.read_text(encoding="utf-8")
 
 
 def test_command_inside_activated_venv_still_gets_launcher(home, monkeypatch, tmp_path):
@@ -176,3 +176,56 @@ def test_https_uses_the_os_trust_store(monkeypatch):
 def test_trust_store_opt_out(monkeypatch):
     monkeypatch.setenv("IMURUN_NO_TRUSTSTORE", "1")
     assert "IMURUN_NO_TRUSTSTORE" in install.use_system_certificates()
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX launcher")
+def test_launcher_ignores_modules_in_the_current_directory(home, monkeypatch, tmp_path):
+    """`imurun` typed inside an untrusted folder must not import that folder's code."""
+    monkeypatch.setenv("IMURUN_NO_PATH", "1")
+    install.ensure_command()
+    evil = tmp_path / "evil"
+    (evil / "imurun").mkdir(parents=True)
+    (evil / "imurun" / "__init__.py").write_text("raise SystemExit('PWNED')\n", encoding="utf-8")
+    (evil / "imurun" / "__main__.py").write_text("raise SystemExit('PWNED')\n", encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    out = subprocess.run([str(install.command_path()), "--version"], capture_output=True, text=True,
+                         env=env, cwd=str(evil), timeout=60)
+    assert "PWNED" not in out.stdout + out.stderr
+    assert out.stdout.strip() == f"imurun {install.app_version()}"
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX permissions")
+def test_world_writable_bin_dir_is_refused(home, monkeypatch, tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    shared.chmod(0o777)
+    monkeypatch.setenv("IMURUN_BIN_DIR", str(shared))
+    info = install.ensure_command()
+    assert not info["ok"] and "every user" in info["detail"]
+    assert not (shared / "imurun").exists()
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX symlinks")
+def test_planted_symlink_is_not_followed(home, monkeypatch, tmp_path):
+    monkeypatch.setenv("IMURUN_NO_PATH", "1")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me\n", encoding="utf-8")
+    shim = install.command_path()
+    shim.parent.mkdir(parents=True)
+    shim.symlink_to(victim)
+    install.ensure_command()
+    assert victim.read_text(encoding="utf-8") == "keep me\n"
+
+
+@pytest.mark.skipif(not POSIX, reason="sh quoting")
+def test_odd_characters_in_paths_are_quoted(home, monkeypatch, tmp_path):
+    h, _ = home
+    odd = tmp_path / 'bin $(touch PWNED) "q" `x`'
+    monkeypatch.setenv("IMURUN_BIN_DIR", str(odd))
+    info = install.ensure_command()
+    assert info["ok"], info
+    out = subprocess.run(["sh", "-c", f". {h / '.profile'}; echo \"$PATH\""], capture_output=True,
+                         text=True, cwd=str(tmp_path), env={"PATH": "/usr/bin:/bin", "HOME": str(h)})
+    assert out.returncode == 0, out.stderr
+    assert str(odd) in out.stdout.split(":")
+    assert not (tmp_path / "PWNED").exists()
