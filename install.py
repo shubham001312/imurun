@@ -695,6 +695,28 @@ def engine_library_names() -> list[str]:
     return ["libfish.so", "fish.so"]
 
 
+def use_system_certificates() -> str:
+    """Verify HTTPS against the OS trust store (Windows / macOS Keychain / Linux CA bundle).
+
+    Python's own bundle (certifi) does not know a corporate proxy's CA, and the
+    python.org macOS build ships with no certificates at all until the user runs
+    "Install Certificates.command": both fail with "unable to get local issuer
+    certificate" (an unknown CA). truststore, the same library pip uses for this,
+    makes every ssl context in the process (urllib, httpx, aiohttp) use the OS
+    store. Verification stays on; only the source of trusted CAs changes.
+    IMURUN_NO_TRUSTSTORE=1 keeps Python's bundle. Never fatal.
+    """
+    if os.environ.get("IMURUN_NO_TRUSTSTORE") == "1":
+        return "python bundle (IMURUN_NO_TRUSTSTORE=1)"
+    try:
+        import truststore  # noqa: PLC0415
+
+        truststore.inject_into_ssl()
+    except Exception:  # noqa: BLE001 - not installed yet (first run) or unsupported platform
+        return "python bundle"
+    return "system trust store"
+
+
 def data_root() -> Path:
     """The user data root (``~/.imurun`` unless IMURUN_DATA_ROOT says otherwise)."""
     env = os.environ.get("IMURUN_DATA_ROOT")
@@ -968,7 +990,17 @@ def probe_engine(path: Path | None) -> dict:
                                    "need a newer engine build")
     except OSError as exc:
         info["error"] = f"cannot load: {exc}"
+        if sys.platform == "darwin" and _quarantined(path):
+            info["error"] += (f" - macOS quarantined this downloaded file. Use `imurun --get-engine` "
+                              f"(checksum-verified, not quarantined) or: xattr -d com.apple.quarantine \"{path}\"")
     return info
+
+
+def _quarantined(path: Path) -> bool:
+    try:
+        return "com.apple.quarantine" in os.listxattr(path)
+    except (OSError, AttributeError):
+        return False
 
 
 def engine_source_dir() -> Path | None:
@@ -1685,6 +1717,7 @@ def doctor(port: int = 8732) -> int:
         for line in engine_build_instructions().splitlines():
             ui.hint(line)
     report_gpu(gpu_report())
+    ui.ok(f"HTTPS certificates: {use_system_certificates()}")
     found = shutil.which("imurun")
     if found and _command_runs_this(Path(found)):
         ui.ok(f"`imurun` command {ui.c(found, 'grey')}")
@@ -1807,6 +1840,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--quiet-if-ok", action="store_true",
                         help="exit silently with 0 when everything is already installed")
     args = parser.parse_args(argv)
+    use_system_certificates()
 
     if sys.version_info < MIN_PY:
         ui.fail(f"IMURUN needs Python {MIN_PY[0]}.{MIN_PY[1]}+; this is {sys.version.split()[0]}.")

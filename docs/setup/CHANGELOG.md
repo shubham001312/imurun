@@ -11,6 +11,17 @@
   earlier build, even with `IMURUN_BUNDLE_ENGINE=0`. Reproduced: a deleted
   `services/zz_stale.py` and `bin/fish.dll` both showed up in the next pure wheel. Now the
   second build matches a clean one (289 files).
+- **Certificates.** HTTPS (model downloads, `--get-engine`, connectors) is verified against the
+  OS trust store via `truststore` (new dependency, injected at start by `start.py` / `install.py`).
+  This fixes "unable to get local issuer certificate" behind corporate proxies and on the
+  python.org macOS build. Checked here: the httpx and urllib contexts become truststore contexts
+  with `CERT_REQUIRED`, GitHub and Hugging Face requests succeed, and a local self-signed server
+  is still rejected. `IMURUN_NO_TRUSTSTORE=1` opts out; `imurun doctor` reports the source.
+- **Publisher identity.** The release attests every file with Sigstore build provenance
+  (`gh attestation verify`) and uploads PEP 740 attestations to PyPI. `engine.yml` signs
+  `fish.dll` (Azure Artifact Signing) and `libfish.dylib` (Developer ID + notarization) when the
+  credentials are configured; otherwise the dylib is ad-hoc signed and the run warns. The
+  macOS quarantine flag on a browser-downloaded engine is now named in the load error.
 - **`imurun` works from any new terminal, however it was installed** (`install.ensure_command`,
   run by the first-run setup and recorded as `command` in `install-state.json`). Before this,
   `pip install` into a venv, `pip install --user` on Windows, `npx imurun` and a checkout

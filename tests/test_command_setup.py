@@ -156,3 +156,23 @@ def test_windows_user_path_registry(tmp_path):
                 winreg.DeleteValue(key, "Path")
             else:
                 winreg.SetValueEx(key, "Path", 0, original[1], original[0])
+
+
+def test_https_uses_the_os_trust_store(monkeypatch):
+    """Unknown-CA failures (corporate proxy, macOS python.org build): verify against the OS store."""
+    import ssl
+
+    truststore = pytest.importorskip("truststore")
+    monkeypatch.delenv("IMURUN_NO_TRUSTSTORE", raising=False)
+    try:
+        assert install.use_system_certificates() == "system trust store"
+        ctx = ssl.create_default_context()
+        assert type(ctx).__module__.startswith("truststore")
+        assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
+    finally:
+        truststore.extract_from_ssl()
+
+
+def test_trust_store_opt_out(monkeypatch):
+    monkeypatch.setenv("IMURUN_NO_TRUSTSTORE", "1")
+    assert "IMURUN_NO_TRUSTSTORE" in install.use_system_certificates()

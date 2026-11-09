@@ -19,7 +19,25 @@ name: Engine
 
 on:
   workflow_call:
+    inputs:
+      sign:
+        description: "Sign the libraries (release builds; only when signing is configured)"
+        type: boolean
+        default: false
   workflow_dispatch:
+
+# Code signing (publisher identity; without it Windows Smart App Control /
+# SmartScreen can block or warn about an "unknown publisher", and macOS
+# Gatekeeper about an "unidentified developer"). Runs only for releases
+# (workflow.yml passes sign: true + secrets: inherit) and only when configured;
+# otherwise the step is skipped and the release still ships. Setup:
+# docs/setup/RELEASE.md, "Code signing".
+#   Windows (Azure Artifact Signing, OIDC): vars AZURE_SIGNING_ENDPOINT,
+#     AZURE_SIGNING_ACCOUNT, AZURE_CERT_PROFILE; secrets AZURE_CLIENT_ID,
+#     AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID.
+#   macOS (Developer ID + notarization): var APPLE_SIGNING_IDENTITY
+#     ("Developer ID Application: <name> (<team>)"), APPLE_TEAM_ID; secrets
+#     APPLE_CERT_P12 (base64), APPLE_CERT_PASSWORD, APPLE_ID, APPLE_APP_PASSWORD.
 
 permissions:
   contents: read
@@ -50,6 +68,36 @@ jobs:
         run: |
           cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=ON
           ninja -C build
+      - name: Azure login (code signing)
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign fish.dll (Authenticode, Azure Artifact Signing)
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\model\fish\build
+          files-folder-filter: dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+      - name: Verify the signature
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT != '' }}
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature model\fish\build\fish.dll
+          "{0}: {1}" -f $sig.Status, $sig.SignerCertificate.Subject
+          if ($sig.Status -ne 'Valid') { throw "fish.dll signature is $($sig.Status)" }
+      - name: Signing not configured
+        if: ${{ inputs.sign && vars.AZURE_SIGNING_ACCOUNT == '' }}
+        shell: bash
+        run: echo "::warning::fish.dll is unsigned (Azure Artifact Signing not configured, see docs/setup/RELEASE.md)"
       - name: Check it is self-contained
         working-directory: model/fish
         run: |
@@ -111,6 +159,42 @@ jobs:
           cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DFISH_VULKAN=OFF \
                 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 -DCMAKE_OSX_ARCHITECTURES=arm64
           ninja -C build
+      - name: Sign libfish.dylib (Developer ID + notarization, else ad-hoc)
+        working-directory: model/fish
+        env:
+          SIGN: ${{ inputs.sign && vars.APPLE_SIGNING_IDENTITY != '' }}
+          IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          lib=build/libfish.dylib
+          if [ "$SIGN" = "true" ]; then
+            kc="$RUNNER_TEMP/signing.keychain-db"; kcpw="$(uuidgen)"
+            echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+            security create-keychain -p "$kcpw" "$kc"
+            security set-keychain-settings -lut 3600 "$kc"
+            security unlock-keychain -p "$kcpw" "$kc"
+            security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -k "$kcpw" "$kc" >/dev/null
+            security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+            rm -f "$RUNNER_TEMP/cert.p12"
+            codesign --force --timestamp --options runtime --sign "$IDENTITY" --keychain "$kc" "$lib"
+            ditto -c -k "$lib" "$RUNNER_TEMP/libfish.zip"
+            xcrun notarytool submit "$RUNNER_TEMP/libfish.zip" --apple-id "$APPLE_ID" \
+              --team-id "$TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          else
+            # arm64 macOS refuses to load code without a valid signature; make sure
+            # the library carries an intact ad-hoc one (no publisher identity).
+            codesign --force --sign - "$lib"
+            if [ "${{ inputs.sign }}" = "true" ]; then
+              echo "::warning::libfish.dylib is ad-hoc signed only (Developer ID not configured, see docs/setup/RELEASE.md)"
+            fi
+          fi
+          codesign --verify --strict --verbose=2 "$lib"
+          codesign -dv "$lib" 2>&1 | grep -E "Authority|Signature|TeamIdentifier" || true
       - name: Check dependencies
         working-directory: model/fish
         run: |

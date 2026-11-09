@@ -122,7 +122,13 @@ jobs:
   engine:
     needs: check
     if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: read
+      id-token: write   # Azure Artifact Signing login by OIDC (when configured)
     uses: ./.github/workflows/engine.yml
+    with:
+      sign: ${{ needs.check.outputs.publish == 'true' }}
+    secrets: inherit
 
   wheels:
     name: wheel (${{ matrix.platform }})
@@ -208,6 +214,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write          # Sigstore signing certificate for the attestations
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -223,6 +232,14 @@ jobs:
       - name: Checksums
         run: |
           cd assets && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Build provenance attestations (verifiable identity of every file)
+        # Anyone can check that a file was built by this repository's release
+        # workflow:  gh attestation verify <file> -R shubham001312/imurun
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            assets/*
+            dist/*
       - name: Create or update the GitHub Release (and the tag)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -257,6 +274,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          attestations: true    # PEP 740 provenance: PyPI shows the files as built by workflow.yml
           skip-existing: true   # a re-run after a partial upload finishes the job
 
   npm:

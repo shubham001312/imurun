@@ -306,6 +306,26 @@ somewhere else. `imurun install --force` points the launcher at the install you 
 To undo it, delete the launcher and the `# >>> imurun >>>` block. Until then, `python -m imurun`
 always works.
 
+### `certificate verify failed` / `unable to get local issuer certificate` (unknown CA)
+
+IMURUN verifies HTTPS against the **operating system's trust store** (Windows certificate
+store, macOS Keychain, the Linux CA bundle) through `truststore`, the same library pip uses.
+So a corporate proxy's CA that IT installed on the machine is trusted, and the python.org
+macOS build works without running "Install Certificates.command". Verification is never turned
+off: self-signed or expired certificates are still rejected. `imurun doctor` shows
+`HTTPS certificates: system trust store`. If it says `python bundle`, run `imurun install --force`
+(it installs `truststore`). `IMURUN_NO_TRUSTSTORE=1` goes back to Python's own bundle.
+
+### Windows "unknown publisher" / macOS "unidentified developer" for the engine
+
+Release builds are signed when the project's signing identities are configured
+(`docs/setup/RELEASE.md`, "Code signing"). Every release file also carries a build-provenance
+attestation: `gh attestation verify fish-windows-x64.dll -R shubham001312/imurun` proves that
+the file came from this repository's release workflow. On macOS, a library you downloaded with a
+browser is quarantined. Use `imurun --get-engine` instead (checksum-verified, not quarantined),
+or remove the flag: `xattr -d com.apple.quarantine <file>`. `imurun doctor` names the file when
+that is the problem.
+
 ### `externally-managed-environment` (Debian/Ubuntu/Fedora, Homebrew Python)
 
 The system Python refuses `pip install`. Use `pipx install imurun`, or

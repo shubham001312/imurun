@@ -385,6 +385,7 @@ def get_engine():
 
 def main(argv=None):
     args = parse_args(argv)
+    install.use_system_certificates()  # OS trust store for every HTTPS call (unknown-CA failures)
     # IMURUN_STARTUP_TRACE=<seconds>: dump every thread's stack to stderr if
     # start-up has not finished by then (CI diagnostics for a hanging server;
     # the launcher test sets it so a failure shows where the server stuck).

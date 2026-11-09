@@ -69,6 +69,26 @@ Also create the GitHub environment **`npm`** (Settings → Environments).
 - Actions must be allowed to run third-party actions: `msys2/setup-msys2`,
   `pypa/gh-action-pypi-publish`, plus the `actions/*` ones.
 
+### 4. Code signing and provenance (publisher identity)
+
+Without a signature, Windows Smart App Control / SmartScreen can block or flag the engine
+(`fish.dll`) as coming from an "unknown publisher", and macOS Gatekeeper can call a downloaded
+`libfish.dylib` the work of an "unidentified developer". The release pipeline handles each part
+automatically once the credentials exist. Each part is skipped (with a warning) until then, so
+releases never block on it.
+
+| What | Status | What you need to do |
+|---|---|---|
+| **Build provenance** (Sigstore, SLSA) for every release file: wheels, sdist, engine libraries, `SHA256SUMS.txt` | **automatic, free** (`actions/attest-build-provenance`) | nothing. Verify with `gh attestation verify <file> -R shubham001312/imurun` |
+| **PyPI attestations** (PEP 740): PyPI shows each file as built by `workflow.yml` | **automatic** with trusted publishing | nothing |
+| **npm provenance** | automatic (`npm publish --provenance`) | nothing |
+| **Windows Authenticode** on `fish.dll` | runs when configured | an [Azure Artifact Signing](https://learn.microsoft.com/azure/artifact-signing/) account (identity-validated; paid monthly), an app registration with a federated credential for this repo (OIDC). Repository **variables** `AZURE_SIGNING_ENDPOINT`, `AZURE_SIGNING_ACCOUNT`, `AZURE_CERT_PROFILE`; **secrets** `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
+| **macOS Developer ID + notarization** on `libfish.dylib` | runs when configured; otherwise ad-hoc signed (loads, but no identity) | an Apple Developer Program membership. Export the "Developer ID Application" certificate as .p12. **Variables** `APPLE_SIGNING_IDENTITY` (e.g. `Developer ID Application: ImuTechz (TEAMID)`), `APPLE_TEAM_ID`; **secrets** `APPLE_CERT_P12` (base64 of the .p12), `APPLE_CERT_PASSWORD`, `APPLE_ID`, `APPLE_APP_PASSWORD` (an app-specific password) |
+
+Buying the Windows and Apple identities is the only part that cannot be automated, because
+both vendors validate who you are. The release and engine workflows do the rest:
+`engine.yml` signs and verifies, and `workflow.yml` attests.
+
 ## Git: state of this folder and first push
 
 This folder **is already a git repository** (remote
