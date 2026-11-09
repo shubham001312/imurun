@@ -1551,6 +1551,8 @@ class ApiServer:
                     if parts[2] == "search":
                         apply_search_env(merged)
                         server._record("settings", "search providers updated")
+                    if parts[2] == "server" and "contextSize" in payload:
+                        _apply_context_size(server, merged.get("contextSize"))
                     values = mask_secrets(parts[2], merged)
                     if parts[2] == "resources":
                         server._governor.refresh()
@@ -1616,3 +1618,27 @@ class ApiServer:
             if _name in Handler.__dict__:
                 setattr(Handler, _name, _guarded(Handler.__dict__[_name]))
         return Handler
+
+
+def _apply_context_size(server, value) -> None:
+    """Use a new Settings > Engine context size at the next model load.
+
+    The engine reads ``config.context_size`` when it loads a model, so this
+    changes no running generation; it takes effect on the next load or switch.
+    """
+    from ..config import CONTEXT_MAX, CONTEXT_MIN
+
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError):
+        return
+    if size and not (CONTEXT_MIN <= size <= CONTEXT_MAX):
+        return
+    model = getattr(server, "_model", None)
+    for candidate in (model, getattr(model, "_fish", None), getattr(model, "inner", None)):
+        config = getattr(candidate, "config", None)
+        if config is not None and hasattr(config, "context_size"):
+            try:
+                config.context_size = size
+            except Exception:  # noqa: BLE001 - a frozen config keeps its value
+                pass

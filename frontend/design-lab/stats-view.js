@@ -230,7 +230,7 @@
       notes.push('The model supports up to ' + full(maximum) + ' tokens; this run uses ' + full(inUse) + '.');
     }
     if (saved && saved !== inUse && !engine.remote) {
-      notes.push('The saved size is not applied by the engine yet.');
+      notes.push('The saved size (' + full(saved) + ') is used when the model next loads; the engine may use less to fit this computer\'s memory or the model\'s maximum.');
     }
     if (notes.length) {
       html += '<p class="sv-note">' + esc(notes.join(' ')) +

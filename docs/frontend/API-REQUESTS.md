@@ -493,7 +493,8 @@ needs these to use it:
       `gentle|balanced|performance|custom` (`eco` accepted as alias).
       `PUT/POST /api/resources` is routed as of 2026-11-03 (api.py do_PUT/do_POST).
 
-35. **Apply Settings > Engine `contextSize` (2026-11-09, frontend)** - the
+35. **DONE 2026-11-09** (`services/config.saved_context_size`, `api._apply_context_size`): the saved size is used at startup and after a save, from the next model load; `FISH_CONTEXT_SIZE` still wins. Tests: `tests/test_context_size_setting.py`.
+    Original request: **Apply Settings > Engine `contextSize` (2026-11-09, frontend)** - the
     setting is saved (`services/server/settings.py` default 8192) but nothing
     reads it: `services/config.py` takes `context_size` from
     `FISH_CONTEXT_SIZE` (default 0, so the specs engine picks
