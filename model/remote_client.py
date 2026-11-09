@@ -27,9 +27,13 @@ from __future__ import annotations
 import urllib.parse
 
 import asyncio
+import email.utils
+import http.client
 import ipaddress
 import json
 import logging
+import os
+import random
 import re
 import threading
 import time
@@ -67,6 +71,68 @@ _KEY_PATTERN = re.compile(r"\b(?:sk|nvapi|gsk|tgp|xai|pk)[-_][A-Za-z0-9_\-]{6,}"
 
 _LOOPBACK_NAMES = {"localhost", "localhost.localdomain"}
 
+# ---------------------------------------------------------------- retry policy
+# A hosted call that fails for a passing reason (rate limit, 5xx/overloaded,
+# network drop, timeout) is retried with exponential backoff before the user
+# sees an error: 2 s, 4 s, 8 s, 16 s, 30 s (+/-20 % jitter), or exactly what the
+# provider asks for in Retry-After / retry-after-ms. A key, credit, model or
+# address problem is never retried: waiting cannot fix it. A reply that already
+# streamed text is never retried either, so nothing is shown twice.
+RETRYABLE_KINDS = frozenset({"rate_limit", "server", "unreachable", "overloaded"})
+RETRY_ATTEMPTS = 6               # total tries, including the first (IMURUN_REMOTE_RETRIES)
+RETRY_BASE_SECONDS = 2.0
+RETRY_MAX_SECONDS = 30.0         # cap for our own backoff
+RETRY_AFTER_MAX_SECONDS = 120.0  # a provider asking for longer gets the error at once
+_TRANSIENT_WORDS = ("overloaded", "rate limit", "rate_limit", "too many requests", "try again",
+                    "temporarily", "unavailable", "capacity", "timeout", "timed out")
+
+
+def retry_attempts() -> int:
+    """Total tries per call; IMURUN_REMOTE_RETRIES=1 turns retrying off."""
+    raw = os.environ.get("IMURUN_REMOTE_RETRIES", "")
+    try:
+        value = int(raw) if raw.strip() else RETRY_ATTEMPTS
+    except ValueError:
+        value = RETRY_ATTEMPTS
+    return max(1, min(value, 20))
+
+
+def parse_retry_after(headers) -> float | None:
+    """Seconds the provider asked us to wait (``retry-after-ms``, then
+    ``retry-after`` as seconds or an HTTP date), or None."""
+    if headers is None:
+        return None
+    try:
+        ms = headers.get("retry-after-ms")
+        if ms is not None:
+            return max(0.0, float(ms) / 1000.0)
+        value = headers.get("retry-after")
+        if value is None:
+            return None
+        value = str(value).strip()
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            when = email.utils.parsedate_to_datetime(value)
+            if when is None:
+                return None
+            return max(0.0, when.timestamp() - time.time())
+    except Exception:  # noqa: BLE001 - a malformed header means "no hint"
+        return None
+
+
+def retry_delay(attempt: int, retry_after: float | None = None, *, jitter: bool = True) -> float | None:
+    """Wait before the next try; ``attempt`` counts failures so far (from 1).
+
+    None means "do not retry": the provider asked for more than
+    RETRY_AFTER_MAX_SECONDS."""
+    if retry_after is not None:
+        return None if retry_after > RETRY_AFTER_MAX_SECONDS else retry_after
+    delay = min(RETRY_MAX_SECONDS, RETRY_BASE_SECONDS * (2 ** max(0, attempt - 1)))
+    if jitter:
+        delay *= random.uniform(0.8, 1.2)
+    return delay
+
 
 class RemoteError(RuntimeError):
     """A failed call to a hosted API. The message never contains the key.
@@ -77,10 +143,16 @@ class RemoteError(RuntimeError):
     ``redirect``, ``host`` (G5 refusal), ``server`` or ``other``.
     """
 
-    def __init__(self, message: str, status: int = 0, kind: str = "other") -> None:
+    def __init__(self, message: str, status: int = 0, kind: str = "other",
+                 retry_after: float | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.kind = kind
+        self.retry_after = retry_after  # seconds the provider asked to wait, if it said
+
+    @property
+    def retryable(self) -> bool:
+        return self.kind in RETRYABLE_KINDS
 
 
 def is_loopback(host: str) -> bool:
@@ -242,6 +314,11 @@ class OpenAICompatClient:
         self._response = None
         self._lock = threading.Lock()
         self._stats: dict = {}
+        # Set by services/remote/hosted.py: called with {attempt, attempts,
+        # delay, kind, status, message} before each wait, so the shell can say
+        # "retrying in 4 s". The message is already scrubbed of the key.
+        self._on_retry: Callable[[dict], None] | None = None
+        self._sleep: Callable[[float], bool] | None = None  # tests replace the cancellable wait
 
     # -------------------------------------------------------------- state
     @property
@@ -379,6 +456,7 @@ class OpenAICompatClient:
         detail = scrub(detail, token)[:200]
         code = exc.code
         lowered = detail.lower()
+        retry_after = parse_retry_after(getattr(exc, "headers", None))
         found = _CONTEXT_IN_ERROR.search(detail)
         if found:
             self.learn_context(int(found.group(1).replace(",", "")))
@@ -392,7 +470,7 @@ class OpenAICompatClient:
             return RemoteError(f"{self.label} says this account is out of credits", code, kind="credits")
         if code == 429:
             return RemoteError(f"{self.label} rate limit reached; wait a moment and try again", code,
-                               kind="rate_limit")
+                               kind="rate_limit", retry_after=retry_after)
         if path.endswith("/models") and code in (404, 405, 501):
             return RemoteError(f"{self.label} has no model list at this address", code, kind="no_models")
         model_words = ("does not exist", "not found", "decommission", "deprecated", "invalid model",
@@ -404,7 +482,10 @@ class OpenAICompatClient:
                                code, kind="model_gone")
         if code >= 500:
             return RemoteError(f"{self.label} is having trouble (HTTP {code}); try again shortly", code,
-                               kind="server")
+                               kind="server", retry_after=retry_after)
+        if code == 408:
+            return RemoteError(f"{self.label} did not answer in time", code, kind="unreachable",
+                               retry_after=retry_after)
         text = f"{self.label} returned HTTP {code}"
         return RemoteError(f"{text}: {detail}" if detail else text, code)
 
@@ -483,11 +564,51 @@ class OpenAICompatClient:
         return body
 
     def _stream_chunks(self, messages: Iterable[dict], on_text: Callable[[str], None]) -> str:
-        """Blocking: stream one completion, calling ``on_text`` per chunk.
-        Reasoning models send their thoughts separately (``reasoning_content``
-        or OpenRouter's ``reasoning``); they are wrapped in <think>...</think>
-        so the shell's existing thinking display handles them."""
+        """Blocking: stream one completion, calling ``on_text`` per chunk,
+        retrying passing failures (RETRYABLE_KINDS) with backoff as long as no
+        text has been shown yet. A cancel during the wait returns ""."""
         self._cancel.clear()
+        messages = list(messages)
+        attempts = retry_attempts()
+        failures = 0
+        while True:
+            emitted = False
+
+            def tracked(text: str) -> None:
+                nonlocal emitted
+                emitted = True
+                on_text(text)
+
+            try:
+                text = self._stream_once(messages, tracked)
+                self._stats["retries"] = failures
+                return text
+            except RemoteError as exc:
+                failures += 1
+                if emitted or self._cancel.is_set() or not exc.retryable or failures >= attempts:
+                    raise
+                delay = retry_delay(failures, exc.retry_after)
+                if delay is None:
+                    raise
+                logger.info("%s: %s (%s); retry %d/%d in %.1f s", self.label, exc.kind,
+                            exc.status or "-", failures, attempts - 1, delay)
+                if self._on_retry is not None:
+                    try:
+                        self._on_retry({"provider": self.provider, "label": self.label,
+                                        "attempt": failures, "attempts": attempts - 1,
+                                        "delay": round(delay, 1), "kind": exc.kind,
+                                        "status": exc.status, "message": str(exc)})
+                    except Exception:  # noqa: BLE001 - a status hook never breaks the turn
+                        pass
+                cancelled = self._sleep(delay) if self._sleep else self._cancel.wait(delay)
+                if cancelled or self._cancel.is_set():
+                    return ""
+
+    def _stream_once(self, messages: list[dict], on_text: Callable[[str], None]) -> str:
+        """One try. Reasoning models send their thoughts separately
+        (``reasoning_content`` or OpenRouter's ``reasoning``); they are wrapped
+        in <think>...</think> so the shell's existing thinking display handles
+        them."""
         started = time.monotonic()
         first = None
         parts: list[str] = []
@@ -516,7 +637,12 @@ class OpenAICompatClient:
                 if event.get("error"):
                     error = event["error"]
                     message = error.get("message") if isinstance(error, dict) else error
-                    raise RemoteError(f"{self.label} stopped the reply: {scrub(str(message), token)[:200]}")
+                    text = scrub(str(message), token)[:200]
+                    lowered = text.lower()
+                    # An "overloaded" / rate-limit error inside the stream is
+                    # as passing as an HTTP 429 or 529.
+                    kind = "overloaded" if any(w in lowered for w in _TRANSIENT_WORDS) else "other"
+                    raise RemoteError(f"{self.label} stopped the reply: {text}", kind=kind)
                 if event.get("usage"):
                     usage = event["usage"]
                 for choice in event.get("choices") or []:
@@ -537,6 +663,12 @@ class OpenAICompatClient:
             if thinking:
                 parts.append("</think>")
                 on_text("</think>")
+        except (OSError, http.client.HTTPException) as exc:
+            # The connection dropped mid-stream. After a cancel that is just
+            # the closed response; otherwise a passing network failure.
+            if not self._cancel.is_set():
+                raise RemoteError(f"{self.label} dropped the connection ({type(exc).__name__})",
+                                  kind="unreachable") from None
         finally:
             with self._lock:
                 self._response = None

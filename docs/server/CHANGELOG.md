@@ -2,6 +2,24 @@
 
 The API contract itself is documented in `services/server/doc/README.md`.
 
+## 2026-11-09 — hosted models retry passing failures with backoff
+
+- **Before:** one 429, 5xx, timeout or dropped connection from a hosted provider ended the
+  turn with an error.
+- **Now** (`model/remote_client.py`): a streamed completion that fails for a passing reason
+  (kinds `rate_limit`, `server` incl. 408/5xx/529, `unreachable`, and `overloaded` for an
+  error event inside the stream) is retried up to 5 more times, waiting 2, 4, 8, 16, 30 s
+  (±20 % jitter, capped at 30 s), or exactly the provider's `retry-after-ms` /
+  `Retry-After` (seconds or HTTP date). A provider asking for more than 120 s gets the
+  error at once. Never retried: `key`, `credits`, `model_gone`, `redirect`, `host`, other
+  4xx, and any reply that already streamed text (nothing is shown twice). Cancel during a
+  wait stops at once. `IMURUN_REMOTE_RETRIES=<total tries>` tunes it (`1` = off).
+- **Event** `model.retry` `{provider, label, attempt, attempts, delay, kind, status, message}`
+  before each wait (message scrubbed of the key); `stats().retries` counts the retries of
+  the last reply. The shell does not show `model.retry` yet (frontend follow-up).
+- Tests: `tests/test_remote_retry.py` (18, waits stubbed, no network); the fake provider
+  (`tests/remote_fakes.py`) can script HTTP errors, in-stream errors and partial replies.
+
 ## 2026-11-09 — hosted model providers and the model picker
 
 - **Providers** (`services/remote/providers.py`): NVIDIA, OpenRouter, DeepSeek, OpenAI, Groq,

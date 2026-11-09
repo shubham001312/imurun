@@ -319,6 +319,9 @@ def client_for(server: Any, provider: Provider) -> OpenAICompatClient | None:
     except RemoteError:
         cache.pop(provider.id, None)
         return None
+    # Each backoff wait before a retry is announced to the shell
+    # ("NVIDIA rate limit; retrying in 4 s, 1 of 5"); see model/remote_client.py.
+    client._on_retry = lambda info: _publish(server, "model.retry", info)
     cache[provider.id] = (signature, client)
     return client
 

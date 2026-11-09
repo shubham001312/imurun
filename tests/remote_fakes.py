@@ -29,6 +29,11 @@ class FakeProvider:
         self.chat_error = ""
         self.redirect_to = ""         # answer every request with a 302 here
         self.next_link = ""           # links.next on the first /models page
+        # Failures served (one per chat POST, in order) before the normal reply:
+        #   (status, {headers})            an HTTP error, e.g. (429, {"Retry-After": "0"})
+        #   ("stream_error", "message")    a 200 stream whose first event is an error
+        #   ("partial_error", "message")   one text chunk, then an error event
+        self.chat_failures: list = []
         self.requests: list[dict] = []
         fake = self
 
@@ -97,6 +102,21 @@ class FakeProvider:
                     return
                 if not self.path.endswith("/chat/completions"):
                     self._send(404, {"error": "not found"})
+                    return
+                if fake.chat_failures:
+                    failure = fake.chat_failures.pop(0)
+                    if isinstance(failure[0], int):
+                        self._send(failure[0], {"error": {"message": fake.chat_error or "error"}}, failure[1])
+                        return
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    if failure[0] == "partial_error":
+                        first = {"choices": [{"delta": {"content": "Half"}}]}
+                        self.wfile.write(f"data: {json.dumps(first)}\n\n".encode())
+                    error = {"error": {"message": failure[1]}}
+                    self.wfile.write(f"data: {json.dumps(error)}\n\n".encode())
+                    self.wfile.flush()
                     return
                 if fake.chat_status != 200:
                     self._send(fake.chat_status, {"error": {"message": fake.chat_error or "error"}})
