@@ -203,7 +203,7 @@ std::unique_ptr<Tokenizer> Tokenizer::create(const GgufFile& g, std::string* err
     if (pre == "llama3" || pre == "llama-bpe" || pre == "smollm" || pre == "tekken" ||
         pre == "phi-4" || pre == "falcon3" || pre == "exaone")
         t->digits_per_token_ = 3;
-    else if (pre == "qwen2" || pre == "deepseek-llm" || pre == "deepseek-coder" ||
+    else if (pre == "qwen2" || pre == "qwen35" || pre == "deepseek-llm" || pre == "deepseek-coder" ||
              pre == "deepseek-v3" || pre == "stablelm2" || pre == "command-r" ||
              pre == "olmo" || pre == "dbrx" || pre == "chatglm-bpe" || pre == "glm4")
         t->digits_per_token_ = 1;

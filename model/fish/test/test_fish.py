@@ -240,7 +240,12 @@ def main() -> int:
     lib.fish_get_stats(ctx, ctypes.byref(st))
     print(f"  prefill {st.prefill_seconds:.2f}s  cached {st.cached_tokens} of {st.prompt_tokens} prompt tokens")
     check(n2 > 0, "second turn generated tokens")
-    check(st.cached_tokens > 8, "prefix cache reused the first turn")
+    if info.arch.decode() == "qwen35":
+        # Hybrid DeltaNet state cannot rewind to the common prefix; the
+        # engine re-prefills instead of reusing a wrong recurrent state.
+        check(st.cached_tokens == 0, "hybrid model re-prefills (no rewind of recurrent state)")
+    else:
+        check(st.cached_tokens > 8, "prefix cache reused the first turn")
     check("Berlin" in "".join(chunks), "answers 'Berlin'")
 
     lib.fish_destroy(ctx)

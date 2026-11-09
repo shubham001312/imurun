@@ -1,5 +1,47 @@
 # Engine changelog
 
+## 2026-11-09 — Qwen3.5 (`qwen35`, hybrid Gated DeltaNet) gives correct answers
+
+**Symptom.** Qwen3.5-2B-Q4_K_M loaded and wrote fluent English, but wrong:
+"The capital of France is" → `.` then "The capital of the United States is
+Washington"; `fish_test_m2` failed the Paris check, and through the C ABI the
+chat test echoed the system prompt instead of answering. The first token after
+any multi-token prompt was almost always `.`.
+
+**Causes (four bugs, `src/model.cpp` / `src/c_api.cpp`).**
+1. *Prefill read the wrong q/gate rows.* The fused per-head `q|gate`
+   projection of the full-attention layers writes its rows packed at `2*Q`
+   floats, but they were read back at `gate_`'s row capacity `2*n_ff`. Row 0
+   is the same either way, so single-token decode looked fine; every prompt
+   token after the first got garbage q and gate. This was the main bug.
+2. *Conv history overwritten.* The DeltaNet causal-conv history wrote `x_t`
+   into row 0 before shifting rows down, so the conv saw `[x_t, x_t, x_{t-2}]`
+   instead of `[x_t, x_{t-1}, x_{t-2}]`.
+3. *Delta-rule read before decay.* The reference decays the state first,
+   `S' = exp(g)·S`, then reads `r = S'^T k`; the read used the undecayed `S`.
+4. *Prefix reuse on recurrent state.* The prefix cache rewound `kv_len` to the
+   common prefix and zeroed the DeltaNet state, so later turns ran 18 of 24
+   layers as if the first tokens never happened. Recurrent state cannot rewind:
+   hybrid models now reuse a prefix only when it equals the current length
+   (in practice: chat turns re-prefill), and `fish_set_draft` returns `-4` for
+   them because speculative verification rewinds rejected drafts.
+
+**Tests.** `test_m1.cpp` falls back to `blk.0.attn_qkv` (layer 0 of a hybrid
+model is a DeltaNet layer with no `attn_q`); `test_fish.py` expects
+`cached_tokens == 0` on qwen35 turn 2.
+
+**Result** (FISH_THREADS=4, CPU). Qwen3.5-2B: "…France is" → " Paris.",
+"One, two, … seven," → " eight, nine, ten, …"; M1 PASSED, `test_fish.py`
+PASSED (Paris, Berlin), decode 13.5 tok/s. Regression: Llama-3.2-1B, Qwen3-1.7B,
+Phi-3-mini M1 + `test_fish.py` PASSED (Llama 88 tok/s). M2 PASSED on Qwen3.5
+after fixes 2–3; the rebuild after fixes 1 and 4 could not be re-run because
+Windows Smart App Control blocked that `fish_test_m2.exe` (the DLL loads).
+pytest: 765 passed, 19 skipped.
+
+**Not yet.** DeltaNet layers run on the CPU one token at a time (no Vulkan
+path, no chunked prefill), so Qwen3.5-2B decodes at ~13.5 tok/s against 60 for
+Qwen3-1.7B; the planner still reports them as GPU-resident.
+
 ## 2026-11-09 — heap corruption in `fish_destroy`
 
 - `src/c_api.cpp::fish_destroy`: the `lock_guard` on `ctx->mu` outlived
@@ -16,6 +58,32 @@
   (`model/fish_native.py`), so the server could hit it too. → The lock is now
   released before the delete. After the fix: `test_fish.py` passes with exit 0
   (Release, 3 runs), and m1/m2/m5 pass (Release, ASan Debug, ASan Release).
+
+## 2026-11-08 — Qwen-family (no-BOS) models pass M2
+
+**Symptom.** `fish_test_m2` on `Qwen3-1.7B-Q4_K_M.gguf` failed 4 checks:
+"token not found: <|begin_of_text|>" and both BOS chat checks ("starts with BOS
+once", "exactly one BOS"). Generation itself was correct (61-86 tok/s, "Paris").
+
+**Cause.** `test/test_m2.cpp:79` hard-coded the Llama BOS string into the fixed
+prompt, and `test/test_m2.cpp:173-175` asserted every tokenizer opens chat with
+a BOS. Qwen-family tokenizers have no BOS at all (Qwen3.5 sets
+`bos_token = None`; `tokenizer.ggml.bos_token_id` is absent, BPE default -1 per
+`src/tokenizer.cpp:181`), so the model legitimately encodes chat without one.
+
+**Fix.** Made the test conditional, engine unchanged:
+- Prompt opener `<|begin_of_text|>` is only pushed when the vocabulary actually
+  contains it; expected prompt token count is 6 with BOS, 5 without
+  (`test/test_m2.cpp`).
+- Chat BOS assertions run only when `tk->bos() >= 0`; otherwise the test asserts
+  chat encoding is non-empty and stays BOS-free.
+
+**Result.** Qwen3-1.7B-Q4_K_M: M2 PASSED (0 failures), 65 tok/s decode.
+Regression: Llama-3.2-1B-Instruct-Q4_K_M still PASSED with the BOS path
+("starts with BOS once", "exactly one BOS").
+
+Prerequisite for the `qwen35` (Qwen3.5) engine work — spec in
+`Project Orange/Plan/01-QWEN35-ENGINE-SPEC.md`.
 
 ## 2026-11-03 — default GPU residency for the 8B, warm loads in seconds, ABI 4
 

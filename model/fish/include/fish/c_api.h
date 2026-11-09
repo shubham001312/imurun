@@ -167,7 +167,8 @@ FISH_API const char* fish_supported_archs(void);
  * batched forward and keeps the longest accepted prefix. Output distribution is
  * identical to decoding with the target alone; only speed changes. Returns 0,
  * -1 on a bad argument, -2 if the draft fails to load, -3 if the vocabularies
- * differ. k <= 0 picks a default (5). */
+ * differ, -4 for hybrid (DeltaNet) models, whose recurrent state cannot
+ * rewind rejected drafts. k <= 0 picks a default (5). */
 /* Threads that take part in the next generations: 1..pool size (extra
  * workers park). The pool itself is created once (FISH_THREADS). Returns 0 on
  * success, -1 without a context. fish_stats.n_threads reports the active count. */

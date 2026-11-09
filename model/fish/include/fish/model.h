@@ -44,7 +44,7 @@ namespace fish {
 bool probe_model(const std::string& path, ModelProfile* out, std::string* err);
 
 // Architectures FISH can run. Unknown names fail at load with a clear message.
-enum class Arch { Llama, Qwen2, Qwen3, Phi3, Gemma2 };
+enum class Arch { Llama, Qwen2, Qwen3, Qwen35, Phi3, Gemma2 };
 const char* arch_name(Arch a);
 bool arch_supported(const std::string& gguf_arch);
 
@@ -86,9 +86,30 @@ struct LlamaConfig {
     int sliding_window = 0;        // Gemma2: 4096 on even layers
     bool qk_norm = false;          // Qwen3
 
+    // Qwen3.5 hybrid: DeltaNet linear-attention layers interleaved with full
+    // attention. full_attention_interval = N means layer i attends fully iff
+    // (i+1) % N == 0; every other layer runs the Gulf DeltaNet mixer instead
+    // (causal depthwise conv -> delta-rule recurrence over a per-head state).
+    int full_attn_interval = 0;    // 0 = plain transformer
+    int ssm_state = 0;             // delta-rule state/head dim (2B: 128)
+    int ssm_heads = 0;             // delta-rule heads/groups (2B: 16)
+    int ssm_conv_kernel = 0;       // depthwise conv taps (2B: 4)
+    int ssm_inner = 0;             // q|k|v branch width (2B: 2048)
+
     int kv_dim() const { return n_head_kv * head_dim; }
     int q_dim() const { return n_head * head_dim; }
     bool is_moe() const { return n_experts > 0; }
+    bool delta_layer(int i) const {
+        return full_attn_interval > 0 && (((i + 1) % full_attn_interval) != 0);
+    }
+    // Hybrid archs keep KV slots for the full-attention layers only; a delta
+    // layer i owns slot i / full_attn_interval.
+    int kv_slots() const {
+        return full_attn_interval > 0 ? (n_layers + full_attn_interval - 1) / full_attn_interval
+                                      : n_layers;
+    }
+    int kv_slot(int i) const { return full_attn_interval > 0 ? i / full_attn_interval : i; }
+    int conv_dim() const { return ssm_inner > 0 ? 3 * ssm_inner : 0; }
 };
 
 struct LayerTensors {
@@ -102,6 +123,12 @@ struct LayerTensors {
     const TensorInfo* wg = nullptr;
     const TensorInfo* wu = nullptr;        // Phi-3: fused gate|up (2 * n_ff rows)
     const TensorInfo* wd = nullptr;
+
+    // Qwen3.5 DeltaNet layers (q|k|v fused pre-conv lives in wqkv)
+    const TensorInfo* wgate = nullptr;     // attn_gate: x -> output gate z (n_embd)
+    const TensorInfo* ssm_alpha = nullptr; // x -> a_t raw per DeltaNet head
+    const TensorInfo* ssm_beta = nullptr;  // x -> beta raw per DeltaNet head
+    const TensorInfo* ssm_out = nullptr;   // o_proj for the DeltaNet branch
 
     // MoE (3-D tensors: [n_in][n_out][n_expert])
     const TensorInfo* gate_inp = nullptr;
@@ -121,6 +148,12 @@ struct LayerTensors {
     std::vector<float> q_norm_w, k_norm_w; // Qwen3
     std::vector<float> bias_q, bias_k, bias_v, bias_o;
     std::vector<float> bias_qkv;           // Phi-3 variants with a fused bias
+
+    // Qwen3.5 DeltaNet small vectors (dequantised; fp32 state lives in the model)
+    std::vector<float> conv_w;             // [conv_dim][kernel], channel-major
+    std::vector<float> ssm_a;              // [heads]: negative decay per head
+    std::vector<float> dt_bias;            // [heads]
+    std::vector<float> ssm_norm_w;         // [state]: gated-RMSNorm weight, raw (no +1)
 
     // Byte range of this layer's weights in the file, for prefetch.
     uint64_t file_begin = 0, file_end = 0;
@@ -168,6 +201,9 @@ public:
 
     void reset_kv();
     int  kv_len() const { return kv_len_; }
+    // Hybrid (DeltaNet) models carry a recurrent state that cannot be rewound:
+    // the only reusable prefix is the exact current length.
+    bool recurrent() const { return !conv_hist_.empty(); }
     void set_kv_len(int n);
 
     uint64_t weights_bytes() const { return weights_bytes_; }
@@ -207,6 +243,10 @@ private:
     bool bind_layer(int i, std::string* err);
     bool apply_adapter(std::string* err);
     bool load_vector(const TensorInfo* t, std::vector<float>& out);
+    // Qwen3.5 DeltaNet mixer for tokens [pos0, pos0+n_tok): causal conv over the
+    // fused q|k|v stream, per-head delta-rule recurrence, gated RMSNorm + gate,
+    // then the output projection (everything fp32; no int8 for the recurrence).
+    bool delta_mixer(const LayerTensors& L, int li, int pos0, int n_tok);
     void prefetch_layer(int li);
     void place_layers();
     void evict_layer(int li);
@@ -235,9 +275,17 @@ private:
     std::vector<float> rope_freqs_;
     RopeCache rope_;
 
-    // KV cache: [n_layers][n_ctx][kv_dim]
+    // KV cache: [n_layers][n_ctx][kv_dim] (hybrid archs: full-attn slots only)
     std::vector<float> k_cache_;
     std::vector<float> v_cache_;
+
+    // Qwen3.5 recurring state, fp32, persists across decode calls:
+    // conv history of the last (kernel-1) conv inputs per delta layer, and the
+    // per-head delta-rule state S. Indexed by delta-layer slot (rng order).
+    std::vector<int> delta_slot_;      // layer index -> delta slot (or -1)
+    std::vector<float> conv_hist_;     // [n_delta][kernel-1][conv_dim]
+    std::vector<float> raw_;           // [conv_dim] pre-conv q|k|v of the current token
+    std::vector<float> ssm_S_;         // [n_delta][heads][state][state]
 
     // Work buffers, sized for the largest batch FISH will prefill at once.
     int max_batch_ = 256;

@@ -115,6 +115,7 @@ struct ArchEntry { const char* name; Arch kind; };
 const ArchEntry kArchs[] = {
     {"llama", Arch::Llama},   {"qwen2", Arch::Qwen2}, {"qwen2moe", Arch::Qwen2},
     {"qwen3", Arch::Qwen3},   {"qwen3moe", Arch::Qwen3},
+    {"qwen35", Arch::Qwen35},
     {"phi3", Arch::Phi3},     {"gemma2", Arch::Gemma2},
 };
 
@@ -130,6 +131,7 @@ const char* arch_name(Arch a) {
         case Arch::Llama:  return "llama";
         case Arch::Qwen2:  return "qwen2";
         case Arch::Qwen3:  return "qwen3";
+        case Arch::Qwen35: return "qwen35";
         case Arch::Phi3:   return "phi3";
         case Arch::Gemma2: return "gemma2";
     }
@@ -156,6 +158,7 @@ LlamaModel::~LlamaModel() {
         if (gpu_span_) gpu->span_release();
         for (const LayerTensors& L : layers_) {
             for (const TensorInfo* t : {L.wq, L.wk, L.wv, L.wo, L.wqkv, L.wg, L.wu, L.wd,
+                                        L.wgate, L.ssm_alpha, L.ssm_beta, L.ssm_out,
                                         L.shexp_gate, L.shexp_up, L.shexp_down}) {
                 if (t && gpu->resident(t)) gpu->release(t);
             }
@@ -242,7 +245,7 @@ bool LlamaModel::bind_layer(int i, std::string* err) {
     };
 
     L.attn_norm = need("attn_norm.weight");
-    L.ffn_norm  = need("ffn_norm.weight");
+    L.ffn_norm  = need("ffn_norm.weight");   // absent by design on qwen35 (post_attention_norm feeds the FFN)
     L.wq = need("attn_q.weight");
     L.wk = need("attn_k.weight");
     L.wv = need("attn_v.weight");
@@ -253,14 +256,33 @@ bool LlamaModel::bind_layer(int i, std::string* err) {
     L.wd = need("ffn_down.weight");
 
     if (!L.attn_norm) return fail("missing tensor " + p + "attn_norm.weight");
-    if (!L.ffn_norm)  return fail("missing tensor " + p + "ffn_norm.weight");
-    if (!L.wo)        return fail("missing tensor " + p + "attn_output.weight");
-    if (!L.wqkv && !(L.wq && L.wk && L.wv))
-        return fail("missing attention projections in layer " + std::to_string(i));
-    if (L.wqkv) {
-        const uint64_t want = static_cast<uint64_t>(cfg_.q_dim() + 2 * cfg_.kv_dim());
-        if (L.wqkv->ne.size() < 2 || L.wqkv->ne[1] != want)
-            return fail("fused attn_qkv has an unexpected shape in layer " + std::to_string(i));
+    if (!L.ffn_norm && cfg_.kind != Arch::Qwen35)
+        return fail("missing tensor " + p + "ffn_norm.weight");
+
+    if (cfg_.delta_layer(i)) {
+        // Qwen3.5 DeltaNet layer: fused q|k|v projected pre-conv, a z output
+        // gate, and the ssm tensors. No o_proj / per-head norms here.
+        if (!L.wqkv) return fail("missing tensor " + p + "attn_qkv.weight (DeltaNet layer)");
+        L.wgate = need("attn_gate.weight");
+        L.ssm_alpha = need("ssm_alpha.weight");
+        L.ssm_beta = need("ssm_beta.weight");
+        L.ssm_out = need("ssm_out.weight");
+        if (!L.wgate || !L.ssm_alpha || !L.ssm_beta || !L.ssm_out)
+            return fail("missing DeltaNet tensors in layer " + std::to_string(i) +
+                        " (attn_gate / ssm_alpha / ssm_beta / ssm_out)");
+        if (L.wqkv->ne.size() < 2 ||
+            L.wqkv->ne[1] != static_cast<uint64_t>(3 * cfg_.ssm_inner))
+            return fail("fused attn_qkv has an unexpected shape in DeltaNet layer " +
+                        std::to_string(i));
+    } else {
+        if (!L.wo) return fail("missing tensor " + p + "attn_output.weight");
+        if (!L.wqkv && !(L.wq && L.wk && L.wv))
+            return fail("missing attention projections in layer " + std::to_string(i));
+        if (L.wqkv) {
+            const uint64_t want = static_cast<uint64_t>(cfg_.q_dim() + 2 * cfg_.kv_dim());
+            if (L.wqkv->ne.size() < 2 || L.wqkv->ne[1] != want)
+                return fail("fused attn_qkv has an unexpected shape in layer " + std::to_string(i));
+        }
     }
 
     if (cfg_.is_moe()) {
@@ -294,7 +316,7 @@ bool LlamaModel::bind_layer(int i, std::string* err) {
     }
 
     if (!norm_vec(L.attn_norm, L.attn_norm_w, "attn_norm")) return false;
-    if (!norm_vec(L.ffn_norm, L.ffn_norm_w, "ffn_norm")) return false;
+    if (L.ffn_norm && !norm_vec(L.ffn_norm, L.ffn_norm_w, "ffn_norm")) return false;
 
     if (cfg_.kind == Arch::Gemma2) {
         const TensorInfo* pa = need("post_attention_norm.weight");
@@ -302,6 +324,13 @@ bool LlamaModel::bind_layer(int i, std::string* err) {
         if (!pa || !pf) return fail("gemma2 layer " + std::to_string(i) + " lacks post norms");
         if (!norm_vec(pa, L.post_attn_norm_w, "post_attention_norm")) return false;
         if (!norm_vec(pf, L.post_ffn_norm_w, "post_ffw_norm")) return false;
+    }
+    if (cfg_.kind == Arch::Qwen35) {
+        // post_attention_norm is stored folded (1+w); it guards the FFN path
+        // in front of the MLP. Used directly, no +1 — same for every norm here.
+        const TensorInfo* pa = need("post_attention_norm.weight");
+        if (!pa) return fail("qwen35 layer " + std::to_string(i) + " lacks post_attention_norm");
+        if (!norm_vec(pa, L.post_attn_norm_w, "post_attention_norm")) return false;
     }
     if (const TensorInfo* qn = need("attn_q_norm.weight")) {
         const TensorInfo* kn = need("attn_k_norm.weight");
@@ -317,6 +346,32 @@ bool LlamaModel::bind_layer(int i, std::string* err) {
     if (const TensorInfo* b = need("attn_v.bias")) load_vector(b, L.bias_v);
     if (const TensorInfo* b = need("attn_output.bias")) load_vector(b, L.bias_o);
     if (const TensorInfo* b = need("attn_qkv.bias")) load_vector(b, L.bias_qkv);
+
+    // Qwen3.5 DeltaNet small vectors. conv_w is f32 [conv_dim][kernel],
+    // channel-major (ne[0] = kernel runs fastest).
+    if (cfg_.delta_layer(i)) {
+        const TensorInfo* cv = need("ssm_conv1d.weight");
+        if (!cv) return fail("missing tensor " + p + "ssm_conv1d.weight (DeltaNet)");
+        if (!load_vector(cv, L.conv_w)) return fail("bad ssm_conv1d in layer " + std::to_string(i));
+        const TensorInfo* av = need("ssm_a");
+        if (!av || !load_vector(av, L.ssm_a))
+            return fail("bad ssm_a in layer " + std::to_string(i));
+        const TensorInfo* db = need("ssm_dt.bias");
+        if (!db || !load_vector(db, L.dt_bias))
+            return fail("bad ssm_dt.bias in layer " + std::to_string(i));
+        const TensorInfo* sn = need("ssm_norm.weight");
+        if (!sn || !load_vector(sn, L.ssm_norm_w))
+            return fail("bad ssm_norm in layer " + std::to_string(i));
+        if (L.ssm_a.size() != static_cast<size_t>(cfg_.ssm_heads) ||
+            L.dt_bias.size() != static_cast<size_t>(cfg_.ssm_heads) ||
+            L.ssm_norm_w.size() != static_cast<size_t>(cfg_.ssm_state) ||
+            L.conv_w.size() != static_cast<size_t>(cfg_.conv_dim()) *
+                               static_cast<size_t>(cfg_.ssm_conv_kernel))
+            return fail("DeltaNet vector shapes disagree with metadata in layer " +
+                        std::to_string(i));
+        // ssm_a arrives already negative (-exp(A_log)); it is used as a plain
+        // multiplier on the softplus decay, never exponentiated again.
+    }
 
     // Byte range for prefetch.
     L.file_begin = std::numeric_limits<uint64_t>::max();
@@ -359,7 +414,7 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
     c.arch = g.str("general.architecture", "llama");
     if (!arch_lookup(c.arch, &c.kind))
         return fail("unsupported architecture: " + c.arch +
-                    " (FISH runs llama, qwen2, qwen3, phi3, gemma2 and their MoE variants)");
+                    " (FISH runs llama, qwen2, qwen3, qwen35, phi3, gemma2 and their MoE variants)");
     auto key = [&](const char* k) { return c.arch + "." + k; };
 
     for (const auto& t : g.tensors()) {
@@ -406,12 +461,30 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
     const bool default_norm = !(c.kind == Arch::Qwen2 && c.arch == "qwen2moe");
     c.expert_weights_norm = g.flag(key("expert_weights_norm"), default_norm);
 
+    // ---- Qwen3.5 hybrid (Gated DeltaNet + gated full attention)
+    // Full attention on layers with (i+1) % interval == 0; DeltaNet elsewhere.
+    // Norm weights in the file are already folded (converter stored 1+w) and
+    // ssm_norm is raw accordingly; nothing gets a +1 here either way.
+    if (c.kind == Arch::Qwen35) {
+        c.full_attn_interval = static_cast<int>(g.u64(key("full_attention_interval"), 4));
+        c.ssm_state = static_cast<int>(g.u64(key("ssm.state_size"), 128));
+        c.ssm_heads = static_cast<int>(g.u64(key("ssm.group_count"), 16));
+        c.ssm_conv_kernel = static_cast<int>(g.u64(key("ssm.conv_kernel"), 4));
+        c.ssm_inner = static_cast<int>(g.u64(key("ssm.inner_size"), c.n_embd));
+        if (c.full_attn_interval <= 0 || c.ssm_state <= 0 || c.ssm_heads <= 0 ||
+            c.ssm_conv_kernel <= 1 || c.ssm_inner <= 0 || c.ssm_inner % c.ssm_heads != 0)
+            return fail("qwen35: bad ssm.* / full_attention_interval metadata");
+        // v1 runs the whole graph on the CPU: the mixer recurrence and the
+        // fused per-head q|gate path have no device-code path yet.
+        m->opts_.gpu_layers = 0;
+    }
+
     // ---- architecture knobs
     c.rope.head_dim = c.head_dim;
     c.rope.rot_dim = static_cast<int>(g.u64(key("rope.dimension_count"), c.head_dim));
     c.rope.freq_base = c.freq_base;
     c.rope.neox = (c.kind == Arch::Qwen2 || c.kind == Arch::Qwen3 ||
-                   c.kind == Arch::Phi3 || c.kind == Arch::Gemma2);
+                   c.kind == Arch::Qwen35 || c.kind == Arch::Phi3 || c.kind == Arch::Gemma2);
     if (c.kind == Arch::Gemma2) {
         c.norm_plus_one = true;
         c.gelu = true;
@@ -474,9 +547,25 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
         if (!m->bind_layer(i, err)) return nullptr;
     }
 
+    // ---- DeltaNet bookkeeping: slot map + fp32 recurring state
+    if (c.full_attn_interval > 0) {
+        m->delta_slot_.assign(static_cast<size_t>(c.n_layers), -1);
+        int nd = 0;
+        for (int i = 0; i < c.n_layers; ++i)
+            if (c.delta_layer(i)) m->delta_slot_[static_cast<size_t>(i)] = nd++;
+        try {
+            m->conv_hist_.assign(static_cast<size_t>(nd) * (c.ssm_conv_kernel - 1) *
+                                 static_cast<size_t>(c.conv_dim()), 0.0f);
+            m->ssm_S_.assign(static_cast<size_t>(nd) * c.ssm_heads * c.ssm_state *
+                             static_cast<size_t>(c.ssm_state), 0.0f);
+        } catch (const std::bad_alloc&) {
+            return fail("not enough memory for the DeltaNet state");
+        }
+    }
+
     // ---- KV cache and work buffers
     const int E = c.n_embd, Q = c.q_dim(), KV = c.kv_dim();
-    const uint64_t kv_elems = static_cast<uint64_t>(c.n_layers) * c.n_ctx * KV;
+    const uint64_t kv_elems = static_cast<uint64_t>(c.kv_slots()) * c.n_ctx * KV;
     m->kv_bytes_ = kv_elems * sizeof(float) * 2;
     if (m->kv_bytes_ > (16ull << 30)) return fail("KV cache would exceed 16 GB");
     // The CPU KV cache is allocated after placement (alloc_cpu_kv): layers
@@ -488,7 +577,9 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
         const int ff = std::max(c.n_ff, std::max(c.n_ff_exp, c.n_ff_shexp));
         m->x_.assign(static_cast<size_t>(mb) * E, 0.0f);
         m->xb_.assign(static_cast<size_t>(mb) * E, 0.0f);
-        m->qkv_.assign(static_cast<size_t>(mb) * (Q + 2 * KV), 0.0f);
+        m->qkv_.assign(static_cast<size_t>(mb) *
+                       std::max<size_t>(static_cast<size_t>(Q + 2 * KV),
+                                        c.ssm_inner > 0 ? 3 * static_cast<size_t>(c.ssm_inner) : 0), 0.0f);
         m->q_.assign(static_cast<size_t>(mb) * Q, 0.0f);
         m->k_.assign(static_cast<size_t>(mb) * KV, 0.0f);
         m->v_.assign(static_cast<size_t>(mb) * KV, 0.0f);
@@ -557,8 +648,9 @@ const TensorInfo* LlamaModel::weight(const std::string& name) const {
     if (embd_ && embd_->name == name) return embd_;
     if (out_w_ && out_w_->name == name) return out_w_;
     for (const LayerTensors& L : layers_)
-        for (const TensorInfo* t : {L.wq, L.wk, L.wv, L.wo, L.wqkv, L.wg, L.wu, L.wd, L.gate_inp,
-                                    L.gate_exps, L.up_exps, L.down_exps,
+        for (const TensorInfo* t : {L.wq, L.wk, L.wv, L.wo, L.wqkv, L.wg, L.wu, L.wd,
+                                    L.wgate, L.ssm_alpha, L.ssm_beta, L.ssm_out,
+                                    L.gate_inp, L.gate_exps, L.up_exps, L.down_exps,
                                     L.shexp_gate, L.shexp_up, L.shexp_down, L.shexp_gate_inp})
             if (t && t->name == name) return t;
     return nullptr;
@@ -665,9 +757,18 @@ bool LlamaModel::apply_adapter(std::string* err) {
 void LlamaModel::reset_kv() {
     kv_len_ = 0;
     if (gpu_span_) if (ComputeBackend* gpu = gpu_backend()) gpu->span_kv_truncate(0);
+    // DeltaNet state is rebuilt exactly like the KV cache: from zero.
+    if (!conv_hist_.empty()) std::fill(conv_hist_.begin(), conv_hist_.end(), 0.0f);
+    if (!ssm_S_.empty()) std::fill(ssm_S_.begin(), ssm_S_.end(), 0.0f);
 }
 
 void LlamaModel::set_kv_len(int n) {
+    if (n != kv_len_ && !conv_hist_.empty()) {
+        // A rewind invalidates the recurring state; generation re-prefills
+        // from zero like any context reset.
+        std::fill(conv_hist_.begin(), conv_hist_.end(), 0.0f);
+        std::fill(ssm_S_.begin(), ssm_S_.end(), 0.0f);
+    }
     kv_len_ = n;
     if (gpu_span_) if (ComputeBackend* gpu = gpu_backend()) gpu->span_kv_truncate(n);
 }
@@ -747,8 +848,7 @@ void LlamaModel::prepare_span() {
 // would only waste RAM (512 MB on an 8B at 4096). The CPU cache covers the
 // CPU layers only: they are the prefix [0, n_layers - gpu_layers).
 bool LlamaModel::alloc_cpu_kv() {
-    const int cpu_layers = gpu_span_ ? cfg_.n_layers - gpu_layers_ : cfg_.n_layers;
-    const size_t n = static_cast<size_t>(cpu_layers) * cfg_.n_ctx * cfg_.kv_dim();
+    const size_t n = static_cast<size_t>(cfg_.kv_slots()) * cfg_.n_ctx * cfg_.kv_dim();
     try {
         k_cache_.assign(n, 0.0f);
         v_cache_.assign(n, 0.0f);
@@ -788,7 +888,7 @@ bool LlamaModel::calibrate(Importance* out, int max_tokens, std::string* err) {
     const int len = static_cast<int>(ids.size());
     cfg_.n_ctx = len;
     try {
-        const size_t n = static_cast<size_t>(cfg_.n_layers) * len * cfg_.kv_dim();
+        const size_t n = static_cast<size_t>(cfg_.kv_slots()) * len * cfg_.kv_dim();
         k_cache_.assign(n, 0.0f);
         v_cache_.assign(n, 0.0f);
     } catch (const std::bad_alloc&) {
@@ -1552,7 +1652,13 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
             rmsnorm(row_ptr(xb_, t, E), row_ptr(x_, t, E), L.attn_norm_w.data(), E, cfg_.eps);
         xq_.quantize(xb_.data(), n_tok, E);
 
-        if (L.wqkv) {
+        if (cfg_.delta_layer(li)) {
+            // Qwen3.5 DeltaNet: no self-attention here, the mixer replaces the
+            // whole attention sublayer (rope, KV, softmax) for these layers.
+            // Everything from the projections to the residual add below is
+            // full-attention-only; the FFN block still runs for every layer.
+            if (!delta_mixer(L, li, pos0, n_tok)) return false;
+        } else if (L.wqkv) {
             const int W = Q + 2 * KV;
             matmul_tensor(L.wqkv, xb_.data(), &xq_, n_tok, E, W, qkv_.data());
             add_bias(qkv_.data(), n_tok, W, L.bias_qkv);
@@ -1562,6 +1668,32 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
                 std::memcpy(row_ptr(k_, t, KV), r + Q, sizeof(float) * KV);
                 std::memcpy(row_ptr(v_, t, KV), r + Q + KV, sizeof(float) * KV);
             }
+        } else if (L.wq && L.wq->ne[1] == 2 * static_cast<uint64_t>(Q)) {
+            // Qwen3.5 full attention: wq is fused per-head [q(256) | gate(256)]
+            // x n_head. The gate is applied to the attention output right
+            // before o_proj; park it in up_ rows (the FFN re-ensures them).
+            matmul_tensor(L.wq, xb_.data(), &xq_, n_tok, E, 2 * Q, gate_.data());
+            for (int t = 0; t < n_tok; ++t) {
+                // matmul_tensor packs output rows at 2*Q, not at gate_'s
+                // 2*n_ff row capacity (reading at 2*n_ff broke prefill t>0)
+                const float* r = gate_.data() + static_cast<size_t>(t) * 2 * Q;
+                float* qr = row_ptr(q_, t, Q);
+                float* gr = row_ptr(up_, t, cfg_.n_ff);
+                if (std::getenv("FISH_QWEN35_GATE_HALVES")) {
+                    std::memcpy(qr, r, sizeof(float) * Q);
+                    for (int i = 0; i < Q; ++i) gr[i] = r[Q + i];
+                } else {
+                    for (int h = 0; h < H; ++h)
+                        for (int d = 0; d < D; ++d) {
+                            qr[h * D + d] = r[h * 2 * D + d];
+                            gr[h * D + d] = r[h * 2 * D + D + d];
+                        }
+                }
+            }
+            matmul_tensor(L.wk, xb_.data(), &xq_, n_tok, E, KV, k_.data());
+            matmul_tensor(L.wv, xb_.data(), &xq_, n_tok, E, KV, v_.data());
+            add_bias(k_.data(), n_tok, KV, L.bias_k);
+            add_bias(v_.data(), n_tok, KV, L.bias_v);
         } else {
             const TensorInfo* qkv_t[3] = {L.wq, L.wk, L.wv};
             const int qkv_n[3] = {Q, KV, KV};
@@ -1572,6 +1704,9 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
             add_bias(v_.data(), n_tok, KV, L.bias_v);
         }
 
+        // The rest of the attention path is full-attention-only; skip it on
+        // DeltaNet layers (they have no q/k/v norms, no KV, no o_proj).
+        if (!cfg_.delta_layer(li)) {
         if (!L.q_norm_w.empty()) {
             for (int t = 0; t < n_tok; ++t) {
                 float* qr = row_ptr(q_, t, Q);
@@ -1583,19 +1718,32 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
 
         for (int t = 0; t < n_tok; ++t) {
             const int pos = pos0 + t;
+            const size_t kv_off = static_cast<size_t>(cfg_.kv_slot(li)) * cfg_.n_ctx * KV;
             rope_apply(row_ptr(q_, t, Q), row_ptr(k_, t, KV), H, HKV, pos, rope_);
-            float* kc = k_cache_.data() + (static_cast<size_t>(li) * cfg_.n_ctx + pos) * KV;
-            float* vc = v_cache_.data() + (static_cast<size_t>(li) * cfg_.n_ctx + pos) * KV;
+            float* kc = k_cache_.data() + kv_off + static_cast<size_t>(pos) * KV;
+            float* vc = v_cache_.data() + kv_off + static_cast<size_t>(pos) * KV;
             std::memcpy(kc, row_ptr(k_, t, KV), sizeof(float) * KV);
             std::memcpy(vc, row_ptr(v_, t, KV), sizeof(float) * KV);
         }
 
-        const float* kc_layer = k_cache_.data() + static_cast<size_t>(li) * cfg_.n_ctx * KV;
-        const float* vc_layer = v_cache_.data() + static_cast<size_t>(li) * cfg_.n_ctx * KV;
+        const float* kc_layer = k_cache_.data() +
+            static_cast<size_t>(cfg_.kv_slot(li)) * cfg_.n_ctx * KV;
+        const float* vc_layer = v_cache_.data() +
+            static_cast<size_t>(cfg_.kv_slot(li)) * cfg_.n_ctx * KV;
         const int window = (cfg_.sliding_window > 0 && (li % 2) == 0) ? cfg_.sliding_window : 0;
         attention_batch(q_.data(), kc_layer, vc_layer, cfg_.n_ctx, H, HKV, D, pos0, n_tok,
                         attn_.data(), attn_scale, cfg_.attn_softcap, window);
 
+        // Qwen3.5 applies its per-head sigmoid gate to the attention output
+        // (dims parked in up_ by the fused q|gate path), then quantises.
+        if (cfg_.kind == Arch::Qwen35) {
+            for (int t = 0; t < n_tok; ++t) {
+                float* a = row_ptr(attn_, t, Q);
+                const float* gr = row_ptr(up_, t, cfg_.n_ff);
+                for (int i = 0; i < Q; ++i)
+                    a[i] *= 1.0f / (1.0f + std::exp(-gr[i]));
+            }
+        }
         const ActBatch* aq = nullptr;
         if ((has_q8_kernel(L.wo->type) || has_q8k_kernel(L.wo->type)) && Q % kQ8ActBlock == 0) {
             attnq_.quantize(attn_.data(), n_tok, Q);
@@ -1603,7 +1751,7 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
         }
         matmul_tensor(L.wo, attn_.data(), aq, n_tok, Q, E, proj_.data());
         add_bias(proj_.data(), n_tok, E, L.bias_o);
-        if (!L.post_attn_norm_w.empty())
+        if (cfg_.kind == Arch::Gemma2 && !L.post_attn_norm_w.empty())
             for (int t = 0; t < n_tok; ++t)
                 rmsnorm(row_ptr(proj_, t, E), row_ptr(proj_, t, E), L.post_attn_norm_w.data(), E, cfg_.eps);
         for (int t = 0; t < n_tok; ++t) {
@@ -1611,10 +1759,15 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
             const float* pr = row_ptr(proj_, t, E);
             for (int i = 0; i < E; ++i) xr[i] += pr[i];
         }
+        } // end full-attention-only path
 
         // ---- feed-forward block
+        // Qwen3.5 has no ffn_norm: post_attention_norm guards the FFN path
+        // (it runs on the attention output + residual, before the MLP).
+        const float* fnw = (cfg_.kind == Arch::Qwen35)
+                               ? L.post_attn_norm_w.data() : L.ffn_norm_w.data();
         for (int t = 0; t < n_tok; ++t)
-            rmsnorm(row_ptr(xb_, t, E), row_ptr(x_, t, E), L.ffn_norm_w.data(), E, cfg_.eps);
+            rmsnorm(row_ptr(xb_, t, E), row_ptr(x_, t, E), fnw, E, cfg_.eps);
         xq_.quantize(xb_.data(), n_tok, E);
         if (cfg_.is_moe()) moe_ffn(L, n_tok); else dense_ffn(L, n_tok);
         if (!L.post_ffn_norm_w.empty())
@@ -1650,6 +1803,139 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
         std::memcpy(logits_.data(), out + static_cast<size_t>(n_tok - 1) * cfg_.vocab, sizeof(float) * cfg_.vocab);
 
     kv_len_ = pos0 + n_tok;
+    return true;
+}
+
+// ------------------------------------------------------------- DeltaNet mixer
+//
+// Qwen3.5 linear-attention layer (Gated DeltaNet, arXiv:2412.06464), one token
+// at a time, all state in fp32:
+//
+//   x -> [q|k|v] (attn_qkv), depthwise causal conv (ssm_conv1d) + SiLU,
+//   per-head delta-rule recurrence S = decay*S + k delta^T with an input
+//   dependent decay, RMSNorm(o, ssm_norm) * silu(z) with z = attn_gate,
+//   then the ssm_out projection. Returns false only on internal errors.
+bool LlamaModel::delta_mixer(const LayerTensors& L, int li, int pos0, int n_tok) {
+    (void)pos0;
+    const int E = cfg_.n_embd;
+    const int G = cfg_.ssm_inner;
+    const int CD = cfg_.conv_dim();
+    const int K = cfg_.ssm_conv_kernel;
+    const int NS = cfg_.ssm_state;
+    const int NH = cfg_.ssm_heads;
+    if (NH > 64 || NS > 128 || K > 4) return false;
+    if (cfg_.conv_dim() != 3 * E) return false;  // v1: q|k|v branches are n_embd wide
+    const size_t slot = static_cast<size_t>(delta_slot_[static_cast<size_t>(li)]);
+    if (slot == static_cast<size_t>(-1)) return false;
+
+    // History row j holds the conv input of pos+j, so while computing token t:
+    // hist[0] = x[t-1], hist[1] = x[t-2], hist[2] = x[t-3].
+    float* hist = conv_hist_.data() + slot * (static_cast<size_t>(K) - 1) * static_cast<size_t>(CD);
+    float* S0 = ssm_S_.data() + slot * static_cast<size_t>(NH) * NS * NS;
+
+    std::vector<float> knv(static_cast<size_t>(NS));
+    for (int t = 0; t < n_tok; ++t) {
+        const float* xr = row_ptr(xb_, t, E);
+
+        // 1. x -> [q|k|v] into the (private, row-wide) conv stream
+        xq_.quantize(xr, 1, E);
+        matmul_tensor(L.wqkv, xr, &xq_, 1, E, CD, qkv_.data());
+        float* cur = qkv_.data();   // [CD]
+
+        // 2. causal depthwise conv (kernel taps, newest tap last) + SiLU, then
+        //    rotate the history: hist = [x_t, x[t-1], x[t-2]]
+        //    Shift the history BEFORE writing x_t into row 0: writing first and
+        //    shifting after copied x_t into row 1 too, so the conv saw
+        //    [x_t, x_t, x[t-2]] instead of [x_t, x[t-1], x[t-2]] from token 2 on.
+        raw_.assign(cur, cur + CD);
+        for (int c = 0; c < CD; ++c) {
+            const float* cw = L.conv_w.data() + static_cast<size_t>(c) * static_cast<size_t>(K);
+            float acc = cw[K - 1] * cur[c];
+            acc += cw[K - 2] * hist[0 * CD + c];
+            acc += cw[K - 3] * hist[1 * CD + c];
+            acc += cw[K - 4] * hist[2 * CD + c];
+            acc /= (1.0f + std::exp(-acc));   // SiLU
+            cur[c] = acc;
+        }
+        std::memmove(hist + 2 * static_cast<size_t>(CD), hist + 1 * static_cast<size_t>(CD),
+                     sizeof(float) * static_cast<size_t>(CD));
+        std::memmove(hist + 1 * static_cast<size_t>(CD), hist,
+                     sizeof(float) * static_cast<size_t>(CD));
+        std::memcpy(hist, raw_.data(), sizeof(float) * static_cast<size_t>(CD));
+
+        const float* k = cur + G;
+        const float* v = cur + 2 * G;
+
+        // 3. input-dependent decays and write rates from the block input
+        float ab[128];
+        matmul_tensor(L.ssm_alpha, xr, &xq_, 1, E, NH, ab);
+        matmul_tensor(L.ssm_beta, xr, &xq_, 1, E, NH, ab + 64);
+
+        // 4. delta-rule recurrence per head (fp32 scratch in up_[t][0..G))
+        float* o = row_ptr(up_, t, cfg_.n_ff);
+        const float inv = 1.0f / std::sqrt(static_cast<float>(NS));
+        for (int h = 0; h < NH; ++h) {
+            const float* qh = cur + static_cast<size_t>(h) * NS;
+            const float* kh = k + static_cast<size_t>(h) * NS;
+            const float* vh = v + static_cast<size_t>(h) * NS;
+            float* S = S0 + static_cast<size_t>(h) * NS * NS;
+            float kn = 0.0f, qn = 0.0f;
+            for (int d = 0; d < NS; ++d) {
+                kn += kh[d] * kh[d];
+                qn += qh[d] * qh[d];
+            }
+            kn = 1.0f / std::sqrt(kn + 1e-6f);
+            qn = 1.0f / std::sqrt(qn + 1e-6f) * inv;
+            for (int d = 0; d < NS; ++d) {
+                knv[static_cast<size_t>(d)] = kh[d] * kn;
+            }
+            // scaled q on the fly
+            const float a_raw = ab[static_cast<size_t>(h)] + L.dt_bias[static_cast<size_t>(h)];
+            const float sp = a_raw > 30.0f ? a_raw : std::log1p(std::exp(a_raw));
+            const float gdec = L.ssm_a[static_cast<size_t>(h)] * sp;
+            const float decay = std::exp(gdec);
+            const float beta = 1.0f / (1.0f + std::exp(-ab[64 + static_cast<size_t>(h)]));
+            float* oh = o + static_cast<size_t>(h) * NS;
+            float delta[128];
+            for (int j = 0; j < NS; ++j) {
+                float rj = 0.0f;
+                for (int i = 0; i < NS; ++i)
+                    rj += S[static_cast<size_t>(i) * NS + j] * knv[static_cast<size_t>(i)];
+                // the read sees the DECAYED state: S' = decay*S, r = S'^T k
+                delta[j] = beta * (vh[j] - decay * rj);
+            }
+            for (int i = 0; i < NS; ++i) {
+                // old state decays; the new rank-1 term does not
+                const float ki = knv[static_cast<size_t>(i)];
+                float* rowS = S + static_cast<size_t>(i) * NS;
+                for (int j = 0; j < NS; ++j) {
+                    rowS[j] = rowS[j] * decay + ki * delta[j];
+                }
+            }
+            for (int j = 0; j < NS; ++j) {
+                float oj = 0.0f;
+                for (int i = 0; i < NS; ++i)
+                    oj += S[static_cast<size_t>(i) * NS + j] * (qh[i] * qn);
+                oh[j] = oj;
+            }
+        }
+
+        // 5. gated output norm: RMSNorm(o, ssm_norm) * silu(z), z = attn_gate
+        float* z = row_ptr(gate_, t, 2 * cfg_.n_ff);
+        matmul_tensor(L.wgate, xr, &xq_, 1, E, E, z);
+        for (int d = 0; d < E; ++d) z[d] /= (1.0f + std::exp(-z[d]));   // silu
+        for (int h = 0; h < NH; ++h)
+            rmsnorm(o + static_cast<size_t>(h) * NS, o + static_cast<size_t>(h) * NS,
+                    L.ssm_norm_w.data(), NS, cfg_.eps);
+        for (int d = 0; d < E; ++d) o[d] *= z[d];
+
+        // 6. output projection and residual add
+        xq_.quantize(o, 1, E);
+        float* pr = row_ptr(proj_, t, E);
+        matmul_tensor(L.ssm_out, o, &xq_, 1, E, E, pr);
+        float* xr_out = row_ptr(x_, t, E);
+        for (int d = 0; d < E; ++d) xr_out[d] += pr[d];
+    }
     return true;
 }
 

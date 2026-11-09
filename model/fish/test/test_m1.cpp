@@ -157,6 +157,7 @@ static void test_q8_kernels(const GgufFile& f) {
 
     // Throughput comparison on the attention projection.
     const TensorInfo* q = f.find("blk.0.attn_q.weight");
+    if (!q) q = f.find("blk.0.attn_qkv.weight");
     if (q && (has_q8_kernel(q->type) || has_q8k_kernel(q->type))) {
         const uint64_t n = q->ne[0];
         std::vector<float> x(n, 0.01f);
@@ -259,8 +260,11 @@ int main(int argc, char** argv) {
               "token_embd type id is a known k-quant (12/14/8)");
     }
 
+    // Hybrid models (qwen35) open with DeltaNet layers that have no attn_q;
+    // their first block tensor is attn_qkv (fused, pre-conv).
     const TensorInfo* q = f->find("blk.0.attn_q.weight");
-    check(q != nullptr, "blk.0.attn_q.weight found");
+    if (!q) q = f->find("blk.0.attn_qkv.weight");
+    check(q != nullptr, "blk.0 attention projection (attn_q / attn_qkv) found");
     if (q) check(q->layer == 0, "layer index parsed from tensor name");
 
     // Dequantise one embedding row and check it is finite and non-degenerate.

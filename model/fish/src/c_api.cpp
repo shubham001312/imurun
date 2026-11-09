@@ -127,7 +127,7 @@ extern "C" {
 
 const char* fish_version(void) { return "fish 2.0.0"; }
 int fish_abi_version(void) { return FISH_ABI_VERSION; }
-const char* fish_supported_archs(void) { return "llama,qwen2,qwen2moe,qwen3,qwen3moe,phi3,gemma2"; }
+const char* fish_supported_archs(void) { return "llama,qwen2,qwen2moe,qwen3,qwen3moe,qwen35,phi3,gemma2"; }
 
 fish_ctx* fish_create(void) {
     auto* c = new (std::nothrow) fish_ctx();
@@ -434,6 +434,11 @@ int fish_set_draft(fish_ctx* ctx, const char* path, int k) {
         ctx->err = "draft model tokenizer differs from the target";
         return -3;
     }
+    // Verification rewinds rejected drafts; recurrent state cannot rewind.
+    if (ctx->model->recurrent() || d->recurrent()) {
+        ctx->err = "speculative decoding is not supported for hybrid (DeltaNet) models";
+        return -4;
+    }
     ctx->draft = std::move(d);
     ctx->draft_cache_ids.clear();
     ctx->draft_k = k > 0 ? std::min(k, 16) : 5;
@@ -560,6 +565,9 @@ static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
             prefix = static_cast<int>(ids.size()) - 1;
         // Too little overlap is not worth the bookkeeping; start clean.
         if (prefix < 8) prefix = 0;
+        // Recurrent layers hold the state at kv_len, not at `prefix`; a
+        // rewind would run the rest of the prompt on a wrong (zeroed) state.
+        if (m.recurrent() && prefix != m.kv_len()) prefix = 0;
     }
     ctx->stats.cached_tokens = prefix;
 
