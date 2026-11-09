@@ -1,0 +1,164 @@
+/* Studio: the sidebar as a floating tray and Home as one composer slab.
+ * Loaded last. Colours come only from the active theme's variables, so every
+ * theme keeps its palette; this file sets shape, depth and rhythm.
+ *
+ * Radii are a hierarchy, not one value everywhere:
+ *   24px  the two big surfaces (sidebar tray, composer slab)
+ *   18px  cards that sit on the canvas (tiles, recent work, this machine)
+ *   12px  controls inside a surface (nav items, buttons, rows)
+ *   999px chips and status pills
+ */
+:root {
+  --studio-r-xl: 24px;
+  --studio-r-lg: 18px;
+  --studio-r-md: 12px;
+  --studio-lift: 0 1px 0 rgba(255, 255, 255, .55) inset, 0 1px 2px rgba(20, 16, 10, .05),
+                 0 18px 40px -24px rgba(20, 16, 10, .30);
+  --studio-lift-hi: 0 1px 0 rgba(255, 255, 255, .55) inset, 0 2px 6px rgba(20, 16, 10, .06),
+                    0 30px 70px -30px rgba(20, 16, 10, .42);
+}
+
+/* ------------------------------------------------------------ sidebar tray */
+@media (min-width: 861px) {
+  .shell { grid-template-columns: 276px minmax(0, 1fr); }
+  .shell.sidebar-collapsed { grid-template-columns: 72px minmax(0, 1fr); }
+
+  .sidebar {
+    margin: 12px 0 12px 12px;
+    height: calc(100vh - 24px);
+    padding: 16px 12px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--studio-r-xl);
+    background: var(--surface);
+    box-shadow: var(--studio-lift);
+  }
+}
+
+.brand { padding: 2px 6px 6px; }
+.brand-name { letter-spacing: .08em; }
+.sidebar-toggle { border-radius: 10px; }
+
+.side-new {
+  padding: 10px 10px 10px 12px;
+  border: 0; border-radius: var(--studio-r-md);
+  background: var(--text); color: var(--surface);
+  font-weight: 600;
+  box-shadow: 0 10px 22px -14px rgba(20, 16, 10, .55);
+  transition: transform .16s var(--ease-std, ease), box-shadow .16s ease;
+}
+.side-new:hover { background: var(--text); color: var(--surface); transform: translateY(-1px);
+  box-shadow: 0 14px 28px -14px rgba(20, 16, 10, .6); }
+.side-new-plus { width: 20px; height: 20px; border-radius: 7px; }
+.side-new-kbd { background: transparent; border-color: color-mix(in srgb, var(--surface) 30%, transparent);
+  color: color-mix(in srgb, var(--surface) 70%, transparent); }
+
+.nav { gap: 2px; }
+.nav-item {
+  position: relative;
+  padding: 8px 10px; border-radius: var(--studio-r-md);
+  color: var(--muted); font-weight: 500;
+  transition: background .14s ease, color .14s ease;
+}
+.nav-item:hover { background: var(--surface-2); color: var(--text); }
+.nav-item.active {
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--text); font-weight: 600;
+  box-shadow: inset 0 0 0 1px var(--accent-line);
+}
+.nav-caption, .side-label { padding-left: 12px; }
+
+.session { border-radius: 10px; }
+.session:hover { background: var(--surface-2); }
+.session.active { background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
+
+.side-foot { border-top: 0; padding-top: 6px; gap: 6px; }
+.side-foot .status {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-radius: 999px;
+  background: var(--surface-2);
+}
+
+/* Collapsed: the same tray, narrow. */
+.shell.sidebar-collapsed .sidebar { padding: 14px 8px 10px; align-items: center; }
+.shell.sidebar-collapsed .nav-item { width: 44px; height: 40px; border-radius: var(--studio-r-md); }
+.shell.sidebar-collapsed .side-new { width: 44px; height: 40px; padding: 0; }
+.shell.sidebar-collapsed .side-foot .status { width: 44px; padding: 10px 0; }
+
+/* Mobile drawer keeps its own edge, just rounded on the open side. */
+@media (max-width: 860px) {
+  .sidebar { border-radius: 0 var(--studio-r-xl) var(--studio-r-xl) 0; }
+}
+
+/* -------------------------------------------------------------------- home */
+.page-home { gap: 20px; padding: 56px 32px 56px; }
+.page-home > * { max-width: 920px; }
+
+.home-hero {
+  position: relative;
+  padding: 30px 30px 24px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: var(--studio-r-xl) !important;
+  background:
+    radial-gradient(120% 90% at 100% 0%, color-mix(in srgb, var(--accent) 7%, transparent) 0%, transparent 55%),
+    var(--surface) !important;
+  box-shadow: var(--studio-lift-hi) !important;
+}
+.home-mark { display: inline-flex; margin-bottom: 14px; color: var(--accent); }
+.home-greeting { font-weight: 550; color: var(--accent); }
+.home-hero .home-title { margin-bottom: 20px; font-size: clamp(32px, 4vw, 46px); }
+
+/* Inside the slab the composer is an inset well, not a second card. */
+.home-quick {
+  padding: 14px 14px 12px 18px;
+  border: 1px solid var(--line-strong); border-radius: var(--studio-r-lg);
+  background: var(--bg); box-shadow: none;
+}
+.home-quick:focus-within { border-color: var(--accent-line);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); }
+.home-quick textarea { background: transparent; }
+.home-chip { padding: 6px 12px; background: var(--surface); }
+.home-send { border-radius: var(--studio-r-md); padding: 9px 16px; }
+
+.home-tiles {
+  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px;
+}
+.home-tile {
+  display: grid; gap: 12px; align-content: start;
+  padding: 16px; min-height: 118px;
+  border: 1px solid var(--line); border-radius: var(--studio-r-lg);
+  background: var(--surface); color: var(--text); text-align: left;
+  box-shadow: var(--studio-lift);
+  transition: transform .16s var(--ease-std, ease), box-shadow .16s ease, border-color .16s ease;
+}
+.home-tile:hover { transform: translateY(-2px); border-color: var(--accent-line); box-shadow: var(--studio-lift-hi); }
+.home-tile:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.home-tile-ico {
+  width: 36px; height: 36px; display: grid; place-items: center;
+  border-radius: 11px; background: var(--accent-soft); color: var(--accent);
+}
+.home-tile-ico svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.7;
+  stroke-linecap: round; stroke-linejoin: round; }
+.home-tile-copy { display: grid; gap: 3px; }
+.home-tile-copy strong { font: 600 14px/1.25 var(--font); }
+.home-tile-copy span { font: 400 12.5px/1.4 var(--font); color: var(--muted); }
+
+.home-recent, .home-machine {
+  padding: 18px 20px 14px;
+  border-radius: var(--studio-r-lg);
+  box-shadow: var(--studio-lift);
+}
+.home-recent-row { border-radius: 10px; border-bottom-color: transparent; padding: 10px 10px; }
+.home-recent-row + .home-recent-row { box-shadow: 0 -1px 0 var(--line); }
+.home-recent-row:hover { box-shadow: none; }
+.home-check-act, .home-recent-head .btn { border-radius: 999px; }
+
+@media (max-width: 1100px) { .home-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 860px) {
+  .page-home { padding: 20px 16px 40px; }
+  .home-hero { padding: 22px 18px 18px !important; }
+}
+@media (max-width: 480px) { .home-tiles { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) {
+  .home-tile, .side-new { transition: none; }
+  .home-tile:hover, .side-new:hover { transform: none; }
+}
