@@ -105,7 +105,9 @@
     if (index === undefined || index === null || index === '' || !isFinite(Number(index))) {
       index = turn.order.length ? turn.order[turn.order.length - 1] : 1;
     }
-    var block = turn.traceBlock(Number(index));
+    /* Tool rows go in the message flow (Turn.flowBlock), not inside the
+     * collapsed thinking panel: the user sees each action as it happens. */
+    var block = turn.flowBlock ? turn.flowBlock(Number(index)) : turn.traceBlock(Number(index));
     var list = block.querySelector(':scope > .trace-tools');
     if (!list) {
       list = el('ul', 'trace-tools');

@@ -124,6 +124,27 @@ _REASONED_REFUSAL = re.compile(
 )
 
 
+# "Let me fix both." / "I'll create script.js next." as the last words of a
+# reply, with no tool call: the model announced work and stopped. Seen with
+# Nemotron on "this site is not proper, fix it" (2026-11-09).
+_ANNOUNCED = re.compile(
+    r"(?:\blet me|\bi(?:'|’)ll|\bi will|\bi(?:'|’)m going to|\bi am going to|\bnext,? i|\bnow,? i(?:'|’)ll|"
+    r"\bnow let me|\bi need to|\bi should)\b[^.!?\n]{0,120}?\b(?:fix|creat|writ|updat|add|run|mak|edit|"
+    r"build|install|open|patch|chang|complet|implement|generat|set ?up|test|check|read|list|look)\w*"
+    r"[^\n]{0,160}$",
+    re.IGNORECASE,
+)
+
+
+def _announced_work(answer: str) -> bool:
+    """The reply ends by announcing an action it did not take."""
+    tail = (answer or "").strip()[-320:]
+    if not tail or tail.endswith("?"):
+        return False
+    last = re.split(r"(?<=[.!])\s+", tail)[-1] if re.search(r"[.!]\s+\S", tail) else tail
+    return bool(_ANNOUNCED.search(last))
+
+
 def _asks_for_action(question: str) -> bool:
     """True for a request to do something here, not a question about how."""
     text = (question or "").strip()
@@ -489,13 +510,19 @@ class AgentLoop:
             explained = (self._mode != "plan" and not refused and state.tool_steps == 0
                          and not _REASONED_REFUSAL.search(answer_text or "")
                          and _asks_for_action(question))
-            if (not last and state.refusals < MAX_RETRIES and not state.tool_ok
-                    and self._offers_action_tools() and (refused or explained)):
+            announced = (self._mode != "plan" and not refused and not parsed.calls
+                         and _announced_work(answer_text))
+            if (not last and state.refusals < MAX_RETRIES and self._offers_action_tools()
+                    and (announced or ((refused or explained) and not state.tool_ok))):
                 state.refusals += 1
                 tools = ", ".join(sorted(t.name for t in self._offered if t.name in ACTION_TOOLS))
                 steps.append(Step(index - 1, raw, kind="retry"))
                 messages.append({"role": "assistant", "content": answer_text, "_kind": "draft"})
-                if refused:
+                if announced and not refused and not explained:
+                    note = ("[note] You said what you will do next but did not do it. Do it now: reply "
+                            "with one tool block (" + tools + "). Do not describe it again. When "
+                            "everything is done, answer briefly with what changed.")
+                elif refused:
                     note = ("[note] You do have tools that act on this computer: " + tools + ". Do not say "
                             "you lack access. If the request is safe and the user wants it, call the right tool now "
                             "with one tool block; risky steps still show the user an approval card. If you "
@@ -507,7 +534,8 @@ class AgentLoop:
                             "commands, file_list shows what is in a folder. Call one tool now unless the request is unsafe or "
                             "destructive; after the work is done, answer briefly with what you did.")
                 messages.append({"role": "user", "_kind": "note", "content": note})
-                kind = "refusal" if refused else "explained-instead-of-acting"
+                kind = ("refusal" if refused else "explained-instead-of-acting" if explained
+                        else "announced-without-acting")
                 self._mark("G3-loop", self._session_id, f"{kind}; retry {state.refusals} of {MAX_RETRIES}")
                 self._issue(kind, attempt=state.refusals, detail=answer_text[:300])
                 continue

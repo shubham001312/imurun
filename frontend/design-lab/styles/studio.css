@@ -168,3 +168,32 @@
 /* Home uses the same proportion, a little wider for its two columns. */
 .page-home > * { width: 100%; max-width: clamp(640px, 82%, 1180px); }
 .home-grid { grid-template-columns: minmax(0, 1.7fr) minmax(280px, 1fr); }
+
+/* ------------------------------------------------- Stats as a pop-up */
+/* Centred over a dimmed page, not a drawer that squeezes the chat. */
+.stats-panel {
+  top: 50%; left: 50%; right: auto; bottom: auto;
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(82vh, 780px);
+  transform: translate(-50%, -50%);
+  border-radius: 20px;
+  background: var(--surface);
+  z-index: 70;
+  animation: stats-pop .22s var(--ease-std, ease) both;
+}
+@keyframes stats-pop {
+  from { opacity: 0; transform: translate(-50%, -48%) scale(.98); }
+  to { opacity: 1; transform: translate(-50%, -50%); }
+}
+@media (min-width: 1240px) { body.stats-open .main { padding-right: 0; } }
+body.stats-open::after {
+  content: ""; position: fixed; inset: 0; z-index: 65;
+  background: var(--backdrop, rgba(20, 16, 10, .35));
+  animation: stats-fade .2s ease both;
+}
+@keyframes stats-fade { from { opacity: 0; } to { opacity: 1; } }
+.stats-head { padding: 18px 20px 12px 24px; }
+.stats-body { padding: 16px 20px 20px; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.stats-body > :only-child, .stats-body > .stats-wide { grid-column: 1 / -1; }
+@media (max-width: 720px) { .stats-body { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .stats-panel, body.stats-open::after { animation: none; } }

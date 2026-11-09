@@ -515,6 +515,29 @@
     return block;
   };
 
+  /* The visible flow of actions for one step: tool rows sit in the message,
+   * between the thinking panel and the answer, in step order. */
+  Turn.prototype.flowBlock = function (step) {
+    var key = String(step);
+    this.flowBlocks = this.flowBlocks || {};
+    if (this.flowBlocks[key]) return this.flowBlocks[key];
+    if (!this.flow) {
+      this.flow = document.createElement('div');
+      this.flow.className = 'agent-flow';
+      this.node.insertBefore(this.flow, this.bubble);
+    }
+    var block = document.createElement('div');
+    block.className = 'flow-step';
+    block.dataset.step = key;
+    var next = null;
+    Array.prototype.forEach.call(this.flow.children, function (child) {
+      if (!next && Number(child.dataset.step) > Number(step)) next = child;
+    });
+    this.flow.insertBefore(block, next);
+    this.flowBlocks[key] = block;
+    return block;
+  };
+
   /* A tool step started after the pill had folded for an answer: bring the
    * live status back, the "answer" so far was the text before a tool call. */
   Turn.prototype.unfold = function () {

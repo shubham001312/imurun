@@ -209,7 +209,7 @@ class OpenAICompatClient:
         timeout: float = 120.0,
         temperature: float = 0.5,
         top_p: float = 0.9,
-        max_tokens: int = 2048,
+        max_tokens: int = 16384,
     ) -> None:
         self.provider = provider
         self.label = label

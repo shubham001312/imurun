@@ -135,7 +135,13 @@
     IM.bus.on('status', renderStats);
     IM.bus.on('models', renderStats);
     IM.bus.on('session.active', renderStats);
-    if (IM.store.get(STATS_OPEN_KEY, false) && window.innerWidth > 1100) toggleStats(true, false);
+    /* A pop-up now (styles/studio.css): it never reopens on its own at start-up,
+     * and a click on the dimmed page outside it closes it. */
+    document.addEventListener('mousedown', function (event) {
+      if (panel.hidden) return;
+      if (panel.contains(event.target) || (toggleButton && toggleButton.contains(event.target))) return;
+      toggleStats(false);
+    });
   }
 
   /* ---------------------------------------------------- command palette */

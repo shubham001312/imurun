@@ -247,11 +247,64 @@ def _bare_json_start(text: str) -> int:
     return -1
 
 
+# Tools whose arguments must arrive whole: a call cut off by the output limit
+# and "repaired" by closing its quotes wrote a half CSS file to disk.
+_WHOLE_ONLY = frozenset({"file_write", "shell", "file_move", "file_copy", "make_dir", "file_delete"})
+CUT_OFF = ("the tool call was cut off before it ended (the reply hit its length limit), so it "
+           "was not run. Write long files in parts: file_write the first part, then file_write "
+           "with mode append for the rest.")
+_NAME_FIRST = re.compile(r"^\s*([A-Za-z_][\w.\-]*)\s*(\{.*)$", re.DOTALL)
+
+
+def _was_cut(text: str) -> bool:
+    """True when the JSON in ``text`` ends before its quotes/brackets close."""
+    start = min([i for i in (text.find("{"), text.find("[")) if i >= 0], default=-1)
+    if start < 0:
+        return False
+    stack: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in text[start:]:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char == '"':
+            quote = char
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if stack:
+                stack.pop()
+            if not stack:
+                return False
+    return bool(stack or quote)
+
+
 def _calls_from_body(
+    body: str, schemas: Mapping[str, Mapping[str, Any]], forced: str | None
+) -> tuple[list[ToolCall], str | None]:
+    found, error = _calls_from_body_inner(body, schemas, forced)
+    if found and _was_cut(body or "") and any(c.name in _WHOLE_ONLY for c in found):
+        return [], CUT_OFF
+    return found, error
+
+
+def _calls_from_body_inner(
     body: str, schemas: Mapping[str, Mapping[str, Any]], forced: str | None
 ) -> tuple[list[ToolCall], str | None]:
     body = (body or "").strip()
     known = list(schemas)
+    # `file_list {"path": "..."}`: the name before the arguments (Nemotron does this).
+    named = _NAME_FIRST.match(body) if forced is None else None
+    if named and canonical_name(named.group(1), known) in schemas:
+        obj, error = loads_forgiving(named.group(2))
+        if isinstance(obj, dict) and not any(k in obj for k in ("name", "tool", "function")):
+            return _accept(canonical_name(named.group(1), known), obj, body, schemas)
     if forced is not None:
         obj, error = loads_forgiving(body) if body else ({}, None)
         if obj is None:

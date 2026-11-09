@@ -413,3 +413,27 @@ body[data-reduced-motion="1"] .reply-disclosure::after { transition: none; }
 .user-menu .ico-edit {
   --ico: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z'/%3E%3Cpath d='M14 7l3 3'/%3E%3C/svg%3E");
 }
+
+/* --------------------------------- thinking: plain, no accent side bar */
+.transcript .msg .thinking-body {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 14px;
+}
+.transcript .msg .thinking-body.is-multi .trace-step + .trace-step { border-left: 0; }
+
+/* ------------------------------------ actions in the flow of the reply */
+/* Each tool the agent uses is a card in the message, in step order, between
+ * the thinking panel and the answer (chat.js Turn.flowBlock). */
+.transcript .msg .agent-flow { display: grid; gap: 6px; margin: 6px 0 10px; }
+.transcript .msg .agent-flow:empty { display: none; }
+.transcript .msg .agent-flow .trace-tools { margin: 0; gap: 6px; }
+.transcript .msg .agent-flow .tool-row {
+  padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface);
+  font: 13px/1.45 var(--font); color: var(--text);
+}
+.transcript .msg .agent-flow .tool-row p { margin: 0; padding: 0; border: 0; background: none; animation: none; }
+.transcript .msg .agent-flow .tool-result > summary { letter-spacing: 0; text-transform: none; }
+.transcript .msg .agent-flow .tool-children { border-left: 0; padding-left: 10px; }
