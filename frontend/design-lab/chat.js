@@ -213,6 +213,13 @@
     paragraph.textContent = text;
     bubble.appendChild(paragraph);
     node.appendChild(bubble);
+    node._text = text;
+    // Copy / Edit and resend (user-actions.js handles them and the right-click menu).
+    var row = document.createElement('div');
+    row.className = 'msg-actions user-actions';
+    row.innerHTML = '<button class="msg-action msg-copy" type="button" data-user-copy aria-label="Copy message" title="Copy">Copy</button>' +
+      '<button class="msg-action msg-edit" type="button" data-user-edit aria-label="Edit and resend" title="Edit and resend">Edit</button>';
+    node.appendChild(row);
     if (options && options.queued) {
       var chip = document.createElement('span');
       chip.className = 'msg-chip';

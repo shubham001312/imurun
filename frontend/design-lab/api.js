@@ -606,6 +606,14 @@
     return (data && data.messages) || [];
   }
 
+  /* Edit and resend: drop the fromEnd-th user message counted from the end
+   * (1 = the last) and everything after it. */
+  async function truncateSession(id, fromEnd) {
+    return fetchAPI(`/api/sessions/${encodeURIComponent(id)}/truncate`, {
+      method: 'POST', body: JSON.stringify({ fromEnd: fromEnd }),
+    });
+  }
+
   async function updateSession(id, data) {
     return fetchAPI(`/api/sessions/${encodeURIComponent(id)}/rename`, {
       method: 'POST',
@@ -1166,6 +1174,7 @@
     answerApproval,
     getPermissions,
     setPermissions,
+    truncateSession,
     pickWorkspaceFolder,
     getAgent,
     setAgent,

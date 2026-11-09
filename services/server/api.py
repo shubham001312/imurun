@@ -16,6 +16,7 @@ GET  /api/sessions         session identities
 POST /api/sessions         start a session from the first command
 GET  /api/sessions/{id}/messages
 POST /api/sessions/{id}/rename
+POST /api/sessions/{id}/truncate   {fromEnd} drop a user message and what followed (edit and resend)
 GET/POST /api/skills
 POST /api/turns            start an agent turn
 GET  /api/turns/{id}       turn state
@@ -1172,6 +1173,30 @@ class ApiServer:
                             "origin": skill.origin,
                         },
                     )
+                    return
+
+                if (
+                    len(parts) == 4
+                    and parts[:2] == ["api", "sessions"]
+                    and parts[3] == "truncate"
+                ):
+                    # Edit and resend: drop a user message and what followed it.
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    try:
+                        Session.load(parts[2], server._sessions_root)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        self._reply(404, {"error": "unknown session"})
+                        return
+                    try:
+                        removed = server._transcripts.truncate_at_user(
+                            parts[2], int(payload.get("fromEnd", 0)))
+                    except (ValueError, TypeError) as exc:
+                        self._reply(400, {"error": str(exc)})
+                        return
+                    server._record("session", f"truncated {parts[2]} ({removed} messages)")
+                    self._reply(200, {"removed": removed})
                     return
 
                 if (
