@@ -149,11 +149,13 @@ def test_unreadable_call_retries_once(setup):
     assert echo.calls == 1 and result.answer == "done"
 
 
-def test_second_unreadable_call_is_returned_as_text(setup):
+def test_fourth_unreadable_call_is_returned_as_text(setup):
+    """Up to three retries (MAX_RETRIES), then the reply is taken as text."""
     executor, _, _ = setup
-    model = FakeModel(["```tool\nnope\n```", "```tool\nstill nope\n```"])
+    model = FakeModel(["```tool\nnope\n```"] * 4)
     result = make_loop(model, executor).run("echo")
-    assert result.status == "done" and len(model.seen) == 2
+    assert result.status == "done" and len(model.seen) == 4
+    assert [s.kind for s in result.steps] == ["retry", "retry", "retry", "answer"]
 
 
 def test_duplicate_call_uses_cache(setup):

@@ -19,6 +19,12 @@ if not os.environ.get("IMURUN_BIN_DIR"):
     import tempfile
 
     os.environ["IMURUN_BIN_DIR"] = tempfile.mkdtemp(prefix="imurun-test-bin-")
+# The agent issue log (services/response/issues.py) never lands in the real data root.
+if not os.environ.get("IMURUN_ISSUES_LOG"):
+    import tempfile
+
+    os.environ["IMURUN_ISSUES_LOG"] = os.path.join(tempfile.mkdtemp(prefix="imurun-test-issues-"),
+                                                   "agent-issues.log")
 
 
 def pytest_configure(config):

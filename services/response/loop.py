@@ -56,7 +56,9 @@ from ..tools.protocol import (
     retry_message,
     tool_prompt,
 )
+from . import bridge
 from . import context as ctxmod
+from . import issues
 from . import profile as model_profile
 from .profile import compact_context
 from .style import (DEFAULT_DIRECTIVE, FAKE_RESULT_NOTE, LIVE_DATA_RULE,
@@ -72,6 +74,19 @@ HISTORY_MESSAGES = 6
 # routes by heuristic instead of spending a generation (time to first token).
 PLANNER_MIN_PREFILL_TPS = 400.0
 LIVE_NUDGE = False  # see _needs_live_nudge
+# Attempts per kind of recovery in one turn: an unreadable tool call, a
+# "cannot run commands" refusal while tools were offered, and a tool that
+# failed. Each attempt is logged to logs/agent-issues.log.
+MAX_RETRIES = 3
+ACTION_TOOLS = frozenset({"shell", "file_read", "file_list", "file_write", "make_dir"})
+_REFUSAL = re.compile(
+    r"\b(?:i|we)\s+(?:can(?:not|'t|’t| not)|am\s+(?:not\s+able|unable)\s+to|"
+    r"(?:do\s+not|don't|don’t)\s+have\s+(?:the\s+)?(?:ability|access|permission)s?|have\s+no\s+(?:way|access))"
+    r"[^.!?\n]{0,80}?\b(?:run|execute|access|reach|open|read|list|see|use|interact)\w*"
+    r"[^.!?\n]{0,60}?\b(?:commands?|shell|terminal|computer|system|machine|files?|folders?|director(?:y|ies)|desktop|tools?)\b",
+    re.IGNORECASE,
+)
+_NOT_RETRYABLE = ("Permission denied for", "The turn was stopped", "There is no tool called")
 _FAKE_RESULT_HEADER = re.compile(r"^\s*\[tool result[^\]]*\]\s*", re.IGNORECASE)
 
 SUBAGENT_DIRECTIVE = "\n".join([
@@ -188,6 +203,9 @@ class _TurnState:
     prefetched: bool = False
     offline: bool = False
     retried: bool = False
+    retries: int = 0          # unreadable tool calls answered with a retry note
+    refusals: int = 0         # "I cannot run commands" answers sent back
+    tool_failures: dict = field(default_factory=dict)  # tool name -> failed calls
     nudged: bool = False
     empty_retry: bool = False
     tool_steps: int = 0
@@ -306,6 +324,9 @@ class AgentLoop:
         # call instead of answering (see profile.py). It gets no catalogue.
         self._offered = [] if self._compact else self._offer(prompt)
         prefetch_text = self._run_prefetch(prompt, state) if self._prefetch else ""
+        bridged = self._run_bridge(prompt, state)
+        if bridged:
+            prefetch_text = f"{prefetch_text}\n\n{bridged}" if prefetch_text else bridged
         messages = self._initial_messages(prompt, prefetch_text)
         new_messages: list[dict] = []
         steps: list[Step] = []
@@ -343,14 +364,21 @@ class AgentLoop:
                 self._tool_step(index, raw, parsed, messages, steps, state)
                 continue
 
-            if parsed.error and not parsed.calls and not state.retried and not last:
-                state.retried = True
-                steps.append(Step(index - 1, raw, kind="retry"))
-                messages.append({"role": "assistant", "content": visible or "(empty)", "_kind": "tool_call"})
-                messages.append({**retry_message(parsed.error, [t.name for t in self._offered]),
-                                 "_kind": "note"})
-                self._mark("G3-loop", self._session_id, "unreadable tool call; asked to retry")
-                continue
+            if parsed.error and not parsed.calls and not last:
+                if state.retries < MAX_RETRIES:
+                    state.retries += 1
+                    state.retried = True
+                    steps.append(Step(index - 1, raw, kind="retry"))
+                    messages.append({"role": "assistant", "content": visible or "(empty)", "_kind": "tool_call"})
+                    messages.append({**retry_message(parsed.error, [t.name for t in self._offered]),
+                                     "_kind": "note"})
+                    self._mark("G3-loop", self._session_id,
+                               f"unreadable tool call; retry {state.retries} of {MAX_RETRIES}")
+                    self._issue("unreadable-call", error=parsed.error, attempt=state.retries,
+                                detail=visible[:300])
+                    continue
+                self._issue("retries-exhausted", error=parsed.error, attempt=state.retries,
+                            detail="unreadable tool call")
 
             # The model wrote "[tool result: web_search] ..." itself: that is a
             # hallucinated result, never an answer. One retry, then whatever it
@@ -370,6 +398,22 @@ class AgentLoop:
                 steps.append(Step(index - 1, raw, kind="retry"))
                 messages.append({"role": "user", "content": "[note] Give your final answer now, without thinking out loud.",
                                  "_kind": "note"})
+                continue
+
+            if (not last and state.refusals < MAX_RETRIES and not state.tool_ok
+                    and self._offers_action_tools() and _REFUSAL.search(answer_text or "")):
+                state.refusals += 1
+                steps.append(Step(index - 1, raw, kind="retry"))
+                messages.append({"role": "assistant", "content": answer_text, "_kind": "draft"})
+                messages.append({"role": "user", "_kind": "note", "content": (
+                    "[note] You do have tools that act on this computer: "
+                    + ", ".join(sorted(t.name for t in self._offered if t.name in ACTION_TOOLS))
+                    + ". Do not say you cannot. Call the right tool now with one tool block; the user "
+                    "approves anything risky. If the request is genuinely impossible, say exactly why."
+                )})
+                self._mark("G3-loop", self._session_id,
+                           f"refused although tools were offered; retry {state.refusals} of {MAX_RETRIES}")
+                self._issue("refusal", attempt=state.refusals, detail=answer_text[:300])
                 continue
 
             if not last and self._needs_live_nudge(question, answer_text, state):
@@ -409,6 +453,8 @@ class AgentLoop:
             if status == "done" and not last and self._deliver(messages, new_messages):
                 question = messages[-1]["content"]
                 state.nudged = state.retried = state.empty_retry = False
+                state.retries = state.refusals = 0
+                state.tool_failures = {}
                 continue
             if self._queue.has_pending(self._session_id):
                 self._mark("G1-prompt", self._session_id, "queued prompt pending for the next turn")
@@ -439,6 +485,70 @@ class AgentLoop:
             elif result.offline:
                 state.offline = True
             messages.append({**result_message(call.name, result, limit=limit), "_kind": "tool_result"})
+            if not result.ok and not result.offline and not _not_retryable(result):
+                count = state.tool_failures.get(call.name, 0) + 1
+                state.tool_failures[call.name] = count
+                error = result.error or result.content or "failed"
+                self._issue("tool-failed", tool=call.name, error=error, attempt=count,
+                            detail=json.dumps(call.args, ensure_ascii=False)[:300])
+                if count < MAX_RETRIES:
+                    note = (f"[note] {call.name} failed (attempt {count} of {MAX_RETRIES}): {error}\n"
+                            "Find the cause (a wrong path, command, flag or argument), then call the tool "
+                            "again with the fix. Do not repeat the exact same call.")
+                else:
+                    note = (f"[note] {call.name} has failed {count} times. Do not call it again in this "
+                            "turn. Tell the user exactly what failed and the last error, and suggest a fix.")
+                    self._issue("retries-exhausted", tool=call.name, error=error, attempt=count)
+                messages.append({"role": "user", "content": note, "_kind": "note"})
+
+    # ------------------------------------------------- bridge and recovery
+    def _offers_action_tools(self) -> bool:
+        return any(t.name in ACTION_TOOLS for t in self._offered)
+
+    def _issue(self, kind: str, **fields) -> None:
+        issues.record(kind, session=self._session_id, turn=self._turn_id, **fields)
+
+    def _run_bridge(self, prompt: str, state: _TurnState) -> str:
+        """Run the command the message explicitly asks for (``bridge.py``).
+
+        Works for every model size: the loop runs the ``shell`` tool itself,
+        through the executor (permissions, approval card, audit, events). A
+        start-up failure is retried up to ``MAX_RETRIES`` times; a command
+        that ran and failed (non-zero exit, timeout) is a result, not retried,
+        because running it again could repeat side effects. The output goes
+        to the model as context so it can explain it.
+        """
+        command = bridge.extract_command(prompt)
+        if not command or self._executor is None:
+            return ""
+        if self._allowed is not None and "shell" not in self._allowed:
+            return ""
+        ctx = CallContext(
+            turn_id=self._turn_id, session_id=self._session_id, depth=self._depth, step=0,
+            stop=self.stopped, interactive=True, allowed=self._allowed, spawn=self._spawn,
+            source="user",
+        )
+        result: ToolResult | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                result = self._executor.execute("shell", {"command": command}, ctx).result
+            except Exception as exc:  # noqa: BLE001 - the executor never raises, but be sure
+                result = failed("shell", f"The shell tool failed: {type(exc).__name__}: {exc}")
+            if result.ok or not _transient(result) or self.stopped() or attempt == MAX_RETRIES:
+                break
+            self._issue("bridge-retry", tool="shell", error=result.error, attempt=attempt, detail=command)
+        assert result is not None
+        state.names.append("shell")
+        state.cache[ToolCall("shell", {"command": command}).key()] = result
+        if result.ok:
+            state.tool_ok = True
+        else:
+            self._issue("bridge-failed", tool="shell", error=result.error or result.content,
+                        detail=command)
+        body = result_message("shell", result, limit=ctxmod.result_chars(self._context_limit))["content"]
+        return ("The user asked to run a command on this computer, and IMURUN ran it for them:\n"
+                f"{body}\n"
+                "Explain the result briefly. Do not run the same command again.")
 
     def _call(self, call: ToolCall, index: int, state: _TurnState) -> ToolResult:
         key = call.key()
@@ -762,3 +872,15 @@ def _canonical(parsed: ParsedReply) -> str:
         blocks.append("```tool\n" + json.dumps({"name": call.name, "args": call.args},
                                                ensure_ascii=False) + "\n```")
     return "\n".join(blocks)
+
+
+def _not_retryable(result: ToolResult) -> bool:
+    """Denied, declined, stopped or unknown-tool results are never retried."""
+    text = str(result.error or result.content or "")
+    return any(text.startswith(prefix) for prefix in _NOT_RETRYABLE)
+
+
+def _transient(result: ToolResult) -> bool:
+    """The tool could not start (not: the command ran and failed)."""
+    text = str(result.error or "")
+    return text.startswith("The shell tool failed") or text == "the tool returned no result"
