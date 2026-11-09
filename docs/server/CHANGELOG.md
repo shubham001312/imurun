@@ -37,6 +37,11 @@ CPU engine with Llama 3.2 1B) and probing every main route.
   event loop without `shutdown_asyncgens()`, so `ModelManager.download_model`'s cleanup
   (open `.part` file, HTTP response) never ran; the log showed "Task was destroyed but it
   is pending!" after every download request. Now finalised before the loop closes.
+- **The tool workspace and the notes / facts stores ignored `IMURUN_DATA_ROOT`**
+  (`services/tools/workspace.py` `default_workspace`, `services/tools/notes_tool.py`):
+  they hard-coded `~/.imurun`, so a server on another data root reported
+  `workspace: ~/.imurun/workspace` on `GET /api/permissions` and kept notes in the real
+  home folder. They now use `services.paths.data_root()`. Test: `tests/test_data_root_paths.py`.
 
 ## 2026-11-03 — resource governor (resources owner)
 
