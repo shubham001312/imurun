@@ -1043,7 +1043,7 @@
 
   on('[data-api-action="rotate-token"]', async function () {
     var btn = this;
-    if (!window.confirm('Rotate the bearer token? Other clients using the old token will stop working.')) return;
+    if (!(await confirmAction({ title: 'Rotate the bearer token?', text: 'Other clients using the old token stop working. This window switches to the new one.', confirmLabel: 'Rotate token', danger: true }))) return;
     btn.disabled = true;
     btn.textContent = 'Rotating…';
     try {
@@ -1066,7 +1066,7 @@
   /* The server's clear deletes downloaded model weights (*.gguf). The old
    * confirm text promised models were kept; it now says what happens. */
   on('[data-resources-action="clear-cache"]', async function () {
-    if (!window.confirm('Clear the model cache? This deletes downloaded model files (*.gguf) from the models folder. Chat history is kept.')) return;
+    if (!(await confirmAction({ title: 'Clear the model cache?', text: 'This deletes downloaded model files (*.gguf) from the models folder. Chat history is kept.', confirmLabel: 'Delete model files', danger: true }))) return;
     var btn = this;
     btn.disabled = true;
     btn.textContent = 'Clearing…';
@@ -1195,40 +1195,63 @@
     var row = document.createElement('div');
     row.className = 'settings-table-row';
     row.dataset.clientId = client.id;
+    row.dataset.clientName = client.name || '';
     var scopes = Array.isArray(client.scopes) ? client.scopes.join(', ') : (client.scope || '');
-    var status = client.status
-      ? '<span class="chip ' + (client.status === 'active' ? 'success' : 'neutral') + '">' + escapeHtml(client.status) + '</span>'
-      : '<span class="muted">—</span>';
+    /* The server sends last_used_at, not a status: a listed client is active. */
+    var status = '<span class="muted">' + (client.last_used_at ? 'Used ' + escapeHtml(util.formatTimeAgo(client.last_used_at)) : 'Not used yet') + '</span>';
     row.innerHTML = '<span>' + escapeHtml(client.name || client.id || 'Unnamed client') + '</span>' +
       '<span class="mono">' + escapeHtml(scopes || '—') + '</span>' + status +
       '<span><button class="btn ghost" type="button" data-clients-action="revoke" data-client-id="' + escapeHtml(client.id) + '">Revoke</button></span>';
     clientsTable.appendChild(row);
   }
 
+  /* In-app dialogs (dialogs.js); window.confirm only if that file is missing. */
+  function confirmAction(options) {
+    if (IM.dialogs && IM.dialogs.confirm) return IM.dialogs.confirm(options);
+    return Promise.resolve(window.confirm(options.title + ' ' + (options.text || '')));
+  }
+
+  function knownClients() {
+    if (!clientsTable) return [];
+    return Array.prototype.map.call(clientsTable.querySelectorAll('.settings-table-row[data-client-id]'), function (row) {
+      return { id: row.dataset.clientId, name: row.dataset.clientName || '' };
+    });
+  }
+
+  function addClientButton() {
+    return document.querySelector('[data-settings-panel="use-by-api"] [data-clients-action="add"]');
+  }
+
   async function addClient() {
-    var name = window.prompt('Client name:');
-    if (!name || !name.trim()) return;
-    var scope = window.prompt('Scopes, comma-separated (chat, sessions, skills, models, connectors, read-only, admin):', 'read-only') || 'read-only';
-    try {
-      var client = await api.createClient({
-        name: name.trim(),
-        scopes: scope.split(',').map(function (s) { return s.trim(); }).filter(Boolean)
-      });
-      addClientRow(client);
-      toast({ tone: 'success', icon: 'check', kicker: 'Client added', title: name.trim(),
-        text: client.token ? 'Copy the token now, it is shown once: ' + client.token : 'Scopes: ' + scope, timeout: client.token ? 0 : undefined });
-    } catch (error) {
-      toast({ tone: 'error', icon: 'alert', kicker: 'Clients', title: 'Could not add the client', text: error.message });
-    }
+    if (!IM.dialogs || !IM.dialogs.addClient) return;
+    var client = await IM.dialogs.addClient({
+      existing: knownClients(),
+      returnFocus: addClientButton,
+      create: function (payload) { return api.createClient(payload); }
+    });
+    if (!client) return;
+    addClientRow(client);
+    toast({ tone: 'success', icon: 'check', kicker: 'Client added', title: client.name || 'Client added',
+      text: 'Revoke it here when the app no longer needs access.' });
   }
 
   async function revokeClient(id) {
-    if (!window.confirm('Revoke this client? Its token stops working immediately.')) return;
+    var known = knownClients().filter(function (c) { return c.id === id; })[0];
+    var label = known && known.name ? '“' + known.name + '”' : 'this client';
+    var ok = await confirmAction({
+      title: 'Revoke ' + label + '?',
+      text: 'Apps using its token stop working at once. This cannot be undone; add a new client to give access again.',
+      confirmLabel: 'Revoke', danger: true, returnFocus: addClientButton
+    });
+    if (!ok) return;
     try {
       await api.revokeClient(id);
       var row = clientsTable && clientsTable.querySelector('[data-client-id="' + id + '"]');
+      var hadFocus = row && row.contains(document.activeElement);
       if (row) row.remove();
       if (clientsTable && clientsTable.querySelectorAll('[data-client-id]').length === 0 && clientsEmpty) clientsTable.appendChild(clientsEmpty);
+      /* The focused Revoke button left with its row: keep keyboard users in place. */
+      if (hadFocus && addClientButton()) addClientButton().focus();
       toast({ tone: 'neutral', icon: 'info', kicker: 'Revoked', title: 'Client revoked', text: 'Its token is no longer accepted.' });
     } catch (error) {
       toast({ tone: 'error', icon: 'alert', kicker: 'Clients', title: 'Could not revoke the client', text: error.message });

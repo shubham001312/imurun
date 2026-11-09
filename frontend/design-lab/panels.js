@@ -6,9 +6,9 @@
  *   IMURUN.panels.openPalette(query?)
  *   IMURUN.panels.openShortcuts()
  *
- * Numbers are honest about their source: engine-reported counters are
- * labelled "engine", browser-measured ones "measured here", and anything the
- * server does not report says so instead of showing a made-up value.
+ * The drawer's content is built by stats-view.js: engine-reported numbers
+ * say "from the engine", browser-measured ones "measured in this window",
+ * and anything the server does not report is left out, never made up.
  */
 (function () {
   'use strict';
@@ -42,185 +42,71 @@
   var panel = null;
   var toggleButton = null;
 
-  function toggleStats(force) {
+  var statsReturnFocus = null;
+  var lastStatsHtml = '';
+
+  /* `focusPanel` moves focus into the panel (the toolbar button and Ctrl+.),
+   * not when it reopens on its own at start-up. Closing returns focus to
+   * whatever opened it, or the Stats button. */
+  function toggleStats(force, focusPanel) {
     if (!panel) return;
     var open = typeof force === 'boolean' ? force : panel.hidden;
     if (IM.sound && panel.hidden === open) { if (open) IM.sound.open(); else IM.sound.close(); }
+    var wasOpen = !panel.hidden;
+    var hadFocus = panel.contains(document.activeElement);
     panel.hidden = !open;
     document.body.classList.toggle('stats-open', open);
     if (toggleButton) toggleButton.setAttribute('aria-expanded', open ? 'true' : 'false');
     IM.store.set(STATS_OPEN_KEY, open);
     if (open) {
+      lastStatsHtml = '';
       renderStats();
       IM.status.refresh();
+      if (!wasOpen && focusPanel !== false) {
+        statsReturnFocus = document.activeElement;
+        var close = panel.querySelector('[data-stats-close]');
+        if (close) close.focus();
+      }
+    } else if (wasOpen) {
+      var target = statsReturnFocus && document.contains(statsReturnFocus) ? statsReturnFocus : toggleButton;
+      statsReturnFocus = null;
+      if (hadFocus && target && typeof target.focus === 'function') target.focus();
     }
-  }
-
-  function row(label, value, hint) {
-    return '<div class="stat-row"><dt>' + escapeHtml(label) + '</dt><dd' +
-      (hint ? ' title="' + escapeHtml(hint) + '"' : '') + '>' + value + '</dd></div>';
-  }
-
-  function unknown(text) {
-    return '<span class="stat-unknown">' + escapeHtml(text || 'not reported') + '</span>';
-  }
-
-  /* Engine fields the shell knows how to label. Anything else scalar that
-   * the engine reports is listed after these, so new fields show up without
-   * a frontend change. */
-  var ENGINE_FIELDS = [
-    ['arch', 'Architecture'],
-    ['quant', 'Quantisation'],
-    ['kernel', 'Kernel'],
-    ['context', 'Context window'],
-    ['context_size', 'Context window'],
-    ['chat_format', 'Chat format'],
-    ['layers', 'Layers'],
-    ['threads', 'Threads'],
-    ['backend', 'Backend'],
-    ['version', 'Engine version']
-  ];
-
-  function engineInfo(status) {
-    var engine = (status && status.engine) || {};
-    var info = Object.assign({}, engine.info || {}, engine.model_info || {}, engine);
-    return info;
-  }
-
-  function sparkline(values) {
-    var points = values.filter(function (v) { return typeof v === 'number' && isFinite(v); });
-    if (points.length < 2) return '<p class="stat-note">Send a few messages to see the trend.</p>';
-    var max = Math.max.apply(null, points) || 1;
-    var w = 248;
-    var h = 44;
-    var step = w / (points.length - 1);
-    var coords = points.map(function (v, i) {
-      return (i * step).toFixed(1) + ',' + (h - 4 - (v / max) * (h - 10)).toFixed(1);
-    });
-    var last = coords[coords.length - 1].split(',');
-    return '<svg class="sparkline" viewBox="0 0 ' + w + ' ' + h + '" role="img" aria-label="Tokens per second over the last ' +
-      points.length + ' replies, peak ' + max.toFixed(1) + '">' +
-      '<polyline points="0,' + h + ' ' + coords.join(' ') + ' ' + w + ',' + h + '" class="spark-fill"/>' +
-      '<polyline points="' + coords.join(' ') + '" class="spark-line"/>' +
-      '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="2.6" class="spark-dot"/></svg>';
-  }
-
-  /* Context use: exact when the engine reports it, otherwise an estimate
-   * from the visible transcript (about 4 characters per token). */
-  function contextBlock(lastStats) {
-    var used = lastStats && lastStats.contextUsed;
-    var size = lastStats && lastStats.contextSize;
-    var source = 'engine';
-    if (!used || !size) {
-      var settings = window.__imurun_settings ? window.__imurun_settings.get() : null;
-      size = (settings && settings.server && Number(settings.server.contextSize)) || 0;
-      var transcript = byId('transcript');
-      var chars = transcript ? (transcript.textContent || '').length : 0;
-      used = Math.round(chars / 4);
-      source = 'estimate';
-    }
-    if (!size) return row('Context', unknown('size not known'));
-    var pct = Math.min(100, Math.round((used / size) * 100));
-    return '<div class="stat-context">' +
-      '<div class="stat-context-head"><span>Context</span><span>' + util.formatTokens(used) + ' / ' + util.formatTokens(size) +
-      (source === 'estimate' ? ' <em>estimate</em>' : '') + '</span></div>' +
-      '<div class="meter' + (pct >= 85 ? ' is-high' : '') + '" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '" aria-label="Context used">' +
-      '<span style="width:' + pct + '%"></span></div></div>';
   }
 
   function renderStats() {
-    if (!panel || panel.hidden) return;
+    if (!panel || panel.hidden || !IM.statsView) return;
     var body = panel.querySelector('.stats-body');
     if (!body) return;
-    var status = state.status;
-    var engineState = IM.status.engineState(status);
-    var info = engineInfo(status);
-    var selected = state.selectedModel;
     var sessionId = state.activeSessionId;
     var sessionHistory = history.filter(function (item) { return item.sessionId === sessionId; });
-    var last = sessionHistory[sessionHistory.length - 1] || history[history.length - 1] || null;
-    var stateLabel = { ready: 'Online', provisioning: 'Provisioning', unreachable: 'Unreachable' }[engineState];
-
-    var html = '';
-    /* Model card */
-    html += '<section class="stats-card model-card-info" aria-labelledby="stats-model-title">' +
-      '<div class="stats-card-head"><h3 id="stats-model-title">Model</h3>' +
-      '<span class="state-pill" data-state="' + engineState + '">' + stateLabel + '</span></div>';
-    var modelName = (status && status.selected_model) || (selected && (selected.name || selected.filename)) || '';
-    html += '<p class="stats-model-name">' + (modelName ? escapeHtml(modelName) : (state.modelsDownloaded === 0 ? 'No model downloaded' : 'No model loaded')) + '</p>';
-    html += '<dl class="stat-list">';
-    var engineName = info.engine || '';
-    html += row('Engine', engineName ? escapeHtml(engineName === 'fish' ? 'FISH' : engineName) : unknown());
-    var shown = {};
-    ENGINE_FIELDS.forEach(function (pair) {
-      var key = pair[0];
-      if (shown[pair[1]]) return;
-      var value = info[key];
-      if (value === undefined || value === null || value === '') return;
-      shown[pair[1]] = true;
-      html += row(pair[1], escapeHtml(key.indexOf('context') === 0 ? util.formatTokens(value) + ' tokens' : value));
+    var transcript = byId('transcript');
+    var html = IM.statsView.html({
+      status: state.status,
+      engineState: IM.status.engineState(state.status),
+      selected: state.selectedModel,
+      modelsDownloaded: state.modelsDownloaded,
+      history: history,
+      last: sessionHistory[sessionHistory.length - 1] || history[history.length - 1] || null,
+      sessionLast: sessionHistory[sessionHistory.length - 1] || null,
+      settings: window.__imurun_settings ? window.__imurun_settings.get() : null,
+      transcriptChars: transcript ? (transcript.textContent || '').length : 0
     });
-    if (!shown.Architecture) html += row('Architecture', unknown());
-    if (!shown['Quantisation']) {
-      var tag = selected && Array.isArray(selected.tags) ? selected.tags.filter(function (t) { return /^q\d|^f16|^bf16|^iq\d/i.test(t); })[0] : null;
-      html += row('Quantisation', tag ? escapeHtml(tag) + ' <em>from catalogue</em>' : unknown());
-    }
-    if (!shown.Kernel) html += row('Kernel', unknown());
-    if (!shown['Context window']) {
-      var settings = window.__imurun_settings ? window.__imurun_settings.get() : null;
-      var ctx = settings && settings.server ? settings.server.contextSize : null;
-      html += row('Context window', ctx ? util.formatTokens(ctx) + ' tokens <em>configured</em>' : unknown());
-    }
-    if (selected && (selected.size_bytes || selected.size_gb)) {
-      html += row('File size', escapeHtml(selected.size_gb ? Number(selected.size_gb).toFixed(1) + ' GB' : util.formatBytes(selected.size_bytes)));
-    }
-    Object.keys(info).forEach(function (key) {
-      if (['engine', 'available', 'info', 'model_info'].indexOf(key) !== -1) return;
-      if (ENGINE_FIELDS.some(function (pair) { return pair[0] === key; })) return;
-      var value = info[key];
-      if (value === null || typeof value === 'object') return;
-      html += row(key.replace(/_/g, ' '), escapeHtml(String(value)));
-    });
-    html += '</dl>';
-    if (engineState !== 'ready') {
-      html += '<p class="stat-note">' + (engineState === 'unreachable'
-        ? 'The local server is not answering. Numbers here are from earlier replies.'
-        : 'The engine is still starting. It loads the model when it is ready, or when you send a message.') + '</p>';
-    }
-    html += '</section>';
-
-    /* Last reply */
-    html += '<section class="stats-card" aria-labelledby="stats-turn-title"><div class="stats-card-head"><h3 id="stats-turn-title">Last reply</h3>' +
-      (last ? '<span class="stat-source">' + (last.source === 'engine' ? 'engine' : 'measured here') + '</span>' : '') + '</div>';
-    if (!last) {
-      html += '<p class="stat-note">No replies yet on this page. Speed and timing appear after the first answer.</p>';
-    } else {
-      html += '<dl class="stat-list">' +
-        row('Speed', last.tokensPerSecond ? last.tokensPerSecond.toFixed(1) + ' tok/s' : unknown('too short to measure'),
-          last.source === 'engine' ? 'Decode speed reported by the engine' : 'Streamed chunks per second after the first one') +
-        row(last.prefillSeconds !== null && last.prefillSeconds !== undefined ? 'Prefill' : 'First token',
-          last.prefillSeconds !== null && last.prefillSeconds !== undefined ? util.formatSeconds(last.prefillSeconds) : (last.firstTokenSeconds !== null ? util.formatSeconds(last.firstTokenSeconds) : unknown()),
-          last.prefillSeconds !== null ? 'Prompt processing time' : 'Time from the server accepting the turn to the first token (includes prefill and queueing)') +
-        row('Total time', util.formatSeconds(last.totalSeconds)) +
-        row('Tokens out', last.tokens ? util.formatTokens(last.tokens) : unknown()) +
-        (last.promptTokens ? row('Tokens in', util.formatTokens(last.promptTokens)) : '') +
-        (last.steps > 1 ? row('Steps', String(last.steps)) : '') +
-        '</dl>';
-    }
-    html += contextBlock(last);
-    html += '</section>';
-
-    /* Trend */
-    var speeds = history.map(function (item) { return item.tokensPerSecond; });
-    var measured = speeds.filter(function (v) { return typeof v === 'number' && isFinite(v); });
-    var avg = measured.length ? measured.reduce(function (a, b) { return a + b; }, 0) / measured.length : null;
-    html += '<section class="stats-card" aria-labelledby="stats-trend-title"><div class="stats-card-head"><h3 id="stats-trend-title">Speed trend</h3>' +
-      (avg ? '<span class="stat-source">avg ' + avg.toFixed(1) + ' tok/s</span>' : '') + '</div>' +
-      sparkline(speeds) +
-      '<button class="btn ghost stats-clear" type="button" data-stats-clear' + (history.length ? '' : ' disabled') + '>Clear history</button>' +
-      '</section>';
-
+    /* Status polls every few seconds; only touch the DOM when something
+     * changed, and keep keyboard focus on the same control when it did. */
+    if (html === lastStatsHtml) return;
+    lastStatsHtml = html;
+    var focused = body.contains(document.activeElement) ? document.activeElement : null;
+    var focusKey = focused ? ['data-stats-clear', 'data-stats-models', 'data-stats-engine'].filter(function (name) {
+      return focused.hasAttribute(name);
+    }).map(function (name) { return '[' + name + ']'; })[0] : null;
     body.innerHTML = html;
+    IM.statsView.paint(body);
+    if (focused) {
+      var again = focusKey ? body.querySelector(focusKey) : null;
+      var fallback = panel.querySelector('[data-stats-close]');
+      (again || fallback).focus();
+    }
   }
 
   function bindStats() {
@@ -230,16 +116,26 @@
     if (toggleButton) toggleButton.addEventListener('click', function () { toggleStats(); });
     panel.addEventListener('click', function (event) {
       if (event.target.closest('[data-stats-close]')) toggleStats(false);
+      if (event.target.closest('[data-stats-models]') && IM.shell && IM.shell.openSettings) IM.shell.openSettings('models');
+      if (event.target.closest('[data-stats-engine]') && IM.shell && IM.shell.openSettings) IM.shell.openSettings('server');
       if (event.target.closest('[data-stats-clear]')) {
         history = [];
         IM.store.set(HISTORY_KEY, history);
         renderStats();
       }
     });
+    /* Escape inside the panel closes it before the global handler (which
+     * would stop a running reply) sees the key. */
+    panel.addEventListener('keydown', function (event) {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleStats(false);
+    });
     IM.bus.on('status', renderStats);
     IM.bus.on('models', renderStats);
     IM.bus.on('session.active', renderStats);
-    if (IM.store.get(STATS_OPEN_KEY, false) && window.innerWidth > 1100) toggleStats(true);
+    if (IM.store.get(STATS_OPEN_KEY, false) && window.innerWidth > 1100) toggleStats(true, false);
   }
 
   /* ---------------------------------------------------- command palette */
@@ -511,13 +407,22 @@
     return ['palette', 'shortcuts', 'rename'].some(function (id) {
       var node = byId(id);
       return node && !node.hidden;
-    });
+    }) || !!document.querySelector('[data-im-dialog]');
   }
 
   document.addEventListener('keydown', function (event) {
     var mod = event.ctrlKey || event.metaKey;
     var key = event.key;
     var typing = util.isTypingTarget(document.activeElement);
+
+    /* Escape closes the Performance panel when nothing nearer used it (app.js
+     * runs first: menus, drawer, approvals, stopping a reply). */
+    if (key === 'Escape' && !event.defaultPrevented && panel && !panel.hidden && !anyDialogOpen()) {
+      event.preventDefault();
+      toggleStats(false);
+      if (toggleButton && !util.isTypingTarget(document.activeElement)) toggleButton.focus();
+      return;
+    }
 
     if (mod && !event.altKey && (key === 'k' || key === 'K')) {
       event.preventDefault();
