@@ -71,6 +71,7 @@ from ..sessions.session import Session
 from ..sessions.transcript import TranscriptStore
 from ..skills.store import SkillsStore
 from ..tools import routes as tool_routes
+from ..remote import hosted as remote_routes  # /api/remote/* hosted model providers
 from ..voice import routes as voice_routes  # /api/voice/* (docs/voice/README.md)
 from ..tuning import routes as tuning_routes  # /api/tuning/* (docs/tuning/README.md)
 from ..tools.approvals import ApprovalBroker
@@ -797,7 +798,8 @@ class ApiServer:
                     voice_routes.dispatch(server, self, path)
                     return
                 handled = (tuning_routes.handle_get(server, path, query=parse_qs(urlsplit(self.path).query))
-                           or tool_routes.handle_get(server, path))
+                           or tool_routes.handle_get(server, path)
+                           or remote_routes.handle_get(server, self.path))
                 if handled is not None:
                     self._reply(*handled)
                     return
@@ -904,17 +906,23 @@ class ApiServer:
                     return
                 # Models API
                 if path == "/api/models" or path == "/api/models/":
+                    try:  # hosted providers' enabled models; never break the local list
+                        hosted = remote_routes.model_entries(server)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("hosted model rows failed")
+                        hosted = []
                     if not _HAS_MODELS_API or get_model_manager is None:
-                        self._reply(501, {"error": "models API not available"})
+                        self._reply(501, {"error": "models API not available", "hosted": hosted})
                         return
                     manager = get_model_manager()
                     models = manager.list_models()
                     selected = _selected_model_name(server)
+                    remote_active = bool(getattr(getattr(server, "_model", None), "remote", False))
                     payload = []
                     for model in models:
                         view = asdict(model)
                         view["selected"] = bool(
-                            selected and model.path and Path(model.path).name == selected
+                            not remote_active and selected and model.path and Path(model.path).name == selected
                         )
                         payload.append(view)
                     disk = (manager.disk_status() if hasattr(manager, "disk_status")
@@ -923,6 +931,7 @@ class ApiServer:
                         200,
                         {
                             "models": payload,
+                            "hosted": hosted,
                             "selected": selected,
                             "engine": _model_status(server),
                             "disk": disk,
@@ -985,6 +994,12 @@ class ApiServer:
                     if payload is None:
                         return
                     self._reply(*resources_update(server, payload))
+                    return
+                if remote_routes.is_post_route(path):
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    self._reply(*remote_routes.handle_post(server, path, payload))
                     return
                 if tuning_routes.is_post_route(path) or tool_routes.is_post_route(path):
                     payload = self._body()
@@ -1261,15 +1276,19 @@ class ApiServer:
 
                 # Select the model the engine should use.
                 if path == "/api/models/select":
-                    if not _HAS_MODELS_API or get_model_manager is None:
-                        self._reply(501, {"error": "models API not available"})
-                        return
                     payload = self._body()
                     if payload is None:
                         return
                     model_id = str(payload.get("id") or payload.get("model_id") or "")
                     if not model_id:
                         self._reply(400, {"error": "id is required"})
+                        return
+                    # "<provider>:<model>" (nvidia:, openrouter:, custom: ...) is a hosted model.
+                    if remote_routes.is_hosted_id(model_id):
+                        self._reply(*remote_routes.select(server, model_id))
+                        return
+                    if not _HAS_MODELS_API or get_model_manager is None:
+                        self._reply(501, {"error": "models API not available"})
                         return
                     manager = get_model_manager()
                     target = manager.get_model_path(model_id)
@@ -1300,6 +1319,7 @@ class ApiServer:
                         save_last_model(server._home, model_id)
                     except Exception:
                         pass
+                    remote_routes.local_selected(server)  # a hosted choice is not restored next start
                     self._reply(200, {
                         "selected": target.name, 
                         "id": model_id,
@@ -1506,7 +1526,8 @@ class ApiServer:
                     return
                 path = unquote(urlsplit(self.path).path)
                 parts = [part for part in path.split("/") if part]
-                handled = tool_routes.handle_delete(server, path)  # DELETE /api/mcp/servers/{id}
+                handled = (tool_routes.handle_delete(server, path)  # DELETE /api/mcp/servers/{id}
+                           or remote_routes.handle_delete(server, path))  # DELETE /api/remote/<p>/key
                 if handled is not None:
                     self._reply(*handled)
                     return

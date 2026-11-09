@@ -168,10 +168,10 @@ def build_server(
         except Exception as exc:  # noqa: BLE001 - research is optional
             print(f"research: not wired ({exc})", file=sys.stderr)
 
-    # NVIDIA-hosted models: the engine facade gets its remote client and the
-    # user's last hosted choice is restored (services/remote/nvidia.py).
+    # Hosted models (NVIDIA, OpenRouter, DeepSeek, ...): the user's last hosted
+    # choice is restored on the engine facade (services/remote/hosted.py).
     try:
-        from ..remote.nvidia import attach as attach_remote
+        from ..remote.hosted import attach as attach_remote
 
         attach_remote(server, model, home)
     except Exception as exc:  # noqa: BLE001 - hosted models are optional
