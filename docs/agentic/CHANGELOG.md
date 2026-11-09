@@ -1,5 +1,37 @@
 # Agentic layer — changelog
 
+## 2026-11-09 — install skills from a GitHub link
+
+Owner request: "adding new skill should be designed properly, like the user can
+add a GitHub link to add the skills."
+
+- `services/skills/github.py`: `POST /api/skills/import/preview {url}` resolves a
+  repo, `/tree/` folder, `/blob/.../SKILL.md` or raw `SKILL.md` link to a commit,
+  lists every skill under it (name, description, path, size, extra files,
+  skipped files with reasons, warnings, clash status) and writes nothing.
+  `POST /api/skills/import {url, paths, ref}` installs the chosen folders at the
+  previewed commit; `POST /api/skills/{id}/update` re-installs from the newest
+  commit of the recorded branch. Anonymous by default; the GitHub connector's
+  token is used only when it is connected, and only towards `api.github.com`.
+- Guards: only `api.github.com`, `raw.githubusercontent.com` and `github.com` over
+  https, redirects checked hop by hop; 50 skills and 5 MB per import, 100 000
+  per file, 20 resources per skill, 12 s per request; only SKILL.md plus
+  `.md`/`.txt` next to it are written (scripts, binaries, executables, symlinks,
+  submodules are listed as skipped); paths validated and written into a folder
+  the store creates and renames into place; an installed id is never overwritten.
+- `SkillsStore`: `Skill.source`, `install()` (atomic folder with resources and a
+  `.source.json` sidecar), `exists()`, `source_manifest()`; `list()` skips
+  dot-entries; `delete()` also removes the resource files an install wrote.
+- `GET /api/skills` items now carry `invoke` and, for GitHub skills, `source`
+  `{repo, commit, path, url}`.
+- Measured on `https://github.com/anthropics/skills` (anonymous, commit
+  `2c5958e`): 20 skills found with 3 API calls; 19 installable, `claude-api` is
+  over the 100 000-character cap. 19 of the 20 descriptions are longer than 200
+  characters (shortened, warned), and 13 of the 19 installable bodies are longer
+  than the 4 000 characters a turn injects (`invoke.MAX_SKILL_CHARS`), so those skills reach
+  the model cut; raising that cap is a follow-up, not done here.
+- Tests: `tests/test_skills_github.py` (59) against a fake GitHub on 127.0.0.1.
+
 ## 2026-11-03 — time to first token
 
 Symptom (owner, 8B): "the response is fast once it starts, but the first token

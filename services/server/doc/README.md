@@ -84,8 +84,8 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | GET | `/api/sessions` | Bearer | Session identities. |
 | GET | `/api/sessions/{id}` | Bearer | One identity. |
 | GET | `/api/sessions/{id}/messages` | Bearer | Transcript, `?limit=` (default 200). |
-| GET | `/api/skills` | Bearer | Skills without file paths. |
-| GET | `/api/skills/{id}` | Bearer | One skill `{id, name, description, origin, body, invoke: "/<id>"}`; 404. |
+| GET | `/api/skills` | Bearer | `{skills: [one skill, as below]}`, never file paths. |
+| GET | `/api/skills/{id}` | Bearer | One skill `{id, name, description, origin, body, invoke: "/<id>", source?}`; `source` = `{repo: "owner/repo", commit, path, url}` for a skill installed from GitHub; 404. |
 | GET | `/api/tools` | Bearer | `{tools: [{name, description, parameters (JSON schema), category, requires_network, available, reason, permission: allow\|ask\|deny, permission_level: allow\|read\|write\|ask\|always}], network, last_results, permissions: {mode, workspace, workspaceExists}, format}`. |
 | GET | `/api/tools/approvals` | Bearer | `{approvals: [{approval_id, tool, args, reasons, turn_id, session_id, call_id, created_at, expires_in}]}`. |
 | GET | `/api/permissions` | Bearer | `{mode, workspaceRoot, workspace, workspaceExists, readFiles, writeFiles, runShell, network, approvalTimeout, modes, table, grants}`; 501 without a policy. |
@@ -111,7 +111,10 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | POST | `/api/sessions/{id}/rename` | Bearer | Rename. |
 | POST | `/api/turns` | Bearer | Start a turn (`session_id`, `text` or `prompt`, optional `language` ISO 639-1 the user spoke: adds one "answer in <language>" line to the system prompt, echoed in `Turn.view().language`); `503 model_unavailable` when no model is configured (now also when the engine reports `available: false`). |
 | POST | `/api/turns/{id}/cancel` | Bearer | Cancel a running turn. |
-| POST | `/api/skills` | Bearer | Create a skill (409 on duplicate). Invoke it with `/<id>` in a prompt. |
+| POST | `/api/skills` | Bearer | Create a skill `{name, description, body}` (all required; 400 otherwise, 409 on duplicate). Invoke it with `/<id>` in a prompt. |
+| POST | `/api/skills/import/preview` | Bearer | `{url}` (a GitHub repo, `/tree/` folder, `/blob/.../SKILL.md` or raw `SKILL.md` link) → `{owner, repo, ref, commit, path, repo_url, skills: [{path, id, invoke, name, description, size, status: ok\|exists\|duplicate\|too_large\|invalid\|failed, installable, files, skipped, skipped_more, warnings}], total, truncated, notes, authenticated}`. No side effects. Errors `{error, code}`: 400 `bad_link`, 404 `not_found`/`no_skills`, 429 `rate_limited`, 502 `host_refused`/`upstream`/`unreachable`, 504 `timeout`. See `services/skills/doc/README.md`. |
+| POST | `/api/skills/import` | Bearer | `{url, paths: [folder paths from the preview], ref?: <commit from the preview>}` → `{owner, repo, commit, results: [{path, id, name, status: installed\|exists\|failed, error?, source?, files?}]}`. At most 50 paths. Never overwrites. Installed skills get `origin: github` and `source`. |
+| POST | `/api/skills/{id}/update` | Bearer | Re-install a GitHub skill from the newest commit of its branch → `{id, status: current\|updated, commit}`; 400 `not_github`. |
 | POST | `/api/tools/run` | Bearer | `{name, args, approved?, session_id?}` → `200 {result: {call_id, tool, args, decision, reasons, approval_id, result: ToolResult}}` (a failed tool is still 200 with `result.ok: false`); `403 {decision: "ask", reasons, tool, args}` → repeat with `approved: true`; `403 {decision: "deny", reasons}`; `400` bad body; `503` no tools. |
 | POST | `/api/tools/approvals/{id}` | Bearer | `{approved: bool, remember?: bool}` → `{approval_id, approved, remember}`; `404` unknown/answered. |
 | POST | `/api/permissions` | Bearer | Any of `{mode, workspaceRoot (absolute, not a drive root), readFiles, writeFiles, runShell, network, approvalTimeout}` → the view; `400` on invalid; publishes `permissions`. Stored in settings section `permissions`. |
@@ -151,8 +154,8 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | GET | `/v1/models/{id}` | API key | One model; `404 model_not_found`. |
 | POST | `/v1/chat/completions` | API key | OpenAI chat completions (JSON or SSE), see below. |
 
-`GET /api/skills/{id}` and `GET /api/models/{id}/path` exist only in
-`models_api.py` / the JS layer, not in this handler. `POST /api/turns` accepts a
+`GET /api/models/{id}/path` exists only in `models_api.py` / the JS layer, not
+in this handler (`GET /api/skills/{id}` is handled here). `POST /api/turns` accepts a
 `mode` field but ignores it.
 
 #### OpenAI-compatible API (`/v1/*`, `services/server/openai_api.py`)

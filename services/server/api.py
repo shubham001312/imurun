@@ -69,6 +69,7 @@ from ..prompts.queue import PromptQueue
 from ..safety.decisions import PermissionRequired
 from ..sessions.session import Session
 from ..sessions.transcript import TranscriptStore
+from ..skills.github import GitHubError, GitHubFetcher, SkillImporter, source_view
 from ..skills.store import SkillsStore
 from ..tools import routes as tool_routes
 from ..voice import routes as voice_routes  # /api/voice/* (docs/voice/README.md)
@@ -310,6 +311,10 @@ class ApiServer:
         self._version = version
         self._started_at = time.time()
         self._skills = skills or SkillsStore(mark=self._skill_mark)
+        # Install from GitHub. Production always uses the real hosts; tests
+        # replace this attribute with an importer pointed at a local fake.
+        self._skill_importer = SkillImporter(
+            self._skills, GitHubFetcher(token_provider=self._github_token))
         self._transcripts = transcripts or TranscriptStore(
             sessions_root, mark=self._transcript_mark
         )
@@ -462,6 +467,30 @@ class ApiServer:
 
     def _skill_mark(self, rule: str, subject: str, why: str) -> None:
         self._record(subject, f"{rule}: {why}")
+
+    def _github_token(self) -> str | None:
+        """The GitHub connector's token when it is connected, else ``None``.
+
+        Optional: skill import works anonymously; a token only raises the rate
+        limit and reaches private repositories. Never logged or returned.
+        """
+        connector = self._connectors.get("github") if self._connectors else None
+        if connector is None:
+            return None
+        try:
+            if not connector.connected():
+                return None
+            return connector._access_token()  # noqa: SLF001 - BearerConnector's token accessor
+        except Exception:  # noqa: BLE001 - a broken connector means anonymous
+            return None
+
+    def _skill_view(self, skill) -> dict:
+        view = {"id": skill.id, "name": skill.name, "description": skill.description,
+                "origin": skill.origin, "body": skill.body, "invoke": f"/{skill.id}"}
+        source = source_view(getattr(skill, "source", ""))
+        if source:
+            view["source"] = source
+        return view
 
     def _event_mark(self, rule: str, subject: str, why: str) -> None:
         self._record(subject, f"{rule}: {why}")
@@ -807,10 +836,7 @@ class ApiServer:
                     if skill is None:
                         self._reply(404, {"error": "unknown skill"})
                         return
-                    self._reply(200, {"id": skill.id, "name": skill.name,
-                                      "description": skill.description,
-                                      "origin": skill.origin, "body": skill.body,
-                                      "invoke": f"/{skill.id}"})
+                    self._reply(200, server._skill_view(skill))
                     return
                 if len(parts) == 3 and parts[:2] == ["api", "connectors"]:
                     connector = server._connectors.get(parts[2])
@@ -865,16 +891,7 @@ class ApiServer:
                     self._reply(
                         200,
                         {
-                            "skills": [
-                                {
-                                    "id": skill.id,
-                                    "name": skill.name,
-                                    "description": skill.description,
-                                    "origin": skill.origin,
-                                    "body": skill.body,
-                                }
-                                for skill in server._skills.list()
-                            ]
+                            "skills": [server._skill_view(skill) for skill in server._skills.list()]
                         },
                     )
                     return
@@ -1087,6 +1104,31 @@ class ApiServer:
                             self._reply(500, {"error": str(exc)})
                         return
                     self._reply(200, {"turn_id": turn.id})
+                    return
+
+                if path in ("/api/skills/import/preview", "/api/skills/import") or (
+                        len(parts) == 4 and parts[:2] == ["api", "skills"] and parts[3] == "update"):
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    importer = server._skill_importer
+                    try:
+                        if path == "/api/skills/import/preview":
+                            result = importer.preview(_text(payload, "url"))
+                        elif path == "/api/skills/import":
+                            ref = _text(payload, "ref").strip() or None
+                            result = importer.install(_text(payload, "url"), payload.get("paths"), ref)
+                            for item in result["results"]:
+                                if item["status"] == "installed":
+                                    server._record("skills", f"installed {item['id']} from {item['source']}")
+                        else:
+                            result = importer.update(parts[2])
+                            if result["status"] == "updated":
+                                server._record("skills", f"updated {parts[2]} to {result['commit']}")
+                    except GitHubError as exc:
+                        self._reply(exc.status, {"error": str(exc), "code": exc.code})
+                        return
+                    self._reply(200, result)
                     return
 
                 if path == "/api/skills":
