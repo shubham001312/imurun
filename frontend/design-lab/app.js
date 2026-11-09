@@ -907,83 +907,18 @@
 
   /* --------------------------------------------------------------- skills */
 
-  var skillsCache = [];
-
+  /* The Skills page and the Add skill dialog live in skills.js, which loads
+   * after this file; the first list may arrive before it does. */
+  var pendingSkills = null;
   function renderSkills(skills) {
-    var grid = byId('skill-grid');
-    if (!grid) return;
-    skillsCache = Array.isArray(skills) ? skills : [];
-    grid.setAttribute('aria-busy', 'false');
-    if (!skillsCache.length) {
-      grid.innerHTML = '<div class="empty-state skill-empty"><span class="empty-icon" aria-hidden="true">&#10022;</span>' +
-        '<h3>No skills yet</h3><p>A skill is a folder with a SKILL.md that teaches Imurun a repeatable task.</p>' +
-        '<button class="btn primary" type="button" data-skill-new>New skill</button></div>';
-      return;
-    }
-    grid.innerHTML = skillsCache.map(function (skill) {
-      return '<article class="panel skill" data-skill="' + escapeHtml(skill.id || '') + '">' +
-        '<div class="skill-head">' +
-          '<span class="skill-mark" aria-hidden="true">&#10022;</span>' +
-          '<div class="skill-name"><strong>' + escapeHtml(skill.name || skill.id || 'Untitled skill') + '</strong>' +
-          '<span class="muted">' + escapeHtml(skill.id || '') + '</span></div>' +
-          '<span class="chip ' + (skill.enabled !== false ? 'success' : 'neutral') + '">' + (skill.enabled !== false ? 'enabled' : 'disabled') + '</span>' +
-        '</div>' +
-        '<p>' + escapeHtml(skill.description || 'No description') + '</p>' +
-        '<div class="skill-foot"><span class="muted">' + escapeHtml(skill.origin || 'user') + '</span>' +
-        '<button class="btn ghost" type="button" data-skill-delete="' + escapeHtml(skill.id || '') + '">Delete</button></div>' +
-      '</article>';
-    }).join('');
+    if (IM.skills && IM.skills.render) IM.skills.render(skills);
+    else pendingSkills = skills;
   }
-
-  async function refreshSkills() {
-    try {
-      renderSkills(await api.listSkills());
-    } catch (error) {
-      toast({ tone: 'error', icon: 'alert', kicker: 'Skills', title: 'Could not load skills', text: error.message });
-    }
-  }
-
-  async function newSkill() {
-    var name = window.prompt('Skill name:');
-    if (!name || !name.trim()) return;
-    var description = window.prompt('One line on what it does (optional):') || '';
-    try {
-      await api.createSkill({ name: name.trim(), description: description.trim() });
-      toast({ tone: 'success', icon: 'check', kicker: 'Skill created', title: name.trim(), text: 'Created under ~/.imurun/skills/.' });
-      refreshSkills();
-    } catch (error) {
-      toast({ tone: 'error', icon: 'alert', kicker: 'Skills', title: 'Could not create the skill', text: error.message });
-    }
-  }
-
-  var skillGrid = byId('skill-grid');
-  if (skillGrid) {
-    skillGrid.addEventListener('click', async function (event) {
-      if (event.target.closest('[data-skill-new]')) {
-        newSkill();
-        return;
-      }
-      var remove = event.target.closest('[data-skill-delete]');
-      if (remove) {
-        var id = remove.dataset.skillDelete;
-        if (!window.confirm('Delete the skill "' + id + '"? Its folder is removed.')) return;
-        try {
-          await api.deleteSkill(id);
-          toast({ tone: 'neutral', icon: 'close', kicker: 'Skills', title: 'Skill deleted', text: id });
-          refreshSkills();
-        } catch (error) {
-          toast({ tone: 'error', icon: 'alert', kicker: 'Skills', title: 'Could not delete the skill', text: error.message });
-        }
-        return;
-      }
-      var card = event.target.closest('[data-skill]');
-      if (!card) return;
-      var skill = skillsCache.filter(function (item) { return item.id === card.dataset.skill; })[0];
-      if (skill) toast({ tone: 'neutral', icon: 'info', kicker: 'Skill', title: skill.name || skill.id, text: skill.description || 'No description' });
-    });
-  }
-  var newSkillButton = byId('new-skill');
-  if (newSkillButton) newSkillButton.addEventListener('click', newSkill);
+  IM.takePendingSkills = function () {
+    var value = pendingSkills;
+    pendingSkills = null;
+    return value;
+  };
 
   /* -------------------------------------------------------------- persona */
 

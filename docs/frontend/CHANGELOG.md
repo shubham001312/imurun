@@ -4,7 +4,25 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
-## 2026-11-09: Workspace layout, home launchpad, draft chats
+## 2026-11-09: Skills page and the Add skill dialog
+
+- **Add skill** (`skills.js`, `styles/skills.css`) is one dialog with two tabs.
+  *Write one*: name, description, instructions, a live preview of the `/<id>` it
+  will get (same slug rules as the server) and inline checks that mirror the
+  server's limits and catch an id that already exists. *From GitHub*: paste a
+  link, Find skills, then a checklist of what the link holds (name, `/id`,
+  path, size, status, warnings, files copied and files skipped), select all,
+  and Install; each row then says installed, already installed or failed.
+  Esc closes, focus is trapped while open and returned on close, arrow keys move
+  between the tabs.
+- **Cards** show the name, `/<id>`, description and the source (Written by you,
+  or GitHub `owner/repo` linking to the commit), with Use in chat (puts `/<id>`
+  in the composer), Copy command, Update (GitHub skills) and Delete (confirmed
+  in a dialog). A search box appears with more than six skills; the empty state
+  offers both ways to add one.
+- Fixed: the old New skill button used two `window.prompt`s and sent no
+  instructions, so the server refused every skill it tried to create (400
+  "a skill needs instructions").
 
 - **Side panel** is a tool rail: New chat on top (Alt N), pages grouped under
   Workspace (Home, Chat, Sessions) and Agent (Skills, Persona, Apps) with line
