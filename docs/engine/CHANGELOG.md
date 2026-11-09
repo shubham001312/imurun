@@ -1,5 +1,31 @@
 # Engine changelog
 
+## 2026-11-08 — Qwen-family (no-BOS) models pass M2
+
+**Symptom.** `fish_test_m2` on `Qwen3-1.7B-Q4_K_M.gguf` failed 4 checks:
+"token not found: <|begin_of_text|>" and both BOS chat checks ("starts with BOS
+once", "exactly one BOS"). Generation itself was correct (61-86 tok/s, "Paris").
+
+**Cause.** `test/test_m2.cpp:79` hard-coded the Llama BOS string into the fixed
+prompt, and `test/test_m2.cpp:173-175` asserted every tokenizer opens chat with
+a BOS. Qwen-family tokenizers have no BOS at all (Qwen3.5 sets
+`bos_token = None`; `tokenizer.ggml.bos_token_id` is absent, BPE default -1 per
+`src/tokenizer.cpp:181`), so the model legitimately encodes chat without one.
+
+**Fix.** Made the test conditional, engine unchanged:
+- Prompt opener `<|begin_of_text|>` is only pushed when the vocabulary actually
+  contains it; expected prompt token count is 6 with BOS, 5 without
+  (`test/test_m2.cpp`).
+- Chat BOS assertions run only when `tk->bos() >= 0`; otherwise the test asserts
+  chat encoding is non-empty and stays BOS-free.
+
+**Result.** Qwen3-1.7B-Q4_K_M: M2 PASSED (0 failures), 65 tok/s decode.
+Regression: Llama-3.2-1B-Instruct-Q4_K_M still PASSED with the BOS path
+("starts with BOS once", "exactly one BOS").
+
+Prerequisite for the `qwen35` (Qwen3.5) engine work — spec in
+`Project Orange/Plan/01-QWEN35-ENGINE-SPEC.md`.
+
 ## 2026-11-03 — default GPU residency for the 8B, warm loads in seconds, ABI 4
 
 Measured on the RTX 3050 Laptop (4 GB; the desktop held 0.63–0.80 GB of it),

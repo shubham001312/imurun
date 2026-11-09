@@ -30,6 +30,7 @@
     'session',
     'usage',
     'resources',
+    'update',
     'error',
     'compaction.start',
     'compaction.progress',

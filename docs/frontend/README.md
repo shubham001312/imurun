@@ -435,6 +435,29 @@ API-REQUESTS #34).
 - Every animation stops under reduced motion (OS or the Customisation
   toggle); spinners slow down rather than vanish.
 
+## Updates and slash commands
+
+`update.js` consumes `GET/POST /api/update` and the `update` SSE event
+(contract: `services/server/doc/README.md` "Update contract"). When the view
+has `prompt: true` and `available: true`, a modal is shown once per page load:
+**Update now** posts `apply` and shows progress from the events (`updating`
+"Downloading and installing...", `restart_pending` "Restarting..."), then
+polls `/health` until the new server answers and reloads; **Not now** posts
+`dismiss` (the server asks again after 3 launches); Esc or a click outside
+posts `later` (this launch only). The release notes link opens in a new tab
+(`rel=noopener`). Settings > Profile has an "About and updates" card with the
+same actions and an "Update available" badge. Update is disabled with the
+server's `applyBlocked` reason when `canApply` is false.
+
+Composer commands (`slash.js`, type `/`; arrows, Tab/Enter complete, Enter on
+a full command at the start of the message runs it, Esc closes; output is an
+inline note in the chat, or a toast off the chat page):
+`/help`, `/new`, `/clear` (view only), `/rename`, `/model` (loaded model,
+tok/s, opens Models), `/hardware` (Resource manager), `/settings`, `/voice`
+(toggles dictation), `/export` (chat as Markdown download), `/doctor`
+(`/api/status` + `/api/resources` summary), `/update` (check now, offer
+apply). Skills from `/api/skills` appear in the same list.
+
 ## Keyboard shortcuts
 
 `Ctrl/Cmd K` search, `Enter` send (queues while a reply runs), `Shift Enter`

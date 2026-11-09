@@ -1271,6 +1271,304 @@ def frontend_index() -> Path:
     return ROOT / "frontend" / "design-lab" / "index.html"
 
 
+# --------------------------------------------------------------------------- #
+# The global `imurun` command (a shim on the user's PATH)
+# --------------------------------------------------------------------------- #
+# Windows: %LOCALAPPDATA%\Programs\imurun\bin\imurun.cmd, folder added to the
+# USER Path (HKCU\Environment, REG_EXPAND_SZ kept) + WM_SETTINGCHANGE so new
+# terminals see it. macOS/Linux: ~/.local/bin/imurun (a sh script). The shim
+# sets IMURUN_SUPERVISED=1 and runs the command again when it exits with 75
+# (an applied update asked for a restart; services/update, start.py).
+SHIM_MARK = "IMURUN command shim"
+SHIM_EXIT_RESTART = 75
+
+
+def shim_dir() -> Path:
+    override = os.environ.get("IMURUN_SHIM_DIR")
+    if override:
+        return Path(override).expanduser()
+    if IS_WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "Programs" / "imurun" / "bin"
+    return Path.home() / ".local" / "bin"
+
+
+def shim_path() -> Path:
+    return shim_dir() / ("imurun.cmd" if IS_WINDOWS else "imurun")
+
+
+def shim_disabled() -> str | None:
+    """Why the shim must not be written now (tests, CI, opt-out, npm launcher)."""
+    if os.environ.get("IMURUN_NO_SHIM") == "1":
+        return "IMURUN_NO_SHIM=1"
+    if os.environ.get("PYTEST_CURRENT_TEST") and not os.environ.get("IMURUN_SHIM_DIR"):
+        return "running under pytest"
+    if os.environ.get("CI") and not os.environ.get("IMURUN_SHIM_DIR"):
+        return "CI"
+    if os.environ.get("IMURUN_LAUNCHER") == "npm":
+        return "the npm launcher already provides the imurun command"
+    return None
+
+
+def _installed_console_script() -> Path | None:
+    import sysconfig  # noqa: PLC0415
+
+    name = "imurun.exe" if IS_WINDOWS else "imurun"
+    dirs = [Path(sys.executable).parent]
+    for scheme in (None, f"{os.name}_user"):
+        try:
+            p = sysconfig.get_path("scripts", scheme) if scheme else sysconfig.get_path("scripts")
+            if p:
+                dirs.append(Path(p))
+        except (KeyError, ValueError):
+            pass
+    for d in dirs:
+        if (d / name).is_file():
+            return d / name
+    return None
+
+
+def shim_target() -> list[str]:
+    """The command the shim runs (absolute paths)."""
+    if INSTALLED:
+        script = _installed_console_script()
+        return [str(script)] if script else [sys.executable, "-m", "imurun"]
+    py = venv_python() if (VENV.exists() and venv_healthy()) else Path(sys.executable)
+    return [str(py), str(ROOT / "start.py")]
+
+
+def shim_text(target: list[str]) -> str:
+    if IS_WINDOWS:
+        cmd = " ".join(f'"{part}"' for part in target)
+        return "\r\n".join([
+            "@echo off",
+            f"rem {SHIM_MARK} (written by install.py; `imurun install` rewrites it).",
+            "setlocal",
+            'set "IMURUN_SUPERVISED=1"',
+            ":run",
+            f"{cmd} %*",
+            'set "IMURUN_RC=%ERRORLEVEL%"',
+            f'if "%IMURUN_RC%"=="{SHIM_EXIT_RESTART}" (',
+            '  set "IMURUN_AFTER_UPDATE=1"',
+            "  goto run",
+            ")",
+            "endlocal & exit /b %IMURUN_RC%",
+            "",
+        ])
+    import shlex  # noqa: PLC0415
+
+    cmd = " ".join(shlex.quote(part) for part in target)
+    return "\n".join([
+        "#!/bin/sh",
+        f"# {SHIM_MARK} (written by install.py; `imurun install` rewrites it).",
+        "IMURUN_SUPERVISED=1; export IMURUN_SUPERVISED",
+        "while :; do",
+        f'  {cmd} "$@"',
+        "  rc=$?",
+        f'  [ "$rc" -eq {SHIM_EXIT_RESTART} ] || exit "$rc"',
+        "  IMURUN_AFTER_UPDATE=1; export IMURUN_AFTER_UPDATE",
+        "done",
+        "",
+    ])
+
+
+def _norm_dir(text: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.expandvars(text.strip().strip('"')))).rstrip("\\/")
+
+
+def path_contains(path_value: str, folder: Path | str) -> bool:
+    want = _norm_dir(str(folder))
+    return any(_norm_dir(p) == want for p in (path_value or "").split(os.pathsep) if p.strip())
+
+
+class WindowsUserPath:
+    """HKCU\\Environment Path: read, append, broadcast. The only registry writer."""
+
+    def read(self) -> str:
+        import winreg  # noqa: PLC0415
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+                value, _ = winreg.QueryValueEx(key, "Path")
+                return str(value or "")
+        except OSError:
+            return ""
+
+    def append(self, folder: Path) -> bool:
+        import winreg  # noqa: PLC0415
+
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0,
+                                winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                try:
+                    value, kind = winreg.QueryValueEx(key, "Path")
+                except OSError:
+                    value, kind = "", winreg.REG_EXPAND_SZ
+                if path_contains(str(value or ""), folder):
+                    return False
+                if kind not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+                    kind = winreg.REG_EXPAND_SZ
+                parts = [p for p in str(value or "").split(";") if p.strip()]
+                winreg.SetValueEx(key, "Path", 0, kind, ";".join([*parts, str(folder)]))
+        except OSError as exc:
+            raise RuntimeError(f"could not update the user Path: {exc}") from exc
+        self.broadcast()
+        return True
+
+    @staticmethod
+    def broadcast() -> None:
+        """WM_SETTINGCHANGE("Environment") so Explorer (and new shells) reread Path."""
+        try:
+            import ctypes  # noqa: PLC0415
+            from ctypes import wintypes  # noqa: PLC0415
+
+            result = wintypes.DWORD()
+            ctypes.windll.user32.SendMessageTimeoutW(
+                0xFFFF, 0x001A, 0, "Environment", 0x0002, 3000, ctypes.byref(result))
+        except Exception:  # noqa: BLE001 - only affects already-running shells
+            pass
+
+
+def user_path_value(registry=None) -> str:
+    """The persistent user PATH (Windows registry) or the process PATH elsewhere."""
+    if IS_WINDOWS:
+        try:
+            return (registry or WindowsUserPath()).read()
+        except Exception:  # noqa: BLE001
+            return ""
+    return os.environ.get("PATH", "")
+
+
+def posix_path_hint(folder: Path) -> str:
+    shell = Path(os.environ.get("SHELL", "sh")).name
+    rc = {"zsh": "~/.zshrc", "bash": "~/.bashrc", "fish": "~/.config/fish/config.fish"}.get(shell, "~/.profile")
+    if shell == "fish":
+        return f"fish_add_path {folder}"
+    return f"echo 'export PATH=\"{folder}:$PATH\"' >> {rc}"
+
+
+def ensure_command(*, registry=None, quiet: bool = False, force: bool = False) -> dict:
+    """Write/repair the `imurun` shim and put its folder on the user PATH. Idempotent.
+
+    ``registry`` replaces the Windows registry editor (tests pass a fake).
+    Returns the record stored as ``command`` in install-state.json.
+    """
+    say_ok = (lambda *_: None) if quiet else ui.ok
+    say_info = (lambda *_: None) if quiet else ui.info
+    why = shim_disabled()
+    if why and not force:
+        return {"ok": False, "skipped": why}
+    folder, path = shim_dir(), shim_path()
+    target = shim_target()
+    text = shim_text(target)
+    rec: dict = {"ok": False, "path": str(path), "dir": str(folder), "target": target,
+                 "written_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        old = path.read_bytes().decode("utf-8", "replace") if path.is_file() else None
+        if old != text:
+            path.write_bytes(text.encode("utf-8"))
+            if not IS_WINDOWS:
+                os.chmod(path, 0o755)
+            rec["changed"] = True
+    except OSError as exc:
+        rec["error"] = f"could not write {path}: {exc}"
+        if not quiet:
+            ui.warn(f"`imurun` command: {rec['error']}")
+        return rec
+    rec["ok"] = True
+    if IS_WINDOWS:
+        reg = registry or WindowsUserPath()
+        try:
+            rec["path_added"] = reg.append(folder)
+        except Exception as exc:  # noqa: BLE001
+            rec["path_added"] = False
+            rec["error"] = str(exc)
+        rec["on_user_path"] = path_contains(user_path_value(reg), folder)
+        if not path_contains(os.environ.get("PATH", ""), folder):
+            # This process (and its children) can use it right away.
+            os.environ["PATH"] = os.pathsep.join([os.environ.get("PATH", ""), str(folder)])
+        say_ok(f"`imurun` command: {ui.c(str(path), 'grey')}")
+        if rec.get("path_added"):
+            say_info(f"Added {folder} to your user PATH. Open a NEW terminal for `imurun` to work there.")
+        elif not rec["on_user_path"]:
+            if not quiet:
+                ui.warn(f"Could not add {folder} to your user PATH ({rec.get('error')}). Add it in "
+                        "Settings > System > About > Advanced system settings > Environment Variables.")
+    else:
+        rec["on_user_path"] = path_contains(os.environ.get("PATH", ""), folder)
+        say_ok(f"`imurun` command: {ui.c(str(path), 'grey')}")
+        if not rec["on_user_path"]:
+            rec["hint"] = posix_path_hint(folder)
+            if not quiet:
+                ui.warn(f"{folder} is not on your PATH. Add it with:")
+                ui.line("      " + ui.c(rec["hint"], "cyan"))
+                ui.hint("then open a new terminal.")
+    write_command_state(rec)
+    return rec
+
+
+def write_command_state(rec: dict) -> None:
+    import json  # noqa: PLC0415
+
+    data = read_state() or {}
+    data["schema"] = STATE_SCHEMA
+    data.setdefault("envs", {})
+    data["command"] = rec
+    path = state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def command_status(registry=None) -> dict:
+    """For doctor: is the shim there, does its target exist, is it on PATH?"""
+    path, folder = shim_path(), shim_dir()
+    out = {"path": str(path), "exists": path.is_file(), "dir": str(folder),
+           "on_process_path": path_contains(os.environ.get("PATH", ""), folder),
+           "on_user_path": path_contains(user_path_value(registry), folder) if IS_WINDOWS else None,
+           "which": shutil.which("imurun"), "target_ok": False}
+    if out["exists"]:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        out["target"] = shim_target_of(text)
+        out["target_ok"] = bool(out["target"] and Path(out["target"]).exists())
+    return out
+
+
+def shim_target_of(text: str) -> str | None:
+    """The executable a shim runs (first word of its command line)."""
+    if IS_WINDOWS:
+        m = re.search(r'^\s*"([^"]+)"', text, re.M)
+        return m.group(1) if m else None
+    import shlex  # noqa: PLC0415
+
+    body = text.split("while :; do", 1)[-1].strip().splitlines()
+    try:
+        return shlex.split(body[0])[0] if body else None
+    except ValueError:
+        return None
+
+
+def repair_command_if_missing() -> bool:
+    """quick_check hook: rewrite a missing/broken shim (a stat when it is fine)."""
+    if shim_disabled():
+        return False
+    path = shim_path()
+    if path.is_file():
+        rec = read_state().get("command") or {}
+        target = rec.get("target") or []
+        if rec.get("ok") and target and Path(target[0]).exists():
+            return False
+    try:
+        return bool(ensure_command(quiet=True).get("ok"))
+    except Exception:  # noqa: BLE001 - never block start-up
+        return False
+
+
 def quick_check() -> list[str]:
     """Reasons the install step has to run; [] when everything is in place.
 
@@ -1282,6 +1580,7 @@ def quick_check() -> list[str]:
     if miss:
         reasons.append("missing Python packages: " + ", ".join(miss))
     home = ensure_home_layout()
+    repair_command_if_missing()
     if home["failed"]:
         reasons.append("data folder incomplete: " + ", ".join(f"{k} ({v})" for k, v in home["failed"].items()))
     if not frontend_index().is_file():
@@ -1427,6 +1726,9 @@ def run_setup(*, python: str, window: bool, voice: bool, tuning: bool, force: bo
         "home": {"root": home["root"], "folders": len(home["present"]) + len(home["created"])},
     }
     path = write_env_state(entry)
+    command = ensure_command()
+    if command.get("skipped"):
+        ui.hint(f"`imurun` command not written ({command['skipped']})")
     if path:
         ui.hint(f"Recorded in {path}")
     return 0
@@ -1479,11 +1781,40 @@ def doctor(port: int = 8732) -> int:
         ui.ok(f"port {port} is free")
     except OSError:
         ui.warn(f"port {port} is in use (IMURUN already running? use --port N)")
+    report_command()
     reasons = quick_check()
     if reasons:
         ui.info("the next start runs the install step: " + "; ".join(reasons))
     ui.line()
     return 0 if not miss and have_ui else 1
+
+
+def report_command() -> None:
+    st = command_status()
+    if not st["exists"]:
+        why = shim_disabled()
+        ui.fail(f"`imurun` command missing ({st['path']})"
+                + (f"; not written: {why}" if why else "; run: imurun install  (or python install.py)"))
+        return
+    if not st["target_ok"]:
+        ui.fail(f"`imurun` command {st['path']} points to a missing interpreter; run: imurun install")
+        return
+    if IS_WINDOWS:
+        if st["on_user_path"] and st["on_process_path"]:
+            ui.ok(f"`imurun` command {ui.c(st['path'], 'grey')} (on PATH)")
+        elif st["on_user_path"]:
+            ui.ok(f"`imurun` command {ui.c(st['path'], 'grey')} (on your user PATH)")
+            ui.hint("this terminal was opened before it was added: open a new one")
+        else:
+            ui.warn(f"`imurun` command {st['path']}: {st['dir']} is not on your user PATH; "
+                    "run: imurun install")
+    elif st["on_process_path"]:
+        ui.ok(f"`imurun` command {ui.c(st['path'], 'grey')} (on PATH)")
+    else:
+        ui.warn(f"`imurun` command {st['path']}: {st['dir']} is not on PATH. Add it with:")
+        ui.line("      " + ui.c(posix_path_hint(Path(st["dir"])), "cyan"))
+    if st["which"] and os.path.normcase(st["which"]) != os.path.normcase(st["path"]):
+        ui.hint(f"note: `imurun` currently resolves to {st['which']} first")
 
 
 # --------------------------------------------------------------------------- #

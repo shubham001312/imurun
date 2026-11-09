@@ -544,3 +544,15 @@ body[data-reduced-motion="1"] .approval-card,
 body[data-reduced-motion="1"] .msg-sources .source-chip,
 body[data-reduced-motion="1"] .slash-menu { animation: none !important; }
 body[data-reduced-motion="1"] .approval-timer > span { transition: none !important; }
+
+/* Command output (slash.js) and the update pop-up (update.js). */
+.cmd-note { margin: 10px 0; padding: 10px 14px; border: 1px solid var(--line-strong); border-radius: var(--radius); background: var(--surface); color: var(--text); font-size: 13px; display: grid; gap: 4px; }
+.cmd-note strong { font-size: 13px; }
+.cmd-note-actions { display: flex; gap: 8px; margin-top: 6px; }
+.update-dialog .update-progress { margin: 0 0 12px; font-weight: 600; }
+.update-dialog .update-notes { margin: 0 0 16px; font-size: 13px; }
+.update-dialog .update-notes a { color: inherit; text-decoration: underline; }
+.update-actions { flex-wrap: wrap; }
+.update-actions .update-skip { margin-right: auto; }
+.update-card .settings-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+.update-card-text { margin: 0; font-size: 13px; color: var(--muted); }

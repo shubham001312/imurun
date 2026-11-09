@@ -11,19 +11,61 @@ The user picks the folder (``permissions.workspaceRoot``; default
 
 The root is read through a callable on every use, so changing the setting
 takes effect on the next tool call without a restart.
+
+Reading outside the workspace: the permission policy may turn a read of an
+outside path into an approval card (``permissions.outsideReads = "ask"``).
+Only after the user approves that one call does the executor run the tool
+inside ``outside_grant(paths)``; ``resolve`` then accepts exactly those
+paths (and what is under an approved folder) for reading, still refusing
+secret files, ``.git``, credential folders (``~/.ssh``...) and IMURUN's own
+data folder (it holds the API token). Writes and deletes never leave the
+workspace.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterable, Iterator
 
 from ..safety.decisions import check_action
 
 
 def default_workspace() -> Path:
-    return Path(os.path.expanduser("~/.imurun/workspace"))
+    """``<data root>/workspace``: ``IMURUN_DATA_ROOT`` when set (it used to be
+    ignored, so a server started with a scratch data root still worked in
+    the real ``~/.imurun/workspace``), else ``~/.imurun``."""
+    env = os.environ.get("IMURUN_DATA_ROOT")
+    base = Path(os.path.expanduser(env)) if env else Path(os.path.expanduser("~/.imurun"))
+    return base / "workspace"
+
+
+# Paths the user approved for reading outside the workspace, for the call
+# that is running in this thread (set by the executor, see outside_grant).
+_OUTSIDE_OK: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("imurun_outside_ok", default=())
+
+# Folders under the home directory that hold credentials. Never readable
+# through the outside-read approval, whatever the user clicks.
+CREDENTIAL_DIRS = (".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".gcloud",
+                   os.path.join(".config", "gcloud"), os.path.join(".config", "gh"))
+_SECRET_NAMES = (".netrc", "_netrc", ".npmrc", ".pypirc", ".git-credentials", ".htpasswd", ".pgpass")
+
+
+@contextlib.contextmanager
+def outside_grant(paths: Iterable[str | Path]) -> Iterator[None]:
+    """Let ``resolve(kind="file_read")`` accept ``paths`` in this context."""
+    token = _OUTSIDE_OK.set(tuple(os.path.realpath(str(p)) for p in paths))
+    try:
+        yield
+    finally:
+        _OUTSIDE_OK.reset(token)
+
+
+def _data_root() -> Path:
+    env = os.environ.get("IMURUN_DATA_ROOT")
+    return Path(os.path.realpath(os.path.expanduser(env or "~/.imurun")))
 
 
 class WorkspaceError(ValueError):
@@ -77,6 +119,10 @@ class Workspace:
             given = Path(os.path.expanduser(text))
             candidate = given if given.is_absolute() else root / given
         resolved = Path(os.path.realpath(candidate))
+        if not _inside(resolved, root) and kind == "file_read" and any(
+                _inside(resolved, Path(g)) for g in _OUTSIDE_OK.get()):
+            outside_refusal(resolved)        # raises for secrets and credential folders
+            return resolved
         if not _inside(resolved, root):
             raise WorkspaceError(
                 f"{text or '.'} is outside the workspace ({root}). "
@@ -92,6 +138,19 @@ class Workspace:
             raise WorkspaceError("; ".join(decision.reasons) or "that path is protected")
         return resolved
 
+    def resolve_outside(self, path: str | None) -> Path:
+        """The absolute path of ``path`` when it is outside the workspace and
+        may be read after an approval; raises ``WorkspaceError`` otherwise
+        (inside paths go through ``resolve``)."""
+        text = str(path or "").strip().strip('"').strip("'")
+        given = Path(os.path.expanduser(text or "."))
+        candidate = given if given.is_absolute() else self.root / given
+        resolved = Path(os.path.realpath(candidate))
+        if _inside(resolved, self.root):
+            raise WorkspaceError(f"{text} is inside the workspace")
+        outside_refusal(resolved)
+        return resolved
+
     def relative(self, path: Path) -> str:
         """``path`` relative to the root, with forward slashes, for display."""
         try:
@@ -100,6 +159,30 @@ class Workspace:
             return str(path)
         text = rel.as_posix()
         return text or "."
+
+
+def outside_refusal(path: Path) -> None:
+    """Raise ``WorkspaceError`` for an outside path that must stay unreadable."""
+    parts = [p.casefold() for p in Path(path).parts]
+    name = Path(path).name.casefold()
+    if ".git" in parts:
+        raise WorkspaceError(f"{path} is inside a .git folder")
+    if name == ".env" or name.startswith(".env.") or name in _SECRET_NAMES:
+        raise WorkspaceError(f"{path} is a secrets file")
+    home = Path(os.path.realpath(os.path.expanduser("~")))
+    for folder in CREDENTIAL_DIRS:
+        if _inside(path, home / folder):
+            raise WorkspaceError(f"{path} is in a credentials folder ({folder})")
+    data = _data_root()
+    if _inside(path, data):
+        raise WorkspaceError(f"{path} is in IMURUN's data folder (it holds the API token)")
+    try:
+        from ..safety.decisions import GUARDRAIL_DIR
+
+        if _inside(path, Path(os.path.realpath(GUARDRAIL_DIR))):
+            raise WorkspaceError(f"{path} is guardrail source")
+    except ImportError:  # pragma: no cover
+        pass
 
 
 def _inside(path: Path, root: Path) -> bool:

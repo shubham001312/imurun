@@ -4,7 +4,7 @@
  *   IMURUN.slash.refresh()     reload GET /api/skills
  *
  * Typing "/" at the start of the message or after a space lists the stored
- * skills (GET /api/skills) and the `/rename` command. Arrow keys move, Enter
+ * skills (GET /api/skills) and the built-in commands (/help lists them). Arrow keys move, Enter
  * or Tab inserts "/<id> ", Esc closes. The server injects a skill when the
  * prompt contains `/<id>` (docs/agentic/README.md section 5), so inserting
  * the token is all the UI has to do. Skills the message already names are
@@ -19,8 +19,132 @@
   var IM = window.IMURUN = window.IMURUN || {};
   var util = IM.util;
   var STALE_MS = 30000;
-  var LIMIT = 8;
-  var COMMANDS = [{ id: 'rename', name: 'Rename this session', description: 'Opens the rename dialog.', command: true }];
+  var LIMIT = 14;
+  var COMMANDS = [];
+  var RUN = {};
+  function cmd(id, name, description, run) {
+    COMMANDS.push({ id: id, name: name, description: description, command: true });
+    RUN[id] = run;
+  }
+  function shell() { return IM.shell || {}; }
+  function esc(v) { return util.escapeHtml(String(v == null ? '' : v)); }
+
+  /* Command output: an inline note in the open chat, else a toast. */
+  function note(title, lines, actions) {
+    var box = document.getElementById('transcript');
+    var onChat = box && shell().currentPage && shell().currentPage() === 'chat';
+    if (!onChat) {
+      if (IM.toast) IM.toast({ tone: 'neutral', icon: 'info', kicker: 'Command', title: title, text: lines.join(' · '), actions: actions, timeout: 9000 });
+      return;
+    }
+    var empty = box.querySelector('.chat-empty');
+    if (empty) empty.remove();
+    var el = document.createElement('div');
+    el.className = 'cmd-note';
+    el.setAttribute('role', 'status');
+    el.innerHTML = '<strong>' + esc(title) + '</strong>' + lines.map(function (l) { return '<div>' + esc(l) + '</div>'; }).join('');
+    if (actions && actions.length) {
+      var row = document.createElement('div');
+      row.className = 'cmd-note-actions';
+      actions.forEach(function (a) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'btn' + (a.primary ? ' primary' : '');
+        b.textContent = a.label;
+        b.addEventListener('click', a.onClick);
+        row.appendChild(b);
+      });
+      el.appendChild(row);
+    }
+    box.appendChild(el);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function scalars(obj, limit) {
+    var out = [];
+    Object.keys(obj || {}).forEach(function (k) {
+      var v = obj[k];
+      if (out.length < limit && (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) out.push(k + ': ' + v);
+    });
+    return out;
+  }
+
+  cmd('rename', 'Rename this session', 'Opens the rename dialog.', function () { shell().handleCommand('/rename'); });
+  cmd('new', 'New session', 'Start a fresh conversation.', function () { if (shell().createSession) shell().createSession(); });
+  cmd('clear', 'Clear the view', 'Empty the visible transcript (server history is kept).', function () { if (IM.chat) IM.chat.clear(); });
+  cmd('model', 'Model', 'Show the loaded model and speed, and open the Models tab.', function () {
+    api().getStatus().then(function (st) {
+      var eng = (st && st.engine) || {};
+      var tps = Number(eng.tokens_per_second);
+      note('Model', [
+        'Loaded: ' + ((st && st.selected_model) || 'none'),
+        'Speed: ' + (tps ? tps.toFixed(1) + ' tok/s (last reply)' : 'not reported yet')
+      ]);
+    }, function (e) { note('Model', ['Status unavailable: ' + e.message]); });
+    if (shell().openSettings) shell().openSettings('models');
+  });
+  cmd('hardware', 'Hardware', 'Open the Resource manager.', function () { if (shell().openSettings) shell().openSettings('resources'); });
+  cmd('settings', 'Settings', 'Open Settings.', function () { if (shell().openSettings) shell().openSettings(); });
+  cmd('voice', 'Voice dictation', 'Start or stop dictation.', function () {
+    var mic = document.getElementById('composer-mic');
+    if (mic && !mic.disabled) mic.click();
+    else note('Voice', ['Dictation is not available here.']);
+  });
+  cmd('export', 'Export chat', 'Download this chat as Markdown.', function () {
+    var id = IM.state && IM.state.activeSessionId;
+    if (!id) { note('Export', ['Open a session first.']); return; }
+    api().getMessages(id, 2000).then(function (messages) {
+      var sess = ((IM.state && IM.state.sessions) || []).filter(function (x) { return x.id === id; })[0];
+      var md = '# ' + ((sess && sess.name) || id) + '\n\n' +
+        (messages || []).filter(function (m) { return m && (m.role === 'user' || m.role === 'assistant'); }).map(function (m) {
+          return '**' + (m.role === 'user' ? 'You' : 'Imurun') + '**\n\n' + (m.content || '');
+        }).join('\n\n---\n\n') + '\n';
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([md], { type: 'text/markdown' }));
+      a.download = 'imurun-' + id + '.md';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+    }, function (e) { note('Export', ['Could not read the chat: ' + e.message]); });
+  });
+  cmd('doctor', 'Doctor', 'Show server status and resources.', function () {
+    Promise.all([
+      api().getStatus().catch(function (e) { return { error: e.message }; }),
+      api().getResources().catch(function (e) { return { error: e.message }; })
+    ]).then(function (r) {
+      var st = r[0] || {};
+      var res = r[1] || {};
+      var lines = ['Server: ' + (st.error ? 'unreachable (' + st.error + ')' : 'ok'), 'Model: ' + (st.selected_model || 'none')];
+      lines = lines.concat(scalars(st.engine, 5));
+      lines.push('Resources: ' + (res.error ? res.error : (scalars(res, 6).join(', ') || 'no summary')));
+      note('Doctor', lines);
+    });
+  });
+  cmd('update', 'Check for updates', 'Check now and offer to install.', function () {
+    if (!IM.update) { note('Update', ['Updates are not available.']); return; }
+    IM.update.check().then(function (i) {
+      note('Update', [IM.update.summary(i)], i && i.available ? [
+        { label: 'Update now', primary: true, onClick: function () { IM.update.apply(); } },
+        { label: 'Not now', onClick: function () { IM.update.later(); } }
+      ] : null);
+    }, function (e) { note('Update', ['Check failed: ' + e.message]); });
+  });
+  cmd('help', 'Help', 'List all commands.', function () {
+    var lines = COMMANDS.map(function (c) { return '/' + c.id + ' - ' + c.description; });
+    lines.push('Skills: type / and pick one; it is applied to the message.');
+    note('Commands', lines);
+  });
+
+  /* Run "/name" typed in full. Returns true when it was a command. */
+  function run(text) {
+    var m = /^\/([A-Za-z0-9_-]+)\s*$/.exec(String(text || '').trim());
+    if (!m) return false;
+    var id = m[1] === 'rename-session' ? 'rename' : m[1].toLowerCase();
+    if (!RUN[id]) return false;
+    RUN[id]();
+    return true;
+  }
 
   var skills = [];
   var loadedAt = 0;
@@ -118,9 +242,16 @@
     if (Date.now() - loadedAt > STALE_MS) refresh().then(function () { if (isOpen()) open(); });
   }
 
-  function choose(index) {
+  function choose(index, fromEnter) {
     var item = items[index];
     if (!item || !token) return;
+    if (item.command && fromEnter && token.start === 0 && !prompt.value.slice(token.end).trim()) {
+      prompt.value = '';
+      close();
+      prompt.dispatchEvent(new Event('input'));
+      run('/' + item.id);
+      return;
+    }
     var value = prompt.value;
     var insert = '/' + item.id + ' ';
     prompt.value = value.slice(0, token.start) + insert + value.slice(token.end).replace(/^ /, '');
@@ -163,7 +294,7 @@
       }
       event.preventDefault();
       event.stopPropagation();
-      choose(active);
+      choose(active, key === 'Enter');
     } else if (key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
@@ -214,6 +345,7 @@
   }
 
   IM.slash = { isOpen: isOpen, refresh: refresh };
+  IM.commands = { run: run, list: function () { return COMMANDS.slice(); } };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

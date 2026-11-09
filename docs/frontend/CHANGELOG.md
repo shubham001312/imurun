@@ -4,6 +4,16 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-03: Update pop-up and slash commands
+
+- New `update.js`: launch pop-up (Update now / Not now), progress from `update`
+  events, `/health` poll and reload after restart, Settings "About and
+  updates" card. `update` added to `EVENT_TYPES`.
+- `slash.js`: built-in commands /help /new /clear /rename /model /hardware
+  /settings /voice /export /doctor /update with autocomplete; `app.js`
+  `handleCommand` runs them when a full command is submitted.
+- Styles for both in `styles/agent.css`.
+
 ## 2026-11-03: Hardware card and GPU chip
 
 - New `hardware.js`: a "Hardware" card at the top of Settings > Resource

@@ -127,7 +127,7 @@ extern "C" {
 
 const char* fish_version(void) { return "fish 2.0.0"; }
 int fish_abi_version(void) { return FISH_ABI_VERSION; }
-const char* fish_supported_archs(void) { return "llama,qwen2,qwen2moe,qwen3,qwen3moe,phi3,gemma2"; }
+const char* fish_supported_archs(void) { return "llama,qwen2,qwen2moe,qwen3,qwen3moe,qwen35,phi3,gemma2"; }
 
 fish_ctx* fish_create(void) {
     auto* c = new (std::nothrow) fish_ctx();

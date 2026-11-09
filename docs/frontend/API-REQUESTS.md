@@ -492,3 +492,10 @@ needs these to use it:
       tested in `tests/test_resources_detect.py`). Presets stay
       `gentle|balanced|performance|custom` (`eco` accepted as alias).
       `PUT/POST /api/resources` is routed as of 2026-11-03 (api.py do_PUT/do_POST).
+
+## Update progress detail (P3)
+
+`GET /api/update` and the `update` event have no download/install phase. While
+`state: "updating"` the pop-up can only say "Downloading and installing...".
+Request: optional `phase: "downloading" | "installing"` (and `progress` 0-1)
+in UpdateView. The UI already reads `phase` when present.

@@ -76,9 +76,18 @@ int main(int argc, char** argv) {
     if (!vocab) return 1;
 
     // Build "The capital of France is" in the model's own byte-level tokens.
-    const char* parts[] = {"<|begin_of_text|>", "The", "\xC4\xA0" "capital",
-                           "\xC4\xA0" "of", "\xC4\xA0" "France", "\xC4\xA0" "is"};
+    // Llama models open with <|begin_of_text|>; Qwen-family tokenizers have no
+    // BOS (Qwen3.5 sets bos_token to None), so the opening slot is filled only
+    // when the model actually has that token.
     std::vector<int32_t> prompt;
+    const int bos_id = find_token(*vocab, "<|begin_of_text|>");
+    if (bos_id >= 0) {
+        prompt.push_back(bos_id);
+    } else {
+        std::printf("  no <|begin_of_text|> (Qwen-style tokenizer); prompt starts without BOS\n");
+    }
+    const char* parts[] = {"The", "\xC4\xA0" "capital",
+                           "\xC4\xA0" "of", "\xC4\xA0" "France", "\xC4\xA0" "is"};
     for (const char* p : parts) {
         const int id = find_token(*vocab, p);
         if (id < 0) {
@@ -88,7 +97,7 @@ int main(int argc, char** argv) {
         }
         prompt.push_back(id);
     }
-    check(static_cast<int>(prompt.size()) == 6, "prompt tokenised");
+    check(static_cast<int>(prompt.size()) == (bos_id >= 0 ? 6 : 5), "prompt tokenised");
 
     // Prefill the whole prompt in one batched pass.
     auto t0 = std::chrono::steady_clock::now();
@@ -171,8 +180,17 @@ int main(int argc, char** argv) {
             for (int32_t id : inj) if (tk->is_eog(id)) any_special = true;
             check(!any_special, "special-token strings in user text stay plain text");
             const auto chat = tk->encode_chat({{"system", "Be brief."}, {"user", "Hi"}});
-            check(!chat.empty() && chat[0] == tk->bos(), "chat encoding starts with BOS once");
-            check(std::count(chat.begin(), chat.end(), tk->bos()) == 1, "chat encoding has exactly one BOS");
+            if (tk->bos() >= 0) {
+                check(!chat.empty() && chat[0] == tk->bos(), "chat encoding starts with BOS once");
+                check(std::count(chat.begin(), chat.end(), tk->bos()) == 1,
+                      "chat encoding has exactly one BOS");
+            } else {
+                // Qwen-style tokenizers carry no BOS; chat text must still be usable
+                // and must never contain the (absent) BOS id.
+                check(!chat.empty(), "chat encoding produces tokens without BOS");
+                check(std::count(chat.begin(), chat.end(), tk->bos()) == 0,
+                      "chat encoding without BOS stays BOS-free");
+            }
         }
     }
 

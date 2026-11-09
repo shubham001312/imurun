@@ -99,17 +99,24 @@ class ToolRegistry:
             except Exception as exc:  # noqa: BLE001
                 ready = False
                 reason = str(exc)
-            tools.append(
-                {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "requires_network": tool.requires_network,
-                    "available": ready,
-                    "reason": reason,
-                    "category": getattr(tool, "category", "info"),
-                    "parameters": tool.schema()["parameters"] if hasattr(tool, "schema") else {},
-                }
-            )
+            item = {
+                "name": tool.name,
+                "description": tool.description,
+                "requires_network": tool.requires_network,
+                "available": ready,
+                "reason": reason,
+                "category": getattr(tool, "category", "info"),
+                "parameters": tool.schema()["parameters"] if hasattr(tool, "schema") else {},
+            }
+            # Tools with live state (the shell: which shell, cwd, workspace,
+            # how the last run ended) report it here for GET /api/tools.
+            probe = getattr(tool, "state", None)
+            if callable(probe):
+                try:
+                    item["state"] = probe()
+                except Exception as exc:  # noqa: BLE001 - a status read must not fail
+                    item["state"] = {"error": f"{type(exc).__name__}: {exc}"}
+            tools.append(item)
         return {"tools": tools}
 
     def extend(self, tools: Iterable[Tool]) -> None:

@@ -562,6 +562,7 @@
 
   function handleCommand(text) {
     var value = String(text || '').trim();
+    if (value !== '/rename' && value !== '/rename-session' && IM.commands && IM.commands.run(value)) return true;
     if (value !== '/rename' && value !== '/rename-session') return false;
     var row = document.querySelector('.session.active');
     if (!row) {
