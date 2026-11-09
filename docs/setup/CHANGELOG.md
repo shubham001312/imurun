@@ -1,5 +1,22 @@
 # Setup / packaging changelog
 
+## 0.3.4 (2026-11-09)
+
+- **Web search with no API key, across the whole web.** A hidden, private embedded
+  browser (on by default; `IMURUN_BROWSER_SEARCH=0` turns it off) reads DuckDuckGo result
+  pages, with Bing only as a fallback; a page with a bot check is reported as `blocked`
+  and skipped, never solved. Eight keyless APIs are chosen by the kind of question: Mwmbl
+  and DuckDuckGo Instant Answers (general), Stack Exchange, GitHub and Hacker News (code),
+  arXiv and OpenAlex (science), endoflife.date (releases). Every source pauses itself on
+  429/403/quota. The web-search key panel is gone from Settings: there is nothing to set up
+  (`docs/research/CHANGELOG.md`, `docs/research/README.md` "Privacy" lists who receives
+  queries).
+- **Apple Silicon / arm64:** NEON kernels (dot-product and plain) for every quant type the
+  AVX2 path covers; on GitHub's Apple Silicon runner the kernels run 14-29x faster than the
+  scalar code Macs used before (Q4_K 28.7x). Whole-model Mac tok/s not measured yet; the Mac
+  build still has no GPU path (`docs/engine/CHANGELOG.md`).
+- First release that 0.3.3 installs receive through the in-app updater.
+
 ## 0.3.3 (2026-11-09)
 
 - **Engine:** Qwen3.5 (`qwen35`) gives correct answers (four bugs fixed) and runs its
