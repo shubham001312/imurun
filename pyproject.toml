@@ -9,7 +9,7 @@ name = "imurun"
 # Single source of truth for the version: imurun.__version__ reads it (from
 # this file in a checkout, from the wheel metadata when installed), and
 # package.json must carry the same value (CI checks it on release).
-version = "0.3.0"
+version = "0.3.2"
 description = "Local-first AI chat with its own C++ inference engine (FISH): one process, no cloud"
 readme = "README.md"
 license = "MIT"

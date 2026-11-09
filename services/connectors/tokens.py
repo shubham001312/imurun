@@ -36,6 +36,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import sys
 import threading
 from pathlib import Path
@@ -104,12 +105,43 @@ class KeyringTokenStore:
         self._keyring = module
         self._service = service
 
+    # A locked keyring (Linux Secret Service, macOS Keychain) answers a read by
+    # showing an unlock prompt and waiting. The server once never finished
+    # starting because of that. Every call waits at most KEYRING_TIMEOUT; after
+    # a timeout the keyring is treated as locked for LOCKED_BACKOFF seconds, so
+    # one prompt on screen does not turn into one per request.
+    KEYRING_TIMEOUT = 4.0
+    LOCKED_BACKOFF = 120.0
+    _locked_until = 0.0
+
+    def _bounded(self, fn, *args):
+        cls = type(self)
+        if time.monotonic() < cls._locked_until:
+            raise TokenStoreUnavailable("the system keyring is locked; unlock it to use saved keys")
+        box: dict = {}
+
+        def work() -> None:
+            try:
+                box["value"] = fn(*args)
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                box["error"] = exc
+
+        thread = threading.Thread(target=work, name="imurun-keyring", daemon=True)
+        thread.start()
+        thread.join(self.KEYRING_TIMEOUT)
+        if thread.is_alive():
+            cls._locked_until = time.monotonic() + self.LOCKED_BACKOFF
+            raise TokenStoreUnavailable("the system keyring did not answer (locked?); unlock it to use saved keys")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
     def get(self, provider: str) -> str | None:
-        return self._keyring.get_password(self._service, provider)
+        return self._bounded(self._keyring.get_password, self._service, provider)
 
     def set(self, provider: str, token: str) -> None:
         _require(provider, token)
-        self._keyring.set_password(self._service, provider, token)
+        self._bounded(self._keyring.set_password, self._service, provider, token)
 
     def delete(self, provider: str) -> None:
         try:

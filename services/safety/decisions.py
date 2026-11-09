@@ -177,7 +177,54 @@ def _system_path(path: str) -> bool:
 # whatever folders the user approves.
 _HOME_SECRET_DIRS = (".ssh", ".gnupg", ".aws", ".azure", ".kube", ".docker", ".gcloud",
                      os.path.join(".config", "gh"), os.path.join(".config", "gcloud"),
-                     os.path.join(".imurun", "secrets"), os.path.join(".local", "share", "keyrings"))
+                     os.path.join(".imurun", "secrets"), os.path.join(".local", "share", "keyrings"),
+                     ".password-store", os.path.join("Library", "Keychains"),
+                     # Browser profiles: saved passwords, cookies, sessions.
+                     os.path.join(".mozilla", "firefox"), os.path.join(".config", "google-chrome"),
+                     os.path.join(".config", "chromium"), os.path.join(".config", "BraveSoftware"),
+                     os.path.join(".config", "microsoft-edge"),
+                     os.path.join("Library", "Application Support", "Google", "Chrome"),
+                     os.path.join("Library", "Application Support", "Firefox"),
+                     os.path.join("Library", "Cookies"),
+                     os.path.join("AppData", "Local", "Google", "Chrome", "User Data"),
+                     os.path.join("AppData", "Local", "Microsoft", "Edge", "User Data"),
+                     os.path.join("AppData", "Roaming", "Mozilla", "Firefox"))
+_SECRET_NAMES = {".netrc", ".npmrc", ".pypirc", ".git-credentials", ".htpasswd", ".pgpass",
+                 ".my.cnf"}
+
+# Paths that run code on their own (shell start-up, login items, VCS hooks,
+# launchers). Reading them is fine; an agent must never write or delete them,
+# or injected text could plant something that runs later (security review M3/L3).
+_HOME_AUTORUN = (".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile",
+                 ".zshenv", ".zlogin", ".config/fish/config.fish", ".config/autostart",
+                 ".config/systemd/user", "Library/LaunchAgents",
+                 "Documents/WindowsPowerShell", "Documents/PowerShell",
+                 ".config/powershell",
+                 "AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup",
+                 ".imurun/settings", ".imurun/facts", ".imurun/notes", ".imurun/skills")
+_VCS_DIRS = {".git", ".hg", ".svn"}
+_LAUNCHER_SUFFIXES = (".desktop", ".lnk", ".url", ".scf", ".library-ms", ".webloc", ".command")
+
+
+def _autorun_target(path: str) -> bool:
+    """True for a path whose contents can run code later without the user."""
+    candidate = _norm(path)
+    parts = [p for p in candidate.replace("\\", "/").split("/") if p]
+    if any(part.lower() in _VCS_DIRS for part in parts[:-1]) or (
+            parts and parts[-1].lower() in _VCS_DIRS):
+        return True
+    if candidate.lower().endswith(_LAUNCHER_SUFFIXES):
+        return True
+    home = os.path.expanduser("~")
+    roots = [os.path.join(home, *item.split("/")) for item in _HOME_AUTORUN]
+    data = os.getenv("IMURUN_DATA_ROOT", "").strip()
+    if data:
+        roots += [os.path.join(data, d) for d in ("settings", "facts", "notes", "skills")]
+    for root in roots:
+        base = _norm(root)
+        if candidate == base or candidate.startswith(base + os.sep):
+            return True
+    return False
 
 
 def _protected(path: str, project_root: str, extra: tuple[str, ...]) -> bool:
@@ -192,7 +239,7 @@ def _protected(path: str, project_root: str, extra: tuple[str, ...]) -> bool:
     name = os.path.basename(candidate)
     if name == ".env" or name.startswith(".env."):
         return True
-    return name in {".netrc", ".npmrc", ".pypirc", ".git-credentials", ".htpasswd"}
+    return name in _SECRET_NAMES
 
 
 def require(decision: Decision, granted: bool = False) -> Decision:
@@ -303,6 +350,12 @@ def check_action(
                 "deny",
                 "G3-protected",
                 (f"{path} is guardrail source, version control, or a secrets file",),
+            )
+        if kind != "file_read" and _autorun_target(path):
+            return Decision(
+                "deny",
+                "G3-protected",
+                (f"{path} is version control, a launcher or a start-up file that runs on its own",),
             )
         if _system_path(path):
             return Decision("deny", "G3-system-path", (f"{path} is a system location",))

@@ -5,9 +5,11 @@
  *
  * Three levels, the permission policy's modes (services/tools/permissions.py):
  *   Manual          ask      - every file read, change and command asks
- *   Ask for changes allow-reads (default) - reads run, changes/commands ask
- *   Auto            allow-all - runs without asking; deny-listed commands,
- *                               protected files and credential folders stay blocked
+ *   Ask for changes allow-reads (default) - workspace reads run; reads in other
+ *                               folders, changes, commands, and web calls after
+ *                               reading files ask
+ *   Auto            allow-all - runs without asking. Choosing it takes a second
+ *                               click: commands can then read any file the user can
  * The choice is saved with POST /api/permissions {mode}, the same setting as
  * Settings > Permissions, so both stay in sync.
  */
@@ -19,14 +21,15 @@
     { mode: 'ask', label: 'Manual', short: 'Manual',
       text: 'Asks before every file read, change and command.' },
     { mode: 'allow-reads', label: 'Ask for changes', short: 'Ask for changes',
-      text: 'Reads files on its own. Asks before it changes files or runs a command.' },
+      text: 'Reads the workspace on its own. Asks before reading other folders, changing files, running a command, or going online after reading your files.' },
     { mode: 'allow-all', label: 'Auto', short: 'Auto',
-      text: 'Runs without asking. Blocked commands, protected files and credential folders stay blocked.' }
+      text: 'Runs everything without asking, including commands, which can read any file you can. Only a short list of destructive commands is blocked. Use it for work you are watching.' }
   ];
   var current = 'allow-reads';
   var pill = null;
   var pop = null;
   var opener = null;
+  var confirming = false;   // Auto was clicked once; a second click turns it on
 
   function api() { return window.__imurun_api; }
   function level(mode) {
@@ -119,7 +122,24 @@
     document.body.appendChild(pop);
     pop.addEventListener('click', function (event) {
       var row = event.target.closest('[data-access-mode]');
-      if (row) { choose(row.dataset.accessMode); return; }
+      if (row) {
+        var mode = row.dataset.accessMode;
+        if (mode === 'allow-all' && current !== 'allow-all' && !confirming) {
+          confirming = true;
+          row.classList.add('is-confirming');
+          var note = row.querySelector('.access-confirm');
+          if (!note) {
+            note = document.createElement('span');
+            note.className = 'access-confirm';
+            row.querySelector('.access-copy').appendChild(note);
+          }
+          note.textContent = 'Click again to turn on Auto.';
+          return;
+        }
+        resetConfirm();
+        choose(mode);
+        return;
+      }
       if (event.target.closest('.access-x')) { close(); return; }
       if (event.target.closest('.access-link')) {
         close();
@@ -162,7 +182,15 @@
     });
   }
 
+  function resetConfirm() {
+    confirming = false;
+    if (!pop) return;
+    pop.querySelectorAll('.access-confirm').forEach(function (n) { n.remove(); });
+    pop.querySelectorAll('.is-confirming').forEach(function (n) { n.classList.remove('is-confirming'); });
+  }
+
   function close() {
+    resetConfirm();
     if (!pop || pop.hidden) return;
     pop.hidden = true;
     if (opener && opener.focus && document.body.contains(opener)) opener.focus();

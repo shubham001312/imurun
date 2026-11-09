@@ -34,12 +34,24 @@ def test_other_home_folders_stay_outside(home):
 
 
 @pytest.mark.parametrize("path", ["~/.ssh/id_ed25519", "~/.aws/credentials"])
-def test_credential_folders_are_refused_even_inside_an_approved_folder(home, path):
+def test_credential_folders_are_refused_even_when_home_is_the_workspace(home, path):
     h, policy = home
-    policy.update({"extraRoots": [str(h)]})  # the whole home folder approved
+    policy.update({"workspaceRoot": str(h)})
     assert policy.workspace.resolve("~/secret-project/a.txt") == h / "secret-project/a.txt"
     with pytest.raises(WorkspaceError, match="secrets file|protected"):
         policy.workspace.resolve(path)
+
+
+def test_the_whole_home_folder_cannot_be_approved(home, tmp_path):
+    h, policy = home
+    for bad in ([str(h)], [str(h.parent)], ["~"]):
+        with pytest.raises(ValueError, match="home folder"):
+            policy.update({"extraRoots": bad})
+    # A hand-edited settings file is ignored the same way.
+    SettingsStore(tmp_path / "settings").write(
+        "permissions", {"workspaceRoot": str(tmp_path / "ws"), "extraRoots": [str(h)]})
+    with pytest.raises(WorkspaceError, match="outside"):
+        policy.workspace.resolve("~/secret-project/a.txt")
 
 
 def test_extra_roots_are_validated(home):

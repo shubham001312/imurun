@@ -40,6 +40,18 @@ def is_filesystem_root(path: Path) -> bool:
     return resolved.parent == resolved
 
 
+def contains_home(path: Path | str) -> bool:
+    """True when ``path`` is the home folder or a folder above it: approving
+    it would expose every credential and start-up file (security review L3)."""
+    try:
+        target = Path(os.path.realpath(os.path.expanduser(str(path))))
+        home = Path(os.path.realpath(os.path.expanduser("~")))
+        home.relative_to(target)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 @dataclass
 class Workspace:
     """Resolve and check paths against the current workspace root."""
@@ -65,7 +77,7 @@ class Workspace:
         out: list[Path] = []
         for item in raw:
             path = Path(os.path.realpath(os.path.expanduser(str(item))))
-            if not is_filesystem_root(path) and path not in out:
+            if not is_filesystem_root(path) and not contains_home(path) and path not in out:
                 out.append(path)
         return out
 

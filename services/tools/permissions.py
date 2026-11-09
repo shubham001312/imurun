@@ -54,7 +54,8 @@ from pathlib import Path
 from typing import Any
 
 from ..safety.decisions import DANGEROUS_COMMANDS, Decision
-from .workspace import Workspace, WorkspaceError, default_workspace, is_filesystem_root
+from .workspace import (Workspace, WorkspaceError, contains_home, default_workspace,
+                        is_filesystem_root)
 
 MODES = ("ask", "allow-reads", "allow-all")
 # Folders the agent may use besides the workspace, unless the user changes it.
@@ -208,6 +209,8 @@ class PermissionPolicy:
                     raise ValueError(f"{text} must be an absolute path (or start with ~)")
                 if is_filesystem_root(path):
                     raise ValueError(f"{text} is a whole drive")
+                if contains_home(path):
+                    raise ValueError(f"{text} is your whole home folder; add a folder inside it")
                 if path.exists() and not path.is_dir():
                     raise ValueError(f"{text} is not a folder")
                 cleaned.append(text)
@@ -316,15 +319,18 @@ class PermissionPolicy:
         if category in LEVEL_CATEGORIES or callable(getattr(tool, "permission_level", None)):
             return self._decide_level(tool, args, values, session_id)
 
+        outside = False  # a path is in an approved folder, not the workspace
         for arg, kind in PATH_ARGS.get(name, ()):
             if arg == "cwd" and not args.get(arg):
                 continue
             if arg in ("src", "dst") and not args.get(arg):
                 return Decision("deny", "G3-tool", (f"{arg} is required",))
             try:
-                self.workspace.resolve(args.get(arg) or ".", kind=kind)
+                resolved = self.workspace.resolve(args.get(arg) or ".", kind=kind)
             except WorkspaceError as exc:
                 return Decision("deny", "G3-outside-roots", (str(exc),))
+            if not _inside_root(resolved, self.workspace.root):
+                outside = True
 
         reasons: list[str] = []
         if category == "shell":
@@ -339,6 +345,11 @@ class PermissionPolicy:
         elif category == "read":
             reasons.append("reads from the workspace")
 
+        # Reads from Desktop, Documents and other approved folders ask unless the
+        # level is Auto: only the workspace is read without a card (review H1).
+        if (category == "read" and outside and values["mode"] != "allow-all"
+                and not self._granted(session_id, name)):
+            return Decision("ask", "G3-tool", ("reads a file outside the workspace folder",))
         if category in ASK_TABLE[values["mode"]] and not self._granted(session_id, name):
             return Decision("ask", "G3-tool", tuple(r for r in reasons if r) or ("needs approval",))
         why = f"allowed by mode {values['mode']}"
@@ -361,6 +372,14 @@ class PermissionPolicy:
                 return "allow"
             return "ask"
         return "ask" if category in ASK_TABLE[values["mode"]] else "allow"
+
+
+def _inside_root(path: Any, root: Any) -> bool:
+    try:
+        Path(path).relative_to(root)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 def _write_reason(policy: PermissionPolicy, name: str, args: dict[str, Any]) -> str:

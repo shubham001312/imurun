@@ -84,7 +84,7 @@ def loop(model, executor, **kw):
 
 @pytest.mark.parametrize("prompt, command", [
     ("!ls ~/Desktop", "ls ~/Desktop"),
-    ("$ git status", "git status"),
+    ("!git status", "git status"),
     ("run `npm test`", "npm test"),
     ("please run `ls -la` and tell me what is there", "ls -la"),
     ("Execute: `pytest -q`", "pytest -q"),
@@ -98,6 +98,8 @@ def test_bridge_recognises_explicit_commands(prompt, command):
 @pytest.mark.parametrize("prompt", [
     "what does ls do?", "I ran `ls` yesterday and it was slow", "!", "",
     "run this\n```python\nprint(1)\n```", "!echo a\necho b",  # a hidden second line is not run
+    # Security review L2: punctuation, not commands.
+    "!important", "! wow that worked", "!!!", "$ git status", "!Nice job",
 ])
 def test_bridge_never_guesses(prompt):
     assert extract_command(prompt) is None

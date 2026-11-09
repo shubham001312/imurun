@@ -60,7 +60,7 @@ def tool_lines(tools: Iterable[Any], *, full: bool = False) -> list[str]:
 
 
 def tool_prompt(tools: list[Any], *, max_steps: int, full: bool = False, workspace: str = "",
-                hidden_services: list[str] | None = None) -> str:
+                hidden_services: list[str] | None = None, folders: list[str] | None = None) -> str:
     if not tools:
         return ""
     names = {t.name for t in tools}
@@ -79,7 +79,12 @@ def tool_prompt(tools: list[Any], *, max_steps: int, full: bool = False, workspa
     if names & {"file_read", "file_list", "file_write", "shell"}:
         where = f" (workspace: {workspace})" if workspace else ""
         lines.append(f"- Anything about files, folders or commands on this computer{where}. "
-                     "Paths are relative to the workspace.")
+                     "Relative paths are inside the workspace.")
+        if folders:
+            lines.append("- You can also use these folders with absolute or ~ paths: "
+                         + ", ".join(folders) + ". The user approves reads there with a card. "
+                         "When asked about them (\"what's on my desktop\"), call file_list; never "
+                         "say you cannot reach them.")
     connectors = any(getattr(t, "category", "") in ("connector-read", "connector-write", "mcp") for t in tools)
     if connectors:
         lines.append("- The user's email, repositories, chat and cloud accounts: use the matching tool.")
@@ -92,6 +97,7 @@ def tool_prompt(tools: list[Any], *, max_steps: int, full: bool = False, workspa
         "- Never invent a tool result. If a tool failed or you have none, say so and do not "
         "guess live values.",
         "- One tool call per reply. Use the exact tool names below.",
+        "- Decide quickly: when a tool is needed, call it without long deliberation.",
     ]
     if connectors:
         lines += [

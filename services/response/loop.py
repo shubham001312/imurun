@@ -94,13 +94,59 @@ _REFUSAL = re.compile(
 # the model answers one of these with instructions instead of a tool call, it
 # is sent back to act (shares the refusal budget).
 _ACTION_REQUEST = re.compile(
-    r"\b(?:create|make|build|write|save|generate|set\s*up|scaffold|delete|remove|move|rename|copy|"
+    r"\b(?:create|make|build|write|save|generate|set\s*up|scaffold|copy|"
     r"list|show|open|run|install|edit|update|fix)\b[^.?!\n]{0,80}?\b(?:files?|folders?|"
     r"director(?:y|ies)|websites?|site|project|app|desktop|documents|downloads|repo|script|page|"
     r"html|css|readme)\b|\b(?:what'?s|what\s+is|what\s+are)\s+(?:on|in)\s+(?:my|the)\s+"
     r"(?:desktop|documents|downloads|folder|directory)\b",
     re.IGNORECASE,
 )
+# A how-to question is answered with words, not acted on (security review H2):
+# "how do I delete...", "explain how to build...", "what is a README?".
+_HOW_TO = re.compile(
+    r"^\s*(?:how|why|what|when|where|which|who|should|is|are|does|do|explain|tell\s+me\s+(?:how|why|about)|"
+    r"teach|describe|show\s+me\s+how)\b|\bhow\s+(?:do|can|would|should)\s+(?:i|you|we|one)\b|"
+    r"\bhow\s+to\b|\bexplain\b|\binstructions?\b|\bsteps?\s+(?:to|for)\b",
+    re.IGNORECASE,
+)
+_POLITE_REQUEST = re.compile(r"^\s*(?:please\s+)?(?:can|could|would|will)\s+you\b", re.IGNORECASE)
+_LISTING_QUESTION = re.compile(
+    r"\b(?:what'?s|what\s+is|what\s+are)\s+(?:on|in)\s+(?:my|the)\s+"
+    r"(?:desktop|documents|downloads|folder|directory)\b", re.IGNORECASE)
+# Never send back a reply that declined for a reason (safety, privacy, harm):
+# only plain "I cannot access your computer" claims are corrected (review M1).
+_REASONED_REFUSAL = re.compile(
+    r"\b(?:harm\w*|unsafe|danger\w*|illegal|unethical|malicious|inappropriate|not\s+appropriate|"
+    r"privacy|private|security|secure|risk\w*|policy|polic(?:y|ies)|guidelines?|"
+    r"won'?t|will\s+not|should(?:\s+not|n'?t)|not\s+comfortable|refuse|destroy\w*|"
+    r"irreversibl\w*|permanent\w*|credentials?|passwords?)\b",
+    re.IGNORECASE,
+)
+
+
+def _asks_for_action(question: str) -> bool:
+    """True for a request to do something here, not a question about how."""
+    text = (question or "").strip()
+    if not text:
+        return False
+    if _LISTING_QUESTION.search(text):
+        return True
+    if not _ACTION_REQUEST.search(text):
+        return False
+    polite = bool(_POLITE_REQUEST.match(text))
+    if _HOW_TO.search(text) and not (polite and not re.search(r"\bhow\b|\bexplain\b", text, re.I)):
+        return False
+    if text.endswith("?") and not polite:
+        return False
+    return True
+
+
+def _capability_refusal(answer: str) -> bool:
+    """The reply claims it cannot act here, without giving a reason to decline."""
+    text = answer or ""
+    return bool(_REFUSAL.search(text)) and not _REASONED_REFUSAL.search(text)
+
+
 # Plan mode: the agent may look but not touch. Only these tool categories are
 # offered, and the executor refuses everything else (CallContext.allowed).
 PLAN_CATEGORIES = frozenset({"info", "network", "read", "connector-read", "agent"})
@@ -439,9 +485,10 @@ class AgentLoop:
                                  "_kind": "note"})
                 continue
 
-            refused = bool(_REFUSAL.search(answer_text or ""))
+            refused = _capability_refusal(answer_text)
             explained = (self._mode != "plan" and not refused and state.tool_steps == 0
-                         and bool(_ACTION_REQUEST.search(question or "")))
+                         and not _REASONED_REFUSAL.search(answer_text or "")
+                         and _asks_for_action(question))
             if (not last and state.refusals < MAX_RETRIES and not state.tool_ok
                     and self._offers_action_tools() and (refused or explained)):
                 state.refusals += 1
@@ -450,14 +497,15 @@ class AgentLoop:
                 messages.append({"role": "assistant", "content": answer_text, "_kind": "draft"})
                 if refused:
                     note = ("[note] You do have tools that act on this computer: " + tools + ". Do not say "
-                            "you cannot. Call the right tool now with one tool block; the user approves "
-                            "anything risky. If the request is genuinely impossible, say exactly why.")
+                            "you lack access. If the request is safe and the user wants it, call the right tool now "
+                            "with one tool block; risky steps still show the user an approval card. If you "
+                            "should not do it, say why.")
                 else:
                     note = ("[note] The user asked you to do this on their computer, not to explain how. "
                             "Do it now with the tools (" + tools + "): make_dir and file_write create real "
                             "folders and files (paths like ~/Desktop/demo/index.html work), shell runs "
-                            "commands, file_list shows what is in a folder. Call one tool now; after the "
-                            "work is done, answer briefly with what you did.")
+                            "commands, file_list shows what is in a folder. Call one tool now unless the request is unsafe or "
+                            "destructive; after the work is done, answer briefly with what you did.")
                 messages.append({"role": "user", "_kind": "note", "content": note})
                 kind = "refusal" if refused else "explained-instead-of-acting"
                 self._mark("G3-loop", self._session_id, f"{kind}; retry {state.refusals} of {MAX_RETRIES}")
@@ -588,6 +636,10 @@ class AgentLoop:
         because running it again could repeat side effects. The output goes
         to the model as context so it can explain it.
         """
+        # Only the user's own message at the top level: a sub-agent's task text
+        # is written by the model, not the user (security review L1).
+        if self._depth > 0 or self._directive is not None:
+            return ""
         command = bridge.extract_command(prompt)
         if not command or self._executor is None:
             return ""
@@ -649,7 +701,7 @@ class AgentLoop:
             return failed("run_agent", "Sub-agents cannot go deeper here.")
         parent = {t.name for t in self._offered}
         wanted = set(tools) if tools else set(parent)
-        allowed = (wanted & parent) if parent else wanted
+        allowed = wanted & parent  # never more than this agent was offered (review L5)
         if depth >= MAX_DEPTH:
             allowed.discard("run_agent")
         self._publish("agent.start", {"turn_id": self._turn_id, "depth": depth, "task": task[:500],
@@ -765,14 +817,21 @@ class AgentLoop:
                 parts.append(line)
         parts.append(self._platform_line())
         if self._offered:
-            workspace = ""
+            workspace, folders = "", []
             try:
                 policy = getattr(self._executor, "policy", None)
-                workspace = str(policy.workspace.root) if policy is not None else ""
+                if policy is not None:
+                    workspace = str(policy.workspace.root)
+                    home = os.path.expanduser("~")
+                    folders = [("~" + str(p)[len(home):]) if str(p).startswith(home + os.sep) else str(p)
+                               for p in policy.workspace.extra_roots]
             except Exception:  # noqa: BLE001
-                workspace = ""
+                workspace, folders = "", []
+            # The compact tool list for every model: the JSON-schema form tripled
+            # the system prompt (about 1,800 tokens against 670) and thinking
+            # models spent long passages deliberating over it.
             parts.append(tool_prompt(self._offered, max_steps=self._max_steps,
-                                     full=self._context_limit >= 16384, workspace=workspace,
+                                     full=False, workspace=workspace, folders=folders,
                                      hidden_services=getattr(self, "_hidden_services", [])))
         if self._skills:
             from ..skills.invoke import skills_prompt
@@ -846,7 +905,14 @@ class AgentLoop:
                 # of seconds before the first token. Only a fast-prefilling
                 # model may route; unknown speed (first turn) routes by heuristic.
                 use_model = use_model and self._prefill_fast()
+                # A model that is offered web_search decides itself whether to
+                # search: no keyword or routing search runs ahead of it ("what's
+                # on my desktop right now" searched the web). Only compact models,
+                # which get no tools, keep the pre-fetched search.
+                model_searches = (not self._compact
+                                  and any(t.name == "web_search" for t in self._offered))
                 extra = {
+                    "search": not model_searches,
                     "history": [m for m in self._prior_messages[-HISTORY_MESSAGES:]
                                 if m.get("role") in ("user", "assistant")],
                     "model": self._raw_model if use_model else None,
@@ -854,7 +920,7 @@ class AgentLoop:
                     "turn_id": self._turn_id,
                 }
             names = list(self._tools.intents(prompt, **extra)) if hasattr(self._tools, "intents") else []
-            if extra and hasattr(self._tools, "plan"):
+            if extra and extra.get("search") and hasattr(self._tools, "plan"):
                 try:
                     plan = self._tools.plan(prompt, extra["history"], extra["model"])  # cache hit
                     state.needs_web = bool(getattr(plan, "needs_web", False))

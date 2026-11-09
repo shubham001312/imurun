@@ -356,8 +356,19 @@ def attach(server: Any, engine: Any, home: Path | str) -> None:
     if parsed is None:
         return
     provider, model_id = parsed
-    if settings.configured(provider):
-        _activate(server, provider, model_id)
+
+    def restore() -> None:
+        # Off the start-up path: reading the key can wait on the system keyring.
+        try:
+            if settings.configured(provider):
+                _activate(server, provider, model_id)
+        except Exception:  # noqa: BLE001 - the local engine stays selected
+            pass
+
+    if os.getenv("IMURUN_SYNC_REMOTE_RESTORE"):  # tests: deterministic
+        restore()
+    else:
+        threading.Thread(target=restore, name="imurun-remote-restore", daemon=True).start()
 
 
 def _active(server: Any) -> tuple[str, str] | None:
