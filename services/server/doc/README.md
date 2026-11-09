@@ -144,10 +144,64 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | DELETE | `/api/clients/{id}` | Bearer | Revoke a client. |
 | DELETE | `/api/models/{id}` | Bearer | Delete a downloaded model. |
 | DELETE | `/api/skills/{id}` | Bearer | Delete a skill. |
+| GET | `/api/openai` | Bearer (shell token) | The "Use by API" panel's view of the OpenAI-compatible API: `{baseUrl, apiKey, model, available, contextWindow, maxTokens, keyFile, keyCreatedAt, endpoints}`. The persistent API key is returned in full (same trust as the shell token). |
+| POST | `/api/openai/rotate` | Bearer (shell token) | Regenerate the persistent API key; same view. The old key fails at once. |
+| GET | `/v1/models` | API key | OpenAI shape, see below. |
+| GET | `/v1/models/{id}` | API key | One model; `404 model_not_found`. |
+| POST | `/v1/chat/completions` | API key | OpenAI chat completions (JSON or SSE), see below. |
 
 `GET /api/skills/{id}` and `GET /api/models/{id}/path` exist only in
 `models_api.py` / the JS layer, not in this handler. `POST /api/turns` accepts a
 `mode` field but ignores it.
+
+#### OpenAI-compatible API (`/v1/*`, `services/server/openai_api.py`)
+
+For other apps on this machine (OpenClaw, the `openai` SDK, curl; user guide in
+`docs/setup/README.md`). `api.py` hands every `/v1/*` and `/api/openai[/rotate]`
+path to `openai_api.dispatch(server, handler, method)` after the loopback `Host`
+check and before its own token gate (two hook lines, in `do_GET` and `do_POST`).
+
+**Auth.** `Authorization: Bearer <key>` only (no `?token=`). Accepted: the
+persistent API key (`ApiKeyStore`, `<data_root>/secrets/openai_api_key`, `sk-imurun-`
++ `token_urlsafe(32)`, created on first use, file `0600` from creation and folder
+`0700` on POSIX, compared with `secrets.compare_digest`); the per-run shell token;
+a `ClientStore` token (`imu_...`) whose scopes include `chat` or `admin` (the first
+enforcement point for client tokens). Failure: `401 {error: {message, type:
+"invalid_request_error", param: null, code: "invalid_api_key"}}`, a `G3-api` mark of
+the path; the key and headers are never logged or marked.
+
+**Errors** always use `{error: {message, type, param, code}}`: `400`
+`invalid_request_error` (bad JSON, missing/empty `messages`, unknown role, a
+non-text content part, `max_tokens`/`max_completion_tokens` < 1, `temperature`
+outside 0..2, `top_p` outside (0, 1], more than 4 `stop` strings, non-boolean
+`stream`, `n` != 1; `param` names the field), `401`, `404 model_not_found` /
+`unknown_url`, `405`, `413 request_too_large` (the server's `max_body`), `503`
+`server_error`/`model_not_available` when `TurnRunner.available` is false, `500`
+`generation_failed`.
+
+| Method | Path | Body | Reply |
+|---|---|---|---|
+| GET | `/v1/models` | - | `{object: "list", data: [{id, object: "model", created, owned_by: "imurun"}]}`; `id` = the selected model file name without `.gguf`; `data: []` when no model is available. |
+| POST | `/v1/chat/completions` | `{model, messages: [{role: system\|developer\|user\|assistant\|tool\|function, content: string\|null\|[{type: "text", text}]}], stream?, stream_options?: {include_usage}, max_tokens? \| max_completion_tokens?, temperature?, top_p?, stop?: string\|string[≤4], n?: 1}` | Non-streaming: `{id: "chatcmpl-…", object: "chat.completion", created, model, choices: [{index: 0, message: {role: "assistant", content, refusal: null}, logprobs: null, finish_reason: "stop"\|"length"}], usage: {prompt_tokens, completion_tokens, total_tokens}, system_fingerprint: null}`. Streaming: `text/event-stream`, `data: {…object: "chat.completion.chunk", choices: [{index, delta, logprobs, finish_reason}]}` frames: first `delta: {role: "assistant", content: ""}`, then `{content}` pieces, then `delta: {}` with `finish_reason`, then (with `include_usage`) a `choices: []` frame carrying `usage`, then `data: [DONE]`. A failure after the headers is sent in-band as `data: {error: {…}}` followed by `[DONE]`. |
+
+Behaviour: `model` is accepted as given (one model is served; the reply names it).
+`developer` becomes `system`; `tool`/`function` messages become user text
+`"Tool result (<name>):\n…"`; `tools`, `tool_choice`, `response_format`, penalties and
+other fields are ignored. Generation calls the same model client as the chat
+(`TurnRunner._model`, i.e. `SyncFishModelClient.generate_stream(messages,
+FishParams(temperature, top_p, max_tokens))`), so the native engine serialises it
+with chat turns on `FishNativeClient._gen_lock`. Unset sampling fields fall back to
+the engine config (`FISH_TEMPERATURE`, `FISH_TOP_P`, `FISH_MAX_TOKENS`). `stop` is
+applied to the decoded text on the server (the engine has no stop strings); the
+first match ends the reply, closes the generator and cancels the engine
+(`FishNativeClient._stream`'s `finally`, reached through `loop.shutdown_asyncgens()`).
+A client that disconnects mid-stream is cancelled the same way. `finish_reason` is
+`length` when the generated count reached the effective `max_tokens`. `usage` comes
+from the engine's last-generation stats (best effort: a chat turn finishing in the
+same instant could overwrite them), else a chars/4 estimate and the chunk count;
+completion tokens are added to `UsageTracker`. No CORS headers and no `OPTIONS`
+handler (`501`): SDK and agent clients are not browsers, and a cross-origin page
+should not drive the local model.
 
 #### Voice (`/api/voice/*`, handled by `services/voice/routes.py`)
 
@@ -357,8 +411,9 @@ A drop is reported through `mark("G3-events", "subscriber", "dropped N event(s):
 | `ClientStore.authenticate` | `(token: str) -> dict \| None` | Constant-time hash compare; updates `last_used_at`. |
 
 Only the SHA-256 hash is stored; the plaintext token exists only in the `create`
-response. **Note:** `ApiServer` does not call `authenticate()` on any route, so a
-client token is currently an issued credential without an enforcement point.
+response. **Note:** the only enforcement point is `/v1/*` (`openai_api.py`), which
+accepts a client token with the `chat` or `admin` scope; the `/api/*` routes still
+accept only the per-run token, so other scopes are labels.
 
 ### `C:\Users\imu\Desktop\ImuTechz\IMU CLI\imurun\services\server\usage.py`
 
@@ -509,7 +564,7 @@ Imported by: `start.py`, `test/services/server/*`, `test/e2e/*`, and the Docker
 
 - The socket binds loopback only. `ApiServer.__init__` raises on any other host;
   the handler also rejects a non-loopback `Host` header (`403`).
-- Every `/api/*` route requires the bearer token, except `/health`. Static files
+- Every `/api/*` route requires the bearer token, except `/health`; `/v1/*` requires the persistent API key (or the bearer token, or a `chat`/`admin` client token). Static files
   are reachable without the token but only on loopback and only from
   `static_root` with an allow-listed extension.
 - The token is compared with `secrets.compare_digest`; the query-string form is
