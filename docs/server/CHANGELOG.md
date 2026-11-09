@@ -19,6 +19,19 @@ CPU engine with Llama 3.2 1B) and probing every main route.
   (`model/fish_client.py`). The aiohttp session was cached, but each synchronous call and
   each streamed turn runs on its own short-lived event loop, and a session is bound to the
   loop that created it. Each request now opens and closes its own session.
+- **Malformed requests dropped the connection with a traceback, or hung**
+  (`services/server/api.py`). `Content-Length: -5` raised in `rfile.read`;
+  `{"maxSteps": 1e309}` became `inf` and `POST /api/agent` raised `OverflowError`; a body
+  shorter than its `Content-Length` held the handler thread forever. Now: a negative length
+  is `400 invalid content length`; `NaN`, `Infinity` and out-of-range numbers are
+  `400 invalid json` for every route; request reads time out after `REQUEST_TIMEOUT`
+  (60 s) with `408 request timed out`; and any other unexpected exception in a route is a
+  JSON `500 {"error": "internal error"}` logged with its path (never the query or headers)
+  instead of a dropped connection.
+- **A JSON `null` text field became the text "None"** (`services/server/api.py`):
+  `{"first_command": null}` created a session named "None" (also queued prompts, rename,
+  skills, clients, persona). `null` now counts as missing, so those requests get their
+  usual 400. Tests: `tests/test_api_bad_requests.py`.
 
 ## 2026-11-03 — resource governor (resources owner)
 
