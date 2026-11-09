@@ -611,7 +611,9 @@
     var recent = sortedSessions().slice(0, 5);
     empty.hidden = recent.length > 0;
     list.innerHTML = recent.map(function (session) {
-      return '<button class="home-recent-row" type="button" data-open-session="' + escapeHtml(session.id) + '">' +
+      return '<button class="home-recent-row" type="button" data-open-session="' + escapeHtml(session.id) + '"' +
+        ' data-session-id="' + escapeHtml(session.id) + '" data-session-name="' + escapeHtml(session.name || '') + '"' +
+        ' title="Right-click to rename or delete">' +
         '<span class="dot" aria-hidden="true"></span><span class="home-recent-main">' +
         '<strong>' + escapeHtml(session.name || 'Untitled session') + '</strong>' +
         '<span>' + escapeHtml(util.formatTimeAgo(sessionTime(session))) + '</span>' +
@@ -624,6 +626,19 @@
     homeRecent.addEventListener('click', function (event) {
       var row = event.target.closest('[data-open-session]');
       if (row) activateSession(row.dataset.openSession);
+    });
+    /* Right-click (or the context-menu key) renames or deletes, as in the
+     * side panel and on the Sessions page. */
+    homeRecent.addEventListener('contextmenu', function (event) {
+      var row = event.target.closest('.home-recent-row');
+      if (row) showSessionMenu(event, row);
+    });
+    homeRecent.addEventListener('keydown', function (event) {
+      var row = event.target.closest('.home-recent-row');
+      if (!row || !(event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) return;
+      event.preventDefault();
+      var rect = row.getBoundingClientRect();
+      showSessionMenu({ preventDefault: function () {}, clientX: rect.left + 24, clientY: rect.bottom + 4 }, row);
     });
   }
 
