@@ -1,8 +1,7 @@
 # Research engine — requests to other owners
 
 Everything below works without these changes (the pre-fetch falls back to the
-heuristic plan; the browser source reports itself unavailable). Each request
-turns a fallback into the real thing.
+heuristic plan). Each request turns a fallback into the real thing.
 
 ## R1 — `services/response/loop.py`: model-planned pre-fetch (owner: loop / agentic)  — OPEN
 
@@ -58,14 +57,16 @@ elif is_realtime(state.question) or getattr(state, "needs_web", False):
 Optional, same file: `LIVE_DATA_RULE` users may now cite `[n]`; no change
 needed — the Context block itself says "Cite the passages you use as [n]".
 
-## R2 — `window.py`: the search helper mode (owner: launcher / setup) — OPEN
+## R2 — `window.py`: the search helper mode (owner: launcher / setup) — DONE
 
-Add `python window.py --search-helper <server_pid>`: a hidden pywebview
-window speaking JSON lines on stdin/stdout. Full contract and a ready-to-adapt
-sketch: `docs/research/BROWSER-SEARCH.md`. No `start.py` change is needed —
-the server starts the helper itself, on demand, only when
-`IMURUN_BROWSER_SEARCH=1`. Please keep the literal `--search-helper` in
-`window.py` (the server detects support by it).
+`window.py --search-helper <server_pid>` exists (`window.py::search_helper`,
+to the spec in `BROWSER-SEARCH.md`) and was verified live on Windows 11 on
+2026-11-09 (hidden, private mode, shut down after the check). Since that day
+the server starts it on demand **by default** (`IMURUN_BROWSER_SEARCH=0`
+switches it off) and stops it after 10 idle minutes. No `start.py` change was
+needed. Please keep the literal `--search-helper` in `window.py` (the server
+detects support by it) and the `hidden=True` / `private_mode=True` /
+`_watch_parent` lines (a test checks them).
 
 ## R3 — `services/server/app.py`: event sink + planner model (owner: server) — OPEN
 
@@ -90,6 +91,29 @@ Add to the Events table:
 | `research.fetch` | `{turn_id, url, status, ok, chars, error, lang?, published?}` |
 | `research.done` | `{turn_id, ok, queries, sources: [{title, url, domain, provider, snippet}], passages, hits, errors, offline, blocked, elapsed}` |
 | `web_search.start` / `web_search.done` | now also emitted for model-issued calls, with `turn_id` and `queries` |
+
+## R6 — frontend: research lanes for the new sources (owner: frontend) — OPTIONAL
+
+`research.js` maps providers to lanes (Wikipedia / Public search / News /
+Direct); every new provider currently falls into "Public search", which is
+right for `browser:duckduckgo`, `browser:bing`, `mwmbl`, `searxng`, but hides
+what answered a code or science question. Suggested `LANE_OF` additions:
+
+```js
+ddg_instant: 'wikipedia',           // reference abstracts
+stackexchange: 'code', github: 'code', hackernews: 'code',
+arxiv: 'science', openalex: 'science',
+endoflife: 'direct', pypi: 'direct', npm: 'direct'
+```
+
+with two lanes `{ id: 'code', label: 'Developer Q&A' }` and
+`{ id: 'science', label: 'Papers' }`. `research.search` frames carry
+`source` = the source name (`stackexchange`, `github_search`, `hackernews`,
+`arxiv`, `openalex`, `endoflife`, `ddg_instant`, `mwmbl`, `browser`), and
+`sources[].provider` the provider names above. No API change is needed.
+
+The search-key UI was removed on 2026-11-09 (owner's rule: no keys for web
+search). Please do not bring back a provider/key panel.
 
 ## R5 — frontend (owner: frontend) — OPTIONAL
 

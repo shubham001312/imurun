@@ -1,4 +1,4 @@
-/* Settings > Permissions, Tools, Agent and Search providers.
+/* Settings > Permissions, Tools and Agent.
  *
  *   Permissions  GET/POST /api/permissions (mode, workspace folder, category
  *                toggles, approval timeout, remembered approvals) and the
@@ -8,9 +8,9 @@
  *                plus a manual run form (POST /api/tools/run, including the
  *                403 "ask" -> confirm -> approved: true round trip).
  *   Agent        GET/POST /api/agent (maxSteps).
- *   Search       settings section `search` (GET/PUT /api/settings/search),
- *                keys named like the environment variables the server
- *                exports them to; write-only here, never cached locally.
+ *
+ * Web search needs no key (docs/research/README.md), so there is no
+ * search-provider panel.
  *
  * Each panel loads when its Settings section is first shown and re-renders
  * values in place; listeners are delegated and bound once.
@@ -498,100 +498,9 @@
     });
   }
 
-  /* =============================================================== Search */
-
-  /* The server's `search` section stores the values under the environment
-   * variable names (services/server/settings.py SEARCH_KEYS) and returns a
-   * set value masked; the UI used to write `braveApiKey` & co., which the
-   * server never read (BUGS-FIXED.md 65). The SearXNG URL is masked too, so
-   * it is write-only like the keys. */
-  var SEARCH_KEYS = [
-    ['IMURUN_BRAVE_API_KEY', 'Brave Search API key', 'IMURUN_BRAVE_API_KEY', 'brave'],
-    ['IMURUN_TAVILY_API_KEY', 'Tavily API key', 'IMURUN_TAVILY_API_KEY', 'tavily'],
-    ['IMURUN_SERPER_API_KEY', 'Serper API key', 'IMURUN_SERPER_API_KEY', 'serper'],
-    ['IMURUN_SEARXNG_URL', 'SearXNG URL (your own instance, no key needed)', 'IMURUN_SEARXNG_URL', 'searxng', 'url']
-  ];
-  var search = { values: {}, bound: false };
-
-  function isSet(value) { return value !== undefined && value !== null && value !== '' && value !== false; }
-
-  function fillSearch(values) {
-    search.values = values || {};
-    var root = byId('search-root');
-    if (!root) return;
-    SEARCH_KEYS.forEach(function (key) {
-      var state = root.querySelector('[data-search-state="' + key[0] + '"]');
-      var input = root.querySelector('[data-search-key="' + key[0] + '"]');
-      var on = isSet(search.values[key[0]]);
-      if (state) { state.className = 'chip ' + (on ? 'success' : 'neutral'); state.textContent = on ? 'saved' : 'not set'; }
-      if (input) { input.value = ''; input.placeholder = on ? 'Saved (hidden). Type to replace.' : 'Not set'; }
-      var clear = root.querySelector('[data-search-clear="' + key[0] + '"]');
-      if (clear) clear.hidden = !on;
-    });
-    var provider = byId('search-provider');
-    if (provider) provider.value = search.values.provider || '';
-  }
-
-  function buildSearch(root) {
-    root.innerHTML =
-      '<div class="panel settings-card">' +
-        '<p class="search-warning"><strong>Why set a key:</strong> without one, search uses DuckDuckGo\'s keyless page, which some networks answer with a bot check. Search then fails (honestly) instead of finding anything.</p>' +
-        '<form id="search-form" class="search-form" autocomplete="off">' +
-          '<label class="form-field"><span class="k">Provider</span><select id="search-provider">' +
-            '<option value="">Automatic (the first key that is set, else DuckDuckGo)</option>' +
-            '<option value="brave">Brave</option><option value="tavily">Tavily</option><option value="serper">Serper (Google results)</option>' +
-            '<option value="searxng">SearXNG (your own instance)</option><option value="duckduckgo">DuckDuckGo (no key)</option></select></label>' +
-          SEARCH_KEYS.map(function (key) {
-            return '<div class="search-key"><label class="form-field"><span class="k">' + esc(key[1]) + ' <span class="chip neutral" data-search-state="' + key[0] + '">not set</span></span>' +
-              '<input type="' + (key[4] === 'url' ? 'url' : 'password') + '" data-search-key="' + key[0] + '" autocomplete="' + (key[4] === 'url' ? 'off' : 'new-password') + '" spellcheck="false"></label>' +
-              '<button class="btn ghost" type="button" data-search-clear="' + key[0] + '" hidden>Remove</button>' +
-              '<small class="tool-field-hint">Same as the environment variable <code>' + esc(key[2]) + '</code>.</small></div>';
-          }).join('') +
-          '<div><button class="btn primary" type="submit">Save search settings</button></div>' +
-        '</form>' +
-      '</div>' +
-      '<p class="settings-note">Keys are sent to the local server only, are never shown again after saving, and are not kept in this browser. ' +
-        'They apply to the next search without a restart. A variable already set in the environment that started IMURUN is not cleared by removing a key here.</p>';
-  }
-
-  function loadSearch() {
-    var root = byId('search-root');
-    if (!root || !api()) return;
-    if (!search.bound) {
-      search.bound = true;
-      buildSearch(root);
-      root.addEventListener('submit', function (event) {
-        event.preventDefault();
-        var changes = { provider: byId('search-provider').value };
-        SEARCH_KEYS.forEach(function (key) {
-          var input = root.querySelector('[data-search-key="' + key[0] + '"]');
-          if (input && input.value.trim()) changes[key[0]] = input.value.trim();
-        });
-        saveSearch(changes, 'Search settings saved');
-      });
-      root.addEventListener('click', function (event) {
-        var clear = event.target.closest('[data-search-clear]');
-        if (!clear) return;
-        var change = {};
-        change[clear.dataset.searchClear] = '';
-        saveSearch(change, 'Key removed');
-      });
-    }
-    api().getSettings('search').then(function (payload) {
-      fillSearch((payload && payload.values) || {});
-    }, function (error) { fail('Search', 'Could not load search settings', error); });
-  }
-
-  function saveSearch(changes, title) {
-    api().updateSettings('search', changes).then(function (payload) {
-      fillSearch((payload && payload.values) || Object.assign({}, search.values, changes));
-      toast({ tone: 'success', icon: 'check', kicker: 'Search', title: title, text: 'Stored on the local server.' });
-    }, function (error) { fail('Search', 'Not saved', error); });
-  }
-
   /* =============================================================== wiring */
 
-  var LOADERS = { permissions: loadPermissions, tools: function () { loadTools(false); }, agent: loadAgent, search: loadSearch };
+  var LOADERS = { permissions: loadPermissions, tools: function () { loadTools(false); }, agent: loadAgent };
 
   function init() {
     IM.bus.on('settings.section', function (section) {
@@ -608,7 +517,7 @@
     });
   }
 
-  IM.agentSettings = { loadPermissions: loadPermissions, loadTools: loadTools, loadAgent: loadAgent, loadSearch: loadSearch };
+  IM.agentSettings = { loadPermissions: loadPermissions, loadTools: loadTools, loadAgent: loadAgent };
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();

@@ -135,11 +135,9 @@ report `available()` honestly, never raise, and are audited (`G3-tool`).
 | `shell` | shell | `command`, `cwd?`, `timeout?` (30, max 300) | PowerShell on Windows, `/bin/sh` elsewhere; see the security model |
 | `run_agent` | agent | `task`, `tools?`, `max_steps?` (4, max 8) | sub-agent, see §5 |
 
-`DuckDuckGo` note: on 2026-10-31 the keyless HTML endpoint answered this
-machine with a bot-check page. `web_search` now reports that as a **failure**
-naming the env vars that switch to a keyed provider. It used to report an empty
-success. For reliable search, set `IMURUN_BRAVE_API_KEY`, `IMURUN_TAVILY_API_KEY`,
-`IMURUN_SERPER_API_KEY` or `IMURUN_SEARXNG_URL` (see REQUESTS.md).
+`web_search` needs no API key: it is the research engine (`docs/research/README.md`),
+which searches the whole web through the app's embedded browser plus keyless
+APIs. When every source refuses, it reports a **failure**, never an empty success.
 
 ## 4. Security model
 

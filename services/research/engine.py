@@ -181,8 +181,10 @@ class ResearchEngine:
         per_source_timeout = max(1.0, min(config.search_timeout(), search_end - time.monotonic()))
         futures: dict[concurrent.futures.Future, tuple[Source, str, float]] = {}
         for source in active:
+            cap = getattr(source, "timeout_cap", None)
+            timeout = min(per_source_timeout, cap) if cap else per_source_timeout
             for query in (queries[:1] if source.per_plan else queries):
-                future = pool.submit(source.search, query, plan, fetcher, per_source_timeout)
+                future = pool.submit(source.search, query, plan, fetcher, timeout)
                 futures[future] = (source, query, time.monotonic())
         hits: list[Hit] = []
         blocked_all = bool(futures)

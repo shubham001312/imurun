@@ -4,6 +4,18 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-09: no web-search keys in Settings (research owner)
+
+The product owner's rule: web search never asks the user for an API key (the
+website promises "Web search with no API key"). Removed, surgically: the
+Settings > Web search tab and section (`mockup.js`), its panel code
+(`agent-settings.js`: `SEARCH_KEYS`, `fillSearch`, `buildSearch`, `loadSearch`,
+`saveSearch`, the `search` loader) and the "Web search keys" command-palette
+entry (`panels.js`); the agent-gallery demo sources now say
+`browser:duckduckgo` instead of `brave`. The Permissions > Network toggle (web
+search on/off) is unchanged. The `.search-key` / `.search-form` CSS stays: the
+connector and Hugging Face token fields reuse it.
+
 ## 2026-11-09: Chat messages read like a conversation, not a log
 
 The user called the chat "not good": every reply carried an "IMURUN" label, a

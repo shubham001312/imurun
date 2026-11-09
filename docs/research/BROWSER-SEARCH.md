@@ -1,10 +1,38 @@
 # Browser search helper — protocol v1
 
-Status: **server side implemented** (`services/research/sources/browser_search.py`,
-tested against a fake helper in `tests/fixtures/research/fake_search_helper.py`);
-**window side not implemented** (it belongs to the launcher owner, request R2
-in `REQUESTS.md`). Until it exists the `browser` source reports
-`"the window helper (window.py --search-helper) is not implemented yet"`.
+Status (2026-11-09): **both sides implemented and on by default.** Server side:
+`services/research/sources/browser_search.py` (tested against a fake helper,
+`tests/fixtures/research/fake_search_helper.py`). Window side:
+`window.py::search_helper` (`python window.py --search-helper <server_pid>`),
+written to this spec; R2 in `REQUESTS.md` is closed. Measured live on Windows 11
+(WebView2), driven over the protocol by a scratch script with a hidden window,
+which was shut down afterwards: helper `ready` in 1.3 s; DuckDuckGo 2.7 s cold /
+1.2-1.7 s warm, Bing 0.8-1.1 s, 10 results each, no challenge shown. Not yet
+measured: macOS (WebKit) and Linux (GTK / Qt WebKit). Where pywebview or a GUI
+backend is missing, the source says why and the other sources run (below).
+
+When it is unavailable the `browser` source reports one of: "browser search is
+switched off (IMURUN_BROWSER_SEARCH=0)", "pywebview is not installed (no
+embedded browser)", "window.py has no --search-helper mode", "browser helper
+failed recently: …" (it exited before `ready`, e.g. no GUI backend, or did
+not report ready in 20 s; retried after 10 minutes), or "every search engine
+showed a bot check in the last 10 minutes".
+
+Server-side behaviour added on 2026-11-09:
+
+- **One call per plan**: the plan's queries (≤ 3) go one after the other in
+  one helper session, inside the source's time budget (the per-source
+  timeout, 6 s); each request's `wait_ms` is what is left of that budget.
+- **Engine order**: DuckDuckGo; Bing only when DuckDuckGo refused (`blocked`),
+  failed or found nothing for that query. An engine whose page showed a bot
+  check is skipped for 10 minutes (per-engine memory).
+- **Redirects unwrapped**: DuckDuckGo `/l/?uddg=` and Bing `/ck/a?…&u=a1<base64url>`
+  become the target URL; DuckDuckGo ad rows (`.result--ad`) are skipped.
+- **Idle exit**: the helper (a WebView process holds ~100 MB) is shut down after
+  `IMURUN_BROWSER_SEARCH_IDLE` seconds (default 600) without a search, and
+  started again by the next one (~1.3 s).
+- Tests never start a real WebView: `tests/conftest.py` sets
+  `IMURUN_BROWSER_SEARCH=0`; the protocol tests use the fake helper.
 
 ## Why
 
@@ -16,9 +44,9 @@ browser would and hand back what is on it.
 What this is **not**: a way around refusals. If the page shows a challenge or
 captcha, the helper reports `blocked` and the engine moves on. The helper
 never clicks, types, submits, scrolls to trigger anything, or solves
-anything. Search engines' terms restrict automated use of their result pages,
-so the source is **off by default** (`IMURUN_BROWSER_SEARCH=1` enables it) and
-the product owner should decide whether to ship it enabled.
+anything. Search engines' terms restrict automated use of their result pages;
+the product owner decided on 2026-11-09 to ship the source **on by default**
+(`IMURUN_BROWSER_SEARCH=0` switches it off).
 
 ## Process model
 
@@ -90,7 +118,11 @@ The helper is engine-agnostic: the URL template and the extraction script
 live in the server (`browser_search.py::ENGINES`), so adding or fixing an
 engine never touches `window.py`. Scripts only read the DOM.
 
-## Window-side sketch (for the launcher owner)
+## Window-side sketch (implemented: `window.py::search_helper`)
+
+The real implementation follows this sketch, plus: a `wait_ms` clamp to
+0.5–30 s, a script error reported as the reply's `error`, and a fallback to
+`webview.start(serve)` on a pywebview without `private_mode`.
 
 ```python
 # window.py — add before the normal UI path in main():
@@ -149,8 +181,14 @@ def search_helper(argv):
     return 0
 ```
 
-Acceptance: `python -m pytest tests/test_research_sources.py` keeps passing,
-and with the helper in place `IMURUN_BROWSER_SEARCH=1` plus
-`BrowserSearchSource().available()` returns `(True, "")`;
-`tests/test_research_sources.py::test_real_window_script_marker_is_detected`
-then sees the `--search-helper` marker.
+Acceptance (met 2026-11-09): `python -m pytest tests/test_research_sources.py
+tests/test_research_keyless.py` passes; with pywebview installed,
+`BrowserSearchSource().available()` returns `(True, "")` by default;
+`test_real_window_script_marker_is_detected` sees the `--search-helper` marker
+and the spec's limits (`hidden=True`, `private_mode=True`, `_watch_parent`) in
+`window.py`.
+
+Live check, for anyone repeating it: drive the helper with
+`HelperClient()._start()` + `request({"op": "search", ...})` from a script and
+`close()` it afterwards (that sends `shutdown`; the hidden window never shows).
+Never run `start.py` with a window from an agent.

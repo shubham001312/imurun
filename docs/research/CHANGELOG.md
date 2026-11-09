@@ -1,5 +1,62 @@
 # Research engine changelog
 
+## 2026-11-09 — whole-web search with no key: embedded browser on, keyless APIs routed by topic
+
+Symptom (owner): web search "is not that much good". Measured cause: without a
+key there was no general web search at all. Public SearXNG answered 0 of 40
+(2026-11-01) and 1 of 77 (today), and the browser helper was off. So the answer
+came from Wikipedia and news RSS alone: "how to fix ModuleNotFoundError: No
+module named pip" got a passage about solar panels, "Rust lifetime elision
+rules" got nothing, and "latest Python release" got Wikipedia's 2008 history.
+Owner's decisions today: no API keys for web search, ever; the
+embedded-browser helper ships on.
+
+Added:
+
+- **Embedded browser on by default** (`IMURUN_BROWSER_SEARCH=0` = off). The
+  window side (`window.py --search-helper`) already existed; verified live
+  today (hidden, private mode): ready 1.3 s, DuckDuckGo 1.2-2.7 s, Bing 0.8-1.1 s.
+  The source now runs once per plan (queries back to back in one 6 s budget),
+  asks Bing only when DuckDuckGo refuses / fails / finds nothing, remembers a
+  bot check per engine for 10 minutes, unwraps Bing `/ck/a?u=a1…` links (they
+  were left as Bing redirect URLs), skips DuckDuckGo ad rows, and stops the
+  helper after 10 idle minutes (`IMURUN_BROWSER_SEARCH_IDLE`).
+- **Keyless API sources** (`sources/`): `mwmbl` (open web index), `ddg_instant`
+  (DuckDuckGo Instant Answer API: entity abstracts), `stackexchange` (question +
+  accepted answer), `github_search` (issues for errors, repositories for "a
+  library for X"), `hackernews` (Algolia), `arxiv`, `openalex`, `endoflife`
+  (release cycles). Probed and rejected, with reasons: Marginalia (shared key
+  429), Reddit (403), Semantic Scholar (429), Wiby, Wikidata, Crossref, MDN,
+  Wikinews, GDELT, Europe PMC, Lobsters (README "Why each source").
+- **Routing** (`routing.py`): `general` / `code` / `science` / `news` / `release`
+  from the message, queries and entities; `Source.topics` gates each source.
+- **Failure memory for every API source** (`sources.Backoff`, `ApiSource`):
+  403 / 429 / quota / Stack Exchange `backoff` park a source for 10 minutes or
+  the server's `Retry-After` / GitHub reset (≤ 1 h); 3 errors in a row park it
+  for 2 minutes. **Per-source time caps** (`Source.timeout_cap`, honoured by the
+  engine): public SearXNG 4 s (it used to hold the search phase open for 6 s
+  while being refused), APIs 4-6 s.
+- **Ranking**: official docs (learn.microsoft.com, docs.rs, go.dev,
+  kubernetes.io …) tier 1; Stack Exchange sites, arXiv, doi.org, OpenAlex,
+  endoflife.date tier 0.75; fetch order weighs browser results 0.9, Mwmbl 0.7.
+- `extract.fragment_text()` renders an API's HTML fragment (Stack Exchange
+  bodies) with the page renderer.
+
+Removed:
+
+- The Settings > Web search key panel, its palette entry and the "set a key"
+  hint in the blocked message (`tool.py::BLOCKED_HINT`). `sources/keyed.py`
+  stays as an undocumented, environment-variable-only path for developers; the
+  server's `search` settings section is no longer shown anywhere.
+
+Measured end to end (before / after table in README "Budgets"): every test
+question now gets on-topic passages from several independent sources; runs take
+3.6-11.5 s (12 s deadline), up from 0.7-4.8 s, because pages are now found and read.
+
+Tests: `tests/test_research_keyless.py` (new, 27 tests); `test_research_sources.py`
+browser tests updated (default on, no-pywebview reason, window.py limits).
+`tests/conftest.py` sets `IMURUN_BROWSER_SEARCH=0` so no test starts a WebView.
+
 ## 2026-11-02 — "what is" questions no longer trigger a search
 
 Symptom (owner): every "what is ..." question ran a web search. Cause: the model

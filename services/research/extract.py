@@ -618,6 +618,22 @@ def detect_language(text: str, declared: str = "") -> str:
     return best if best_count >= 3 else "und"
 
 
+def fragment_text(markup: str) -> str:
+    """Render an HTML fragment (an API's answer body) as clean text: the same
+    rendering as ``extract`` but without choosing a main container."""
+    builder = _TreeBuilder()
+    try:
+        builder.feed(markup or "")
+        builder.close()
+    except Exception:  # noqa: BLE001
+        pass
+    root = builder.root
+    _prune(root)
+    lines: list[str] = []
+    _render(root, lines)
+    return unicodedata.normalize("NFC", clean_lines("\n".join(lines)))
+
+
 # ----------------------------------------------------------------- entry point
 def extract(markup: str, url: str = "") -> Page:
     """Clean main content plus metadata. Never raises."""

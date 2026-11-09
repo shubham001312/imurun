@@ -61,7 +61,10 @@ already works without any of these items; each one would make it better.
 
 ## Setup / launcher (`start.py`, `install.py`, docs/setup)
 
-12. **Web search key.** The keyless DuckDuckGo endpoint returned a bot-check
+12. **Web search key.** WITHDRAWN 2026-11-09: the product owner decided web
+    search never asks the user for a key; the research engine searches without
+    one (`docs/research/README.md`). Original request, for history:
+    The keyless DuckDuckGo endpoint returned a bot-check
     page on this machine (2026-10-31), so live search fails without a key.
     Please surface `IMURUN_BRAVE_API_KEY` / `IMURUN_TAVILY_API_KEY` /
     `IMURUN_SERPER_API_KEY` / `IMURUN_SEARXNG_URL` in setup docs (and,
