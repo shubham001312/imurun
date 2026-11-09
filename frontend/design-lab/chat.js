@@ -213,6 +213,13 @@
     paragraph.textContent = text;
     bubble.appendChild(paragraph);
     node.appendChild(bubble);
+    node._text = text;
+    // Copy / Edit and resend (user-actions.js handles them and the right-click menu).
+    var row = document.createElement('div');
+    row.className = 'msg-actions user-actions';
+    row.innerHTML = '<button class="msg-action msg-copy" type="button" data-user-copy aria-label="Copy message" title="Copy">Copy</button>' +
+      '<button class="msg-action msg-edit" type="button" data-user-edit aria-label="Edit and resend" title="Edit and resend">Edit</button>';
+    node.appendChild(row);
     if (options && options.queued) {
       var chip = document.createElement('span');
       chip.className = 'msg-chip';
@@ -271,8 +278,10 @@
   function messageActions() {
     var row = document.createElement('div');
     row.className = 'msg-actions';
-    row.innerHTML = '<button class="msg-action" type="button" data-msg-copy aria-label="Copy reply">Copy</button>' +
-      '<button class="msg-action msg-speak" type="button" data-msg-speak aria-label="Read reply aloud" aria-pressed="false">Read aloud</button>';
+    /* Drawn as icons by styles/chat.css; the text stays for the other
+     * modules that relabel the buttons ("Copied", "Stop reading"). */
+    row.innerHTML = '<button class="msg-action msg-copy" type="button" data-msg-copy aria-label="Copy reply" title="Copy reply">Copy</button>' +
+      '<button class="msg-action msg-speak" type="button" data-msg-speak aria-label="Read reply aloud" title="Read aloud" aria-pressed="false">Read aloud</button>';
     return row;
   }
 
@@ -280,7 +289,7 @@
     var node = document.createElement('div');
     node.className = 'chat-empty';
     node.innerHTML =
-      '<span class="chat-empty-mark" aria-hidden="true">&#9672;</span>' +
+      '<span class="chat-empty-mark" aria-hidden="true"><svg class="empty-svg" viewBox="0 0 24 24"><path d="M5 5.5h14a1.5 1.5 0 0 1 1.5 1.5v8.5A1.5 1.5 0 0 1 19 17h-7l-4.5 3.5V17H5a1.5 1.5 0 0 1-1.5-1.5V7A1.5 1.5 0 0 1 5 5.5z"/></svg></span>' +
       '<h2>Start the conversation</h2>' +
       '<p>Ask a question, paste code to review, or describe what you want built. Replies stream from the model on this machine.</p>' +
       '<div class="chat-empty-chips">' +
@@ -320,6 +329,7 @@
         ? userMessage(message.content || '')
         : assistantMessage(message.content || '');
       node.classList.remove('is-entering'); if (message.turn_id) node.dataset.turnId = message.turn_id; /* feedback.js */
+      if (message.role === 'assistant' && IM.reply) IM.reply.history(node); /* Plan tag */
       fragment.appendChild(node);
     });
     transcript.appendChild(fragment);
@@ -382,6 +392,7 @@
     this.kinds = {};           /* step -> 'tool' | 'answer' (from the `step` frame) */
     this.blocks = {};          /* step -> trace block in the thinking panel */
     this.activity = null;      /* activity.js controller, created on the first tool frame */
+    this.mode = currentMode(); /* Plan or Build, as the composer said at send time */
     this.build();
   }
 
@@ -501,6 +512,29 @@
     this.body.classList.toggle('is-multi', this.body.querySelectorAll('.trace-step').length > 1);
     this.details.classList.add('has-trace');
     this.blocks[key] = block;
+    return block;
+  };
+
+  /* The visible flow of actions for one step: tool rows sit in the message,
+   * between the thinking panel and the answer, in step order. */
+  Turn.prototype.flowBlock = function (step) {
+    var key = String(step);
+    this.flowBlocks = this.flowBlocks || {};
+    if (this.flowBlocks[key]) return this.flowBlocks[key];
+    if (!this.flow) {
+      this.flow = document.createElement('div');
+      this.flow.className = 'agent-flow';
+      this.node.insertBefore(this.flow, this.bubble);
+    }
+    var block = document.createElement('div');
+    block.className = 'flow-step';
+    block.dataset.step = key;
+    var next = null;
+    Array.prototype.forEach.call(this.flow.children, function (child) {
+      if (!next && Number(child.dataset.step) > Number(step)) next = child;
+    });
+    this.flow.insertBefore(block, next);
+    this.flowBlocks[key] = block;
     return block;
   };
 
@@ -655,11 +689,11 @@
     if (!this.userToggled) animateDetails(this.details, false);
     if (this.preview) this.preview.textContent = '';
     var steps = this.toolSteps || 0;
-    var toolText = tools ? 'used ' + tools + (tools === 1 ? ' tool' : ' tools') : '';
+    var toolText = tools ? (this.activity.label ? this.activity.label() : 'Used ' + tools + (tools === 1 ? ' tool' : ' tools')) : '';
     if (this.hasThought) {
-      this.setLabel('Thought for ' + this.elapsed().toFixed(1) + 's' + (toolText ? ' · ' + toolText : (steps ? ' · ' + steps + (steps === 1 ? ' step' : ' steps') : '')));
+      this.setLabel('Thought for ' + this.elapsed().toFixed(1) + 's' + (toolText ? ' · ' + toolText.charAt(0).toLowerCase() + toolText.slice(1) : (steps ? ' · ' + steps + (steps === 1 ? ' step' : ' steps') : '')));
     } else if (tools) {
-      this.setLabel(toolText.charAt(0).toUpperCase() + toolText.slice(1) + (steps > 1 ? ' · ' + steps + ' steps' : ''));
+      this.setLabel(toolText);
     } else {
       this.setLabel(this.research && this.research.summary ? this.research.summary() : 'Worked through ' + steps + (steps === 1 ? ' step' : ' steps'));
     }
@@ -708,6 +742,7 @@
     this.addStats(evt);
     /* "Used: ..." footer, skill chips, verification badge and sources. */
     if (IM.activity) IM.activity.finish(this, evt);
+    if (IM.reply) IM.reply.finish(this, evt); /* Plan tag and "Switch to Build" */
     if (!this.demo) util.announce(this.status === 'stopped' ? 'Generation stopped.' : 'Imurun replied.');
   };
 
@@ -747,22 +782,11 @@
     };
     this.stats = stats;
 
-    var bits = [];
-    if (stats.tokens) bits.push(util.formatTokens(stats.tokens) + ' tok');
-    if (stats.tokensPerSecond) bits.push(stats.tokensPerSecond.toFixed(1) + ' tok/s');
-    if (stats.prefillSeconds !== null) bits.push('prefill ' + util.formatSeconds(stats.prefillSeconds));
-    else if (stats.firstTokenSeconds !== null) bits.push('first token ' + util.formatSeconds(stats.firstTokenSeconds));
-    bits.push(util.formatSeconds(stats.totalSeconds));
-    if (stats.steps > 1) bits.push(stats.steps + ' steps');
-    var meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.title = stats.source === 'engine'
-      ? 'Reported by the engine'
-      : 'Measured in the browser from streamed chunks; the engine did not report counters';
-    meta.textContent = bits.join('  •  ') + (stats.source === 'browser' && stats.tokensPerSecond ? '  (measured here)' : '');
+    /* reply.js: a compact "8.5 s" with every number in its tooltip. */
+    var meta = IM.reply ? IM.reply.meta(stats) : null;
     var actions = this.node.querySelector('.msg-actions');
-    if (actions) actions.insertBefore(meta, actions.firstChild);
-    else this.node.appendChild(meta);
+    if (meta && actions) actions.appendChild(meta);
+    else if (meta) this.node.appendChild(meta);
     if (!this.demo) IM.bus.emit('turn.stats', stats);
   };
 
@@ -891,7 +915,7 @@
   function stream(turn) {
     return api().streamTurn(turn.text, {
       sessionId: turn.sessionId,
-      mode: currentMode(),
+      mode: turn.mode || currentMode(),
       onTurnId: function (id) { turn.onTurnId(id); },
       onEvent: function (event) { turn.onEvent(event); }
     }, function (token, event) {
@@ -1415,6 +1439,7 @@
     var s = spec || {};
     var turn = new Turn(null, '');
     turn.demo = true;
+    turn.mode = s.mode || 'build';
     turn.startedAt = performance.now() - 2600;
     turn.onTurnId('demo');
     turn.postedAt = turn.startedAt + 60;

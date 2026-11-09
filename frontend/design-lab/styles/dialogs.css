@@ -1,0 +1,58 @@
+/* In-app dialogs (dialogs.js): confirm, and Add API client with its
+ * shown-once token. Builds on .modal / .dialog / .dialog-actions from
+ * base.css; theme variables only. */
+
+.im-dialog { max-height: calc(100vh - 40px); overflow: auto; }
+.im-confirm { width: min(420px, 100%); }
+.im-confirm .sub { margin-bottom: 18px; line-height: 1.5; }
+.im-client-dialog { width: min(480px, 100%); }
+.im-client-dialog .sub { line-height: 1.5; overflow-wrap: anywhere; }
+
+.im-field { display: grid; gap: 6px; margin: 0 0 16px; }
+.im-field-label { font-size: 12.5px; font-weight: 600; color: var(--text); padding: 0; }
+.im-input {
+  width: 100%; padding: 9px 11px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font: 14px/1.4 var(--font);
+}
+.im-input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.im-input[aria-invalid="true"] { border-color: var(--danger); }
+.im-field-help { margin: 0; font-size: 12px; color: var(--muted); }
+.im-field-error { margin: 0; font-size: 12px; color: var(--danger); }
+.im-field-warn { margin: 4px 0 0; font-size: 12px; line-height: 1.45; color: var(--muted); padding-left: 9px; border-left: 2px solid var(--accent); }
+.im-form-error { margin: 0 0 12px; }
+
+.im-scopes { margin: 0 0 18px; padding: 0; border: 0; min-width: 0; display: grid; gap: 2px; }
+.im-scopes legend { margin-bottom: 6px; }
+.im-scope-group { margin: 8px 0 2px; font-size: 11.5px; color: var(--muted); }
+.im-scope-group:first-of-type { margin-top: 0; }
+.im-scope {
+  display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; align-items: start;
+  padding: 7px 9px; border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer;
+}
+.im-scope:hover { background: var(--surface-2); }
+.im-scope:has(input:checked) { border-color: var(--line-strong); background: var(--surface-2); }
+.im-scope input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); }
+.im-scope input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.im-scope-text { display: grid; gap: 2px; min-width: 0; }
+.im-scope-name { font-size: 13px; font-weight: 550; color: var(--text); }
+.im-scope-help { font-size: 12px; line-height: 1.45; color: var(--muted); }
+
+.im-token-box { display: flex; gap: 8px; align-items: stretch; margin: 6px 0 10px; min-width: 0; }
+.im-token {
+  flex: 1; min-width: 0; padding: 9px 11px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font: 13px/1.5 var(--mono);
+  resize: none; overflow-wrap: anywhere; word-break: break-all;
+}
+.im-token:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.im-token-warn {
+  margin: 0 0 18px; padding: 9px 12px; border-left: 2px solid var(--accent);
+  background: var(--surface-2); border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 12.5px; line-height: 1.5; color: var(--text);
+}
+
+@media (max-width: 480px) {
+  .im-token-box { flex-direction: column; }
+  .dialog-actions { flex-wrap: wrap; }
+}

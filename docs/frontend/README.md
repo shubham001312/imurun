@@ -72,7 +72,8 @@ after that, modules talk through `window.IMURUN` at call time.
 | `dotfield.js` | ~180 | The website's DotField background (ImuTechz light theme). | `IMURUN.dotfield` |
 | `app.js` | ~1440 | Shell: navigation, drawer, sessions, rename/context menu, home, Connect page (OAuth, "Set up" -> Settings > Connectors), skills, persona, settings actions, resources, clients, usage, server-event routing, start-up. Shares the connector icons as `IMURUN.shell.connectorIcons`. | `IMURUN.shell` |
 | `chat.js` | ~1490 | Transcript, composer, the streaming `Turn` controller (per-step trace blocks, tool steps by `kind`), stop/queue, the search indicator, the 503 "Choose a model" state, copy, response-gallery hooks. **At the size limit: put new reply features in `activity.js` or a new module.** | `IMURUN.chat` |
-| `activity.js` | ~545 | Tool rows in the thinking panel (`tool.*`, `agent.*`, `skill.used`), the reply footer ("Used ..." and skill chips), verification badge, numbered sources row (up to 12), `stripNotes` / `stripCalls`. Hands `research.*` frames to research.js. | `IMURUN.activity` |
+| `activity.js` | ~555 | Tool rows in the thinking panel (`tool.*`, `agent.*`, `skill.used`), the folded pill's tool label ("Used web_search"), the collapsed sources row (up to 12, "Searched the web · N sources", verified check), "Not verified live" note, the reduced footer (skills / missed tool count), `stripNotes` / `stripCalls`. Hands `research.*` frames to research.js. | `IMURUN.activity` |
+| `reply.js` | ~240 | The quiet parts of a reply: the compact "8.5 s" stats button (every figure in its tooltip, spelled out on click), the sources toggle, the Plan tag and "Switch to Build and do this" (sets Build, sends "Carry out the plan above."), plan turn ids in `localStorage`. | `IMURUN.reply` |
 | `research.js` | ~500 | The research engine in a reply: plan ("Looking up"), one lane per source family, pages being read, closing line; `[n]` citations -> superscript links to source chip n; gallery states. | `IMURUN.research` |
 | `approvals.js` | ~600 | Approval cards: inline in the live reply or as a kept toast, countdown, Enter/Esc, restore from `GET /api/tools/approvals`, tab-title flag. Connector tools: "<Service> wants to ...", email preview, Send/Post/Deploy/Delete buttons, no "remember" for always-ask tools. | `IMURUN.approvals` |
 | `slash.js` | ~220 | `/skill` autocomplete in the composer and chips for the skills a message names. | `IMURUN.slash` |
@@ -82,7 +83,9 @@ after that, modules talk through `window.IMURUN` at call time.
 | `tuning-settings.js` | ~530 | Settings > Tuning (stack install, plan, samples, Train now with the 409 confirm / allow_slow round trip, the job state machine and Cancel, automation settings, history) and the "Use it" card on `tuning.ready`. | `IMURUN.tuning` |
 | `mcp-settings.js` | ~510 | Settings > MCP servers: list with live status, add/edit form, connect/disconnect/remove, discovered tools with auto-approve, templates. | `IMURUN.mcp` |
 | `models.js` | ~1320 | Models tab, downloads with progress modal and pill, model switching, composer model picker. | `IMURUN.models`, `window.__imurun_models` |
-| `panels.js` | ~805 | Performance drawer and model card, command palette (session search), shortcuts dialog, sidebar filter, global shortcuts, response gallery (including the agentic states). | `IMURUN.panels` |
+| `dialogs.js` | ~305 | In-app confirm dialog and the Add API client dialog (name with inline validation, scopes in plain words, token shown once with Copy), replacing `window.prompt`/`confirm` in Settings. | `IMURUN.dialogs` |
+| `stats-view.js` | ~310 | Content of the Performance drawer: Model, Last reply (stat tiles), Context (meter: used / window in use, model maximum, saved size), Speed trend (sparkline). Only reported values; one-line empty states. | `IMURUN.statsView` |
+| `panels.js` | ~720 | Performance drawer (open/close, Esc, focus return), command palette (session search), shortcuts dialog, sidebar filter, global shortcuts, response gallery (including the agentic states). | `IMURUN.panels` |
 | `voice-server.js` | ~615 | Voice on the local server (`/api/voice/*`): MediaRecorder dictation with first-use download and retry, the spoken language for the next turn, sentence-by-sentence read aloud with prefetch and stop, Settings > Voice "Speech on this computer". Takes over the mic and Read aloud (capture-phase clicks) only when the server can do it; voice.js is the browser fallback. | `IMURUN.voiceServer` |
 | `voice.js` | ~500 | Dictation (Web Speech recognition), read aloud (speechSynthesis), Settings > Voice. | `IMURUN.voice` |
 
@@ -104,6 +107,7 @@ Stylesheets (`index.html` order; later wins on equal specificity):
 | `styles/integrations.css` | Settings > Connectors and MCP servers, the research block in the thinking panel, citation superscripts and numbered source chips |
 | `styles/agent.css` | Tool rows, approval cards, reply footer, verification badge, sources, search indicator, `/` menu, Permissions / Tools / Agent / Search panels. Resets the legacy `.tool-row` / `.thinking summary` / `.thinking p` rules from `base.css` for the new rows. Two extra hues: `--ok-hue`, `--warn-hue` (dark variants under `body[data-scheme="dark"]`). |
 | `styles/customise.css` | Preferences: text size, density, motion, ambient, glass, custom accent, reduced motion. Loaded last. |
+| `styles/chat.css` | The chat reading view (after workspace.css): centred column, user bubble, plain-text replies with a 72ch measure, Markdown in replies, icon action row on hover/focus (icons are CSS masks so relabelled buttons keep working), folded rows (pill and sources), Plan tag and button. |
 
 `add_models_tab.py` is a dead one-off patch script, see the note at the end.
 
@@ -208,6 +212,7 @@ Persistent client-side keys (`localStorage`, all wrapped in try/catch):
 | `imurun.sound` | sound.js | `off` when interface sounds are muted |
 | `imurun.tuning.consent.v1` | feedback.js | The rating consent notice was shown |
 | `imurun.stats.history.v1` | panels.js | Last 40 per-reply stats |
+| `imurun.openai.keyHidden` | openai-settings.js | `1` when the API key is hidden in Settings > Use by API (shown by default) |
 | `imurun.stats.open`, `imurun.design.sidebar`, `imurun.chat.mode` | panels/app/chat | UI conveniences |
 | `imurun.voice.consent.v1` | voice.js | User acknowledged that browser dictation uses the vendor's service |
 | `imurun.models.guided` | models.js | Models guide dismissed |

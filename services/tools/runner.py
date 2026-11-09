@@ -112,14 +112,19 @@ class ToolRunner:
                                  publish=publish or self.publish, turn_id=turn_id)
 
     def intents(self, prompt: str, history: list[dict] | None = None, model: Any = None,
-                publish: Callable | None = None, turn_id: str = "", **_: Any) -> list[str]:
-        """Tools this prompt would run, in order. Empty when none apply."""
+                publish: Callable | None = None, turn_id: str = "", search: bool = True,
+                **_: Any) -> list[str]:
+        """Tools this prompt would run, in order. Empty when none apply.
+
+        ``search=False``: the answering model can call ``web_search`` itself,
+        so no search is planned or run ahead of it (the model decides).
+        """
         if not self._enabled:
             return []
         names = []
         regex = [n for n in detect_intents(prompt) if n != SEARCH]
         wants_search = False
-        if self._allowed(SEARCH):
+        if search and self._allowed(SEARCH):
             try:
                 wants_search = bool(self.plan(prompt, history, model, publish, turn_id).needs_web)
             except Exception:  # noqa: BLE001 - planning never blocks the turn
@@ -144,13 +149,14 @@ class ToolRunner:
 
     def observe_full(self, prompt: str, history: list[dict] | None = None, model: Any = None,
                      publish: Callable | None = None, turn_id: str = "",
-                     stop: Callable[[], bool] | None = None, **_: Any) -> tuple[str, list[dict[str, Any]]]:
+                     stop: Callable[[], bool] | None = None, search: bool = True,
+                     **_: Any) -> tuple[str, list[dict[str, Any]]]:
         """``observe`` plus this call's own results.
 
         ``last_results`` is shared by every turn; two concurrent turns would
         read each other's results through it. The loop uses this instead.
         """
-        names = self.intents(prompt, history, model, publish, turn_id)
+        names = self.intents(prompt, history, model, publish, turn_id, search=search)
         if not names:
             return "", []
 

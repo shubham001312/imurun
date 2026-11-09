@@ -36,6 +36,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import sys
 import threading
 from pathlib import Path
@@ -104,12 +105,43 @@ class KeyringTokenStore:
         self._keyring = module
         self._service = service
 
+    # A locked keyring (Linux Secret Service, macOS Keychain) answers a read by
+    # showing an unlock prompt and waiting. The server once never finished
+    # starting because of that. Every call waits at most KEYRING_TIMEOUT; after
+    # a timeout the keyring is treated as locked for LOCKED_BACKOFF seconds, so
+    # one prompt on screen does not turn into one per request.
+    KEYRING_TIMEOUT = 4.0
+    LOCKED_BACKOFF = 120.0
+    _locked_until = 0.0
+
+    def _bounded(self, fn, *args):
+        cls = type(self)
+        if time.monotonic() < cls._locked_until:
+            raise TokenStoreUnavailable("the system keyring is locked; unlock it to use saved keys")
+        box: dict = {}
+
+        def work() -> None:
+            try:
+                box["value"] = fn(*args)
+            except BaseException as exc:  # noqa: BLE001 - re-raised below
+                box["error"] = exc
+
+        thread = threading.Thread(target=work, name="imurun-keyring", daemon=True)
+        thread.start()
+        thread.join(self.KEYRING_TIMEOUT)
+        if thread.is_alive():
+            cls._locked_until = time.monotonic() + self.LOCKED_BACKOFF
+            raise TokenStoreUnavailable("the system keyring did not answer (locked?); unlock it to use saved keys")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
     def get(self, provider: str) -> str | None:
-        return self._keyring.get_password(self._service, provider)
+        return self._bounded(self._keyring.get_password, self._service, provider)
 
     def set(self, provider: str, token: str) -> None:
         _require(provider, token)
-        self._keyring.set_password(self._service, provider, token)
+        self._bounded(self._keyring.set_password, self._service, provider, token)
 
     def delete(self, provider: str) -> None:
         try:
@@ -461,6 +493,54 @@ class FileTokenStore:
 
 
 # --------------------------------------------------------------- choosing
+class MirroredStore:
+    """The OS store first, with an encrypted file copy as a fallback.
+
+    A locked Linux keyring (or a Keychain that wants a password) cannot be
+    read at start-up without a prompt, so saved API keys looked "lost" after
+    every restart. Each write now also goes to the encrypted file store; a
+    read falls back to it when the OS store is locked, slow or empty. Only
+    used when the file is encrypted (never a plain-text copy).
+    """
+
+    def __init__(self, primary, fallback) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.encrypted = True
+        self.warning = ""
+
+    def get(self, provider: str) -> str | None:
+        try:
+            value = self.primary.get(provider)
+        except Exception:  # noqa: BLE001 - locked or unavailable: use the copy
+            value = None
+        if value:
+            return value
+        try:
+            return self.fallback.get(provider)
+        except Exception:  # noqa: BLE001
+            return None
+
+    def set(self, provider: str, token: str) -> None:
+        _require(provider, token)
+        self.fallback.set(provider, token)  # always lands, even with the keyring locked
+        try:
+            self.primary.set(provider, token)
+        except Exception:  # noqa: BLE001 - the encrypted copy holds it
+            pass
+
+    def delete(self, provider: str) -> None:
+        for store in (self.primary, self.fallback):
+            try:
+                store.delete(provider)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def backend_name(self) -> str:
+        name = self.primary.backend_name() if hasattr(self.primary, "backend_name") else "os store"
+        return f"{name} + encrypted file"
+
+
 def build_secret_store(home: Path | str, *, platform: str | None = None,
                        which: Callable[[str], str | None] = shutil.which, runner: Runner = _run,
                        keyring_module=None, choice: str | None = None):
@@ -474,10 +554,18 @@ def build_secret_store(home: Path | str, *, platform: str | None = None,
         return FileTokenStore(file_path)
     if choice in ("", "keyring", "auto") and keyring_module is not False:
         try:
-            return KeyringTokenStore(module=keyring_module)
+            primary = KeyringTokenStore(module=keyring_module)
         except TokenStoreUnavailable:
             if choice == "keyring":
                 raise
+        else:
+            if choice == "keyring":
+                return primary
+            try:
+                copy = FileTokenStore(file_path)
+            except Exception:  # noqa: BLE001 - no file store: keyring alone
+                return primary
+            return MirroredStore(primary, copy) if copy.encrypted else primary
     if choice in ("", "auto", "keychain") and platform == "darwin" and which("security"):
         return MacKeychainStore(runner=runner, binary=which("security") or "security")
     if choice == "keychain":

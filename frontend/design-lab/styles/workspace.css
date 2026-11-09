@@ -1,0 +1,347 @@
+/* Workspace layout: the sidebar as a tool rail and Settings as one sheet with
+ * an index. Loaded after every theme; colours only ever come from the active
+ * theme's variables, so all eight themes keep their own palette.
+ *
+ * The idea: the dot field is the cutting mat, each page is a sheet of paper
+ * laid on it, and the red accent marks only "where you are".
+ */
+
+/* ------------------------------------------------------------- sidebar */
+
+.sidebar { gap: 12px; padding: 16px 12px 12px; }
+.brand { padding: 2px 4px; }
+
+.side-new {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; padding: 8px 8px 8px 10px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text);
+  font-size: 13px; font-weight: 550; text-align: left;
+}
+.side-new:hover { background: var(--surface-3); border-color: var(--line-strong); color: var(--text); }
+.side-new-plus {
+  width: 18px; height: 18px; flex: none;
+  display: grid; place-items: center;
+  border-radius: 6px; background: var(--accent); color: var(--accent-text, #fff);
+  font: 600 14px/1 var(--font);
+}
+.side-new-text { flex: 1; }
+.side-new-kbd {
+  font: 10.5px/1 var(--mono); color: var(--muted-soft);
+  padding: 3px 5px; border: 1px solid var(--line); border-radius: 5px;
+  background: var(--surface);
+}
+
+.nav { gap: 1px; }
+.nav-caption,
+.side-label {
+  padding: 14px 10px 6px;
+  font: 600 11.5px/1 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--muted-soft);
+}
+.nav-caption:first-child { padding-top: 6px; }
+.side-label { padding: 4px 10px 0; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px; font-size: 13.5px; color: var(--muted);
+}
+.nav-ico {
+  width: 17px; height: 17px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round; opacity: .8;
+}
+.nav-item:hover .nav-ico { opacity: 1; }
+.nav-item.active .nav-ico { color: var(--accent); opacity: 1; }
+.nav-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.sessions { gap: 1px; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.session { min-width: 0; }
+.session { padding: 6px 30px 6px 10px; }
+.s-name { font-size: 13px; }
+
+.side-foot {
+  gap: 2px; padding-top: 8px;
+  border-top: 1px solid var(--line);
+  font: inherit;
+}
+.side-foot .status {
+  padding: 6px 10px; border: 0; background: transparent; text-align: left;
+  font: 11px/1.4 var(--mono);
+}
+
+/* Collapsed: a 56 px icon rail instead of an empty strip. Labels are hidden
+ * visually but stay in the accessibility tree (and as tooltips). */
+.shell.sidebar-collapsed .nav,
+.shell.sidebar-collapsed .side-foot { display: grid; width: 100%; justify-items: center; }
+.shell.sidebar-collapsed .side-foot { border-top: 0; }
+.shell.sidebar-collapsed .nav-caption,
+.shell.sidebar-collapsed .side-new-kbd { display: none; }
+.shell.sidebar-collapsed .nav-text,
+.shell.sidebar-collapsed .side-new-text,
+.shell.sidebar-collapsed #status-text {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+.shell.sidebar-collapsed .nav-item { width: 40px; height: 36px; padding: 0; justify-content: center; }
+.shell.sidebar-collapsed .nav-item + .nav-caption + .nav-item { margin-top: 10px; }
+.shell.sidebar-collapsed .side-new { width: 40px; padding: 9px 0; justify-content: center; }
+.shell.sidebar-collapsed .side-foot .status { width: 40px; justify-content: center; padding: 8px 0; }
+
+/* ------------------------------------------------------------ page heads */
+
+/* Kickers read as quiet context, not as shouting labels. */
+.page-kicker {
+  margin-bottom: 6px;
+  font: 600 12px/1 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--muted-soft);
+}
+
+/* --------------------------------------------------------- settings sheet */
+
+#page-settings .page-head { margin-bottom: 16px; }
+
+.settings-layout {
+  grid-template-columns: 216px minmax(0, 1fr);
+  gap: 0; margin-top: 0;
+  min-height: min(760px, calc(100vh - 170px));
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  /* index column + its hairline painted on the sheet itself, so the
+     column runs the full height while the index stays sticky */
+  background:
+    linear-gradient(to right, var(--surface-2) 0 215px, var(--line) 215px 216px, transparent 216px),
+    var(--surface);
+  box-shadow: var(--shadow-card);
+  overflow: clip;
+}
+.settings-subnav {
+  position: sticky; top: 0; align-self: start;
+  gap: 0; padding: 18px 10px 20px;
+  border: 0; background: transparent;
+}
+.settings-group { display: grid; gap: 1px; }
+.settings-group + .settings-group { margin-top: 16px; }
+.settings-group-title {
+  padding: 0 10px 7px;
+  font: 600 11.5px/1 var(--font); color: var(--muted-soft);
+}
+.settings-tab {
+  padding: 7px 10px; border: 0; border-radius: 8px;
+  background: transparent; color: var(--muted);
+  font-size: 13px; font-weight: 450;
+}
+.settings-tab:hover { background: var(--surface-3); color: var(--text); }
+.settings-tab.active {
+  background: var(--surface); color: var(--text); font-weight: 550;
+  border: 0;
+  box-shadow: inset 2px 0 0 var(--accent), 0 1px 2px rgba(0, 0, 0, .05);
+}
+
+.settings-content { padding: 26px 30px 34px; }
+.settings-section-head { margin-bottom: 18px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+/* The index already says which section this is. */
+.settings-section-head .settings-label { display: none; }
+.settings-section-title { margin: 0; font-size: 24px; }
+.settings-section-head p { font-size: 13px; }
+
+/* Field labels: plain sentence case, the same voice as the rest of the sheet. */
+.form-field > .k {
+  font: 500 12px/1.3 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--muted);
+}
+
+/* Sub-headings inside a section ("Available models", "Downloaded models"). */
+.settings-content .settings-label {
+  font: 600 13.5px/1.3 var(--font); letter-spacing: 0; text-transform: none;
+  color: var(--text);
+}
+
+/* Empty states: one line icon in the rail's style, not an emoji. */
+.empty-icon:has(.empty-svg) {
+  display: grid; place-items: center;
+  width: 44px; height: 44px; margin: 0 auto 12px;
+  border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface-2); opacity: 1;
+}
+.empty-svg {
+  width: 22px; height: 22px;
+  fill: none; stroke: var(--muted); stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* Models: one "download" call to action at a time. While nothing is
+ * downloaded the empty state carries it, so the header copy steps aside. */
+[data-settings-panel="models"]:has(#models-empty-state:not([hidden])) #download-first-model { display: none; }
+.models-toolbar { gap: 12px; }
+.models-search {
+  min-width: 260px; padding: 8px 11px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface); font-size: 13px;
+}
+
+/* Inside the sheet, boxes are drawn with hairlines, not lifted as cards. */
+.settings-content .settings-card,
+.settings-content .panel {
+  background: transparent; box-shadow: none;
+  border: 1px solid var(--line);
+}
+
+@media (max-width: 980px) {
+  .settings-layout {
+    grid-template-columns: 1fr; gap: 0; min-height: 0;
+    background: var(--surface);
+  }
+  .settings-subnav {
+    position: static; flex-direction: column; gap: 10px;
+    padding: 14px 14px 12px;
+    background: var(--surface-2); border-bottom: 1px solid var(--line);
+  }
+  .settings-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .settings-group + .settings-group { margin-top: 0; }
+  .settings-group-title { width: 100%; padding: 0 2px 2px; }
+  .settings-tab { background: var(--surface); border: 1px solid var(--line); }
+  .settings-tab.active { box-shadow: inset 0 -2px 0 var(--accent); }
+  .settings-content { padding: 20px 18px 26px; }
+}
+
+/* ------------------------------------------------------------------ home */
+
+/* A launchpad, not a landing page: the composer is the one raised sheet;
+ * recent work and the machine's readiness sit flat beside each other. */
+.page-home { gap: 22px; padding: 64px 32px 56px; }
+.page-home > * { max-width: 880px; }
+
+.home-hero {
+  gap: 0; padding: 0;
+  border: 0; border-radius: 0; background: none; box-shadow: none;
+  overflow: visible;
+}
+.home-hero::after { content: none; }
+.home-greeting {
+  margin: 0 0 6px;
+  font: 500 14px/1.3 var(--font); color: var(--muted);
+}
+.home-hero .home-title {
+  margin: 0 0 22px;
+  font-family: var(--font-display, var(--font));
+  font-weight: 500; font-size: clamp(30px, 3.6vw, 40px); line-height: 1.1;
+  letter-spacing: -.02em;
+}
+.home-quick {
+  gap: 10px; margin: 0; padding: 14px 14px 12px 18px;
+  border: 1px solid var(--line-strong); border-radius: var(--radius-lg);
+  background: var(--surface); box-shadow: var(--shadow);
+  transition: border-color .18s ease;
+}
+.home-quick:focus-within { border-color: var(--accent-line); }
+.home-quick textarea { min-height: 92px; font-size: 15.5px; padding: 4px 0 0; resize: none; }
+.home-quick-foot { align-items: center; }
+.home-chip {
+  padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: transparent; color: var(--muted);
+  font: 450 12.5px/1.2 var(--font); letter-spacing: 0; text-transform: none;
+}
+.home-chip:hover { background: var(--surface-2); color: var(--text); border-color: var(--line-strong); }
+
+.home-grid {
+  display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+  gap: 18px; align-items: start;
+}
+.home-recent,
+.home-machine {
+  margin: 0; padding: 16px 18px 14px;
+  border: 1px solid var(--line); border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.home-recent-head { margin-bottom: 6px; align-items: center; }
+.home-recent-head h2,
+.home-machine h2 {
+  margin: 0; font: 600 14px/1.3 var(--font); letter-spacing: 0; color: var(--text);
+}
+.home-recent-head .btn { padding: 5px 10px; font-size: 12px; }
+
+.home-recent-list { gap: 0; }
+.home-recent-row {
+  gap: 10px; padding: 9px 6px;
+  border: 0; border-bottom: 1px solid var(--line); border-radius: 0;
+  background: transparent;
+}
+.home-recent-row:last-child { border-bottom: 0; }
+.home-recent-row:hover { background: var(--surface-2); border-color: var(--line); }
+.home-recent-row .dot { width: 6px; height: 6px; background: var(--line-strong); }
+.home-recent-row:hover .dot { background: var(--accent); }
+.home-recent-main { flex-direction: row; align-items: baseline; gap: 12px; }
+.home-recent-main strong { flex: 1; font: 500 13.5px/1.3 var(--font); }
+.home-recent-main span { flex: none; font: 400 12px/1.3 var(--font); color: var(--muted-soft); }
+.home-recent-empty { padding: 18px 8px 10px; border: 0; text-align: left; }
+
+.home-checks { list-style: none; margin: 10px 0 0; padding: 0; display: grid; }
+.home-check {
+  display: grid; grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center; gap: 12px;
+  padding: 10px 0; border-bottom: 1px solid var(--line);
+}
+.home-check:last-child { border-bottom: 0; }
+.home-check .dot { width: 8px; height: 8px; background: var(--line-strong); }
+.home-check .dot.is-online { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
+.home-check .dot.is-pending { background: #c98a12; box-shadow: 0 0 0 3px rgba(201, 138, 18, .15); }
+.home-check .dot.is-offline { background: var(--danger); box-shadow: 0 0 0 3px rgba(178, 53, 42, .12); }
+.home-check-main { display: grid; gap: 1px; min-width: 0; }
+.home-check-main strong { font: 600 13px/1.3 var(--font); }
+.home-check-main span { font: 400 12.5px/1.35 var(--font); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-check-act { padding: 4px 10px; font-size: 12px; }
+/* Once a model is loaded the "Models" shortcut has done its job. */
+#home-check-model:has(.dot.is-online) .home-check-act { display: none; }
+.home-machine-foot { margin: 10px 0 0; font: 400 12px/1.4 var(--font); color: var(--muted-soft); }
+
+@media (max-width: 860px) {
+  .page-home { padding: 28px 16px 40px; }
+  .home-grid { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------- access level (access.js) */
+.access-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border: 1px solid transparent; border-radius: 999px;
+  background: transparent; color: var(--muted); font-size: 12px;
+}
+.access-pill svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
+.access-pill strong { color: var(--text); font-weight: 550; }
+.access-pill:hover { background: var(--surface-2); border-color: var(--line); }
+.access-pill[data-mode="allow-all"] svg { color: var(--accent); }
+.access-pop {
+  position: fixed; z-index: 60; width: 360px; max-width: calc(100vw - 24px);
+  padding: 12px; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow); color: var(--text);
+}
+.access-pop.is-centred { left: 50%; top: 30%; transform: translateX(-50%); }
+.access-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 4px 8px; }
+.access-head strong { font: 600 13.5px/1.3 var(--font); }
+.access-x { border: 0; background: transparent; color: var(--muted); font-size: 18px; line-height: 1; padding: 2px 6px; border-radius: 6px; }
+.access-x:hover { background: var(--surface-2); color: var(--text); }
+.access-list { display: grid; gap: 4px; }
+.access-row {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 10px; align-items: start;
+  width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: transparent; color: var(--text); text-align: left;
+}
+.access-row:hover { background: var(--surface-2); }
+.access-row[aria-checked="true"] { border-color: var(--accent-line); background: var(--accent-soft); }
+.access-dot { width: 14px; height: 14px; margin-top: 2px; border: 1.5px solid var(--line-strong); border-radius: 50%; }
+.access-row[aria-checked="true"] .access-dot { border-color: var(--accent); box-shadow: inset 0 0 0 3px var(--surface), inset 0 0 0 7px var(--accent); }
+.access-copy { display: grid; gap: 2px; }
+.access-copy strong { font: 600 13px/1.3 var(--font); }
+.access-copy span { font: 400 12.5px/1.4 var(--font); color: var(--muted); }
+.access-copy .access-confirm { color: var(--danger, #b4232c); font-weight: 600; }
+.access-row.is-confirming { outline: 1px solid var(--danger, #b4232c); outline-offset: -1px; }
+.access-foot { margin: 10px 4px 2px; font-size: 12px; color: var(--muted); }
+.access-link { border: 0; padding: 0; background: none; color: var(--text); text-decoration: underline; font: inherit; }
+
+/* Keyboard hints mean nothing on a phone. */
+@media (max-width: 860px), (pointer: coarse) {
+  .side-new-kbd { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-section.is-entering { animation: none; }
+}

@@ -117,6 +117,26 @@ def resolve_model_path(data_root: Path, model_id: Optional[str]) -> Optional[str
         return None
 
 
+CONTEXT_MIN, CONTEXT_MAX = 256, 1_048_576
+
+
+def saved_context_size(data_root: Path) -> int:
+    """Settings > Engine ``contextSize`` when the user saved one, else 0 (automatic).
+
+    The engine caps any value at the model's maximum and halves it until the
+    KV cache fits the memory budget (specs.cpp), so applying it is safe.
+    Before this, the saved value was stored but never reached the engine.
+    """
+    import json
+
+    try:
+        raw = json.loads((Path(data_root) / "settings" / "server.json").read_text(encoding="utf-8"))
+        value = int(raw.get("contextSize") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0
+    return value if CONTEXT_MIN <= value <= CONTEXT_MAX else 0
+
+
 def load_config() -> ServerConfig:
     """Load configuration from environment variables with defaults.
 
@@ -134,7 +154,8 @@ def load_config() -> ServerConfig:
         server_url=os.getenv("FISH_SERVER_URL", "http://127.0.0.1:8731"),
         stream_endpoint=os.getenv("FISH_STREAM_ENDPOINT", "/fish/stream"),
         vram_limit_mb=int(os.getenv("FISH_VRAM_LIMIT_MB", "8192")),
-        context_size=int(os.getenv("FISH_CONTEXT_SIZE", "0")),
+        # FISH_CONTEXT_SIZE wins; else the size saved in Settings > Engine; else automatic.
+        context_size=int(os.getenv("FISH_CONTEXT_SIZE", "0") or 0) or saved_context_size(data_root),
         temperature=float(os.getenv("FISH_TEMPERATURE", "0.35")),
         top_p=float(os.getenv("FISH_TOP_P", "0.9")),
         max_tokens=int(os.getenv("FISH_MAX_TOKENS", "2048")),

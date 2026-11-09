@@ -186,7 +186,7 @@
     pageCrumb.appendChild(sep);
     pageCrumb.appendChild(document.createTextNode(' '));
     var strong = document.createElement('strong');
-    strong.textContent = session ? (session.name || 'Untitled') + ' · ' + session.id : 'No session';
+    strong.textContent = session ? (session.name || 'Untitled') + ' · ' + session.id : 'New chat';
     pageCrumb.appendChild(strong);
   }
 
@@ -382,6 +382,16 @@
     if (IM.chat && !isMobile()) IM.chat.focusComposer();
   }
 
+  /* "New chat" opens an empty composer; the session itself is created (and
+   * named from the message) by chat.js when the first message is sent, so
+   * clicking New chat and walking away leaves nothing behind. */
+  function newChat() {
+    setActiveSession(null);
+    setPage('chat', { force: true });  /* a draft has no session yet */
+    if (IM.chat) IM.chat.clear();
+    if (IM.chat && IM.chat.focusComposer) IM.chat.focusComposer();
+  }
+
   async function createSession(firstCommand) {
     var text = String(firstCommand || '').trim();
     var session;
@@ -562,6 +572,25 @@
 
   function handleCommand(text) {
     var value = String(text || '').trim();
+    /* `/model` opens the model picker; `/model <name>` switches (hosted-models.js).
+     * The regexes need a space or the end after the word, so a skill named
+     * "/models" or "/connector" still reaches the server. */
+    var model = /^\/model(?:\s+([\s\S]+))?$/.exec(value);
+    if (model && IM.modelPicker) {
+      IM.modelPicker.command(model[1] || '');
+      return true;
+    }
+    /* `/connect` adds a hosted provider; `/connect nvidia` opens that one. */
+    var connect = /^\/connect(?:\s+([\s\S]+))?$/.exec(value);
+    if (connect && IM.modelPicker) {
+      IM.modelPicker.connectCommand(connect[1] || '');
+      return true;
+    }
+    /* `/permission` opens the access level popover (access.js). */
+    if (/^\/permissions?$/.test(value) && IM.access) {
+      IM.access.open();
+      return true;
+    }
     if (value !== '/rename' && value !== '/rename-session') return false;
     var row = document.querySelector('.session.active');
     if (!row) {
@@ -582,10 +611,12 @@
     var recent = sortedSessions().slice(0, 5);
     empty.hidden = recent.length > 0;
     list.innerHTML = recent.map(function (session) {
-      return '<button class="home-recent-row" type="button" data-open-session="' + escapeHtml(session.id) + '">' +
+      return '<button class="home-recent-row" type="button" data-open-session="' + escapeHtml(session.id) + '"' +
+        ' data-session-id="' + escapeHtml(session.id) + '" data-session-name="' + escapeHtml(session.name || '') + '"' +
+        ' title="Right-click to rename or delete">' +
         '<span class="dot" aria-hidden="true"></span><span class="home-recent-main">' +
         '<strong>' + escapeHtml(session.name || 'Untitled session') + '</strong>' +
-        '<span>' + escapeHtml(session.id + ' · ' + util.formatTimeAgo(sessionTime(session))) + '</span>' +
+        '<span>' + escapeHtml(util.formatTimeAgo(sessionTime(session))) + '</span>' +
         '</span></button>';
     }).join('');
   }
@@ -595,6 +626,19 @@
     homeRecent.addEventListener('click', function (event) {
       var row = event.target.closest('[data-open-session]');
       if (row) activateSession(row.dataset.openSession);
+    });
+    /* Right-click (or the context-menu key) renames or deletes, as in the
+     * side panel and on the Sessions page. */
+    homeRecent.addEventListener('contextmenu', function (event) {
+      var row = event.target.closest('.home-recent-row');
+      if (row) showSessionMenu(event, row);
+    });
+    homeRecent.addEventListener('keydown', function (event) {
+      var row = event.target.closest('.home-recent-row');
+      if (!row || !(event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) return;
+      event.preventDefault();
+      var rect = row.getBoundingClientRect();
+      showSessionMenu({ preventDefault: function () {}, clientX: rect.left + 24, clientY: rect.bottom + 4 }, row);
     });
   }
 
@@ -619,7 +663,12 @@
       unreachable: 'Server unreachable'
     };
     if (dot) dot.className = 'dot ' + (engineState === 'ready' ? 'is-online' : (engineState === 'provisioning' ? 'is-pending' : 'is-offline'));
-    if (engine) engine.textContent = labels[engineState];
+    var homeLabels = {
+      ready: engineLabel ? 'Online · ' + engineLabel : 'Online',
+      provisioning: 'Starting up, or not installed yet',
+      unreachable: 'Server unreachable'
+    };
+    if (engine) engine.textContent = homeLabels[engineState];
     var eventsNote = state.events === 'offline' ? ' · live updates off' : (state.events === 'reconnecting' ? ' · reconnecting' : '');
     if (statusText) statusText.textContent = labels[engineState].toLowerCase() + eventsNote;
     if (statusPulse) {
@@ -629,6 +678,11 @@
     }
     var statusRow = document.querySelector('.side-foot .status');
     if (statusRow) statusRow.dataset.state = engineState;
+    var modelDot = byId('home-model-dot');
+    if (modelDot) {
+      modelDot.className = 'dot ' + (status && status.selected_model ? 'is-online'
+        : (state.modelsDownloaded > 0 ? 'is-pending' : 'is-offline'));
+    }
     if (model) {
       if (status && status.selected_model) model.textContent = status.selected_model;
       else if (state.modelsDownloaded === 0) model.textContent = 'No model downloaded';
@@ -642,6 +696,43 @@
   IM.bus.on('models', function () { renderStatus(state.status); });
 
   function bindHome() {
+    var greeting = byId('home-greeting');
+    if (greeting) {
+      var hour = new Date().getHours();
+      greeting.textContent = hour < 5 ? 'Working late' : hour < 12 ? 'Good morning'
+        : hour < 18 ? 'Good afternoon' : 'Good evening';
+    }
+    // The folder the agent works in, so it is clear where code will be written.
+    var projectPath = byId('home-project-path');
+    var api = window.__imurun_api;
+    function showProject(view) {
+      var values = (view && (view.values || view)) || {};
+      var root = values.workspaceRoot || (view && view.workspace) || '';
+      if (root && projectPath) { projectPath.textContent = '\u200e' + root + '\u200e'; projectPath.title = root; }
+    }
+    if (projectPath && api && api.getPermissions) api.getPermissions().then(showProject, function () {});
+    var change = byId('home-project-change');
+    if (change) {
+      change.addEventListener('click', function () {
+        if (!api || !api.pickWorkspaceFolder) { openSettings('permissions'); return; }
+        change.disabled = true;
+        change.textContent = 'Choose in the dialog…';
+        api.pickWorkspaceFolder().then(function (view) {
+          if (view && view.cancelled) return;
+          showProject(view);
+          if (IM.toast) IM.toast({ tone: 'success', kicker: 'Workspace', title: 'Working folder changed',
+            text: (view && (view.workspace || (view.values && view.values.workspaceRoot))) || '' });
+        }, function (error) {
+          // No dialog on this machine (headless, no zenity): type the path in Settings instead.
+          if (IM.toast) IM.toast({ tone: 'error', kicker: 'Workspace', title: 'Could not open the folder dialog',
+            text: (error && error.message) || 'Set the folder in Settings, Permissions.' });
+          openSettings('permissions');
+        }).then(function () {
+          change.disabled = false;
+          change.textContent = 'Change folder';
+        });
+      });
+    }
     var quick = byId('home-quick');
     var homePrompt = byId('home-prompt');
     if (quick && homePrompt) {
@@ -660,7 +751,7 @@
         var session = await createSession(value);
         if (button) {
           button.disabled = false;
-          button.textContent = 'Start session';
+          button.textContent = 'Start chat';
         }
         if (session) {
           homePrompt.value = '';
@@ -686,7 +777,7 @@
 
     ['home-new-session', 'new-session', 'new-session-empty', 'sidebar-new-chat'].forEach(function (id) {
       var button = byId(id);
-      if (button) button.addEventListener('click', function () { createSession(id === 'sidebar-new-chat' ? 'New chat' : 'New session'); });
+      if (button) button.addEventListener('click', newChat);
     });
   }
 
@@ -881,83 +972,18 @@
 
   /* --------------------------------------------------------------- skills */
 
-  var skillsCache = [];
-
+  /* The Skills page and the Add skill dialog live in skills.js, which loads
+   * after this file; the first list may arrive before it does. */
+  var pendingSkills = null;
   function renderSkills(skills) {
-    var grid = byId('skill-grid');
-    if (!grid) return;
-    skillsCache = Array.isArray(skills) ? skills : [];
-    grid.setAttribute('aria-busy', 'false');
-    if (!skillsCache.length) {
-      grid.innerHTML = '<div class="empty-state skill-empty"><span class="empty-icon" aria-hidden="true">&#10022;</span>' +
-        '<h3>No skills yet</h3><p>A skill is a folder with a SKILL.md that teaches Imurun a repeatable task.</p>' +
-        '<button class="btn primary" type="button" data-skill-new>New skill</button></div>';
-      return;
-    }
-    grid.innerHTML = skillsCache.map(function (skill) {
-      return '<article class="panel skill" data-skill="' + escapeHtml(skill.id || '') + '">' +
-        '<div class="skill-head">' +
-          '<span class="skill-mark" aria-hidden="true">&#10022;</span>' +
-          '<div class="skill-name"><strong>' + escapeHtml(skill.name || skill.id || 'Untitled skill') + '</strong>' +
-          '<span class="muted">' + escapeHtml(skill.id || '') + '</span></div>' +
-          '<span class="chip ' + (skill.enabled !== false ? 'success' : 'neutral') + '">' + (skill.enabled !== false ? 'enabled' : 'disabled') + '</span>' +
-        '</div>' +
-        '<p>' + escapeHtml(skill.description || 'No description') + '</p>' +
-        '<div class="skill-foot"><span class="muted">' + escapeHtml(skill.origin || 'user') + '</span>' +
-        '<button class="btn ghost" type="button" data-skill-delete="' + escapeHtml(skill.id || '') + '">Delete</button></div>' +
-      '</article>';
-    }).join('');
+    if (IM.skills && IM.skills.render) IM.skills.render(skills);
+    else pendingSkills = skills;
   }
-
-  async function refreshSkills() {
-    try {
-      renderSkills(await api.listSkills());
-    } catch (error) {
-      toast({ tone: 'error', icon: 'alert', kicker: 'Skills', title: 'Could not load skills', text: error.message });
-    }
-  }
-
-  async function newSkill() {
-    var name = window.prompt('Skill name:');
-    if (!name || !name.trim()) return;
-    var description = window.prompt('One line on what it does (optional):') || '';
-    try {
-      await api.createSkill({ name: name.trim(), description: description.trim() });
-      toast({ tone: 'success', icon: 'check', kicker: 'Skill created', title: name.trim(), text: 'Created under ~/.imurun/skills/.' });
-      refreshSkills();
-    } catch (error) {
-      toast({ tone: 'error', icon: 'alert', kicker: 'Skills', title: 'Could not create the skill', text: error.message });
-    }
-  }
-
-  var skillGrid = byId('skill-grid');
-  if (skillGrid) {
-    skillGrid.addEventListener('click', async function (event) {
-      if (event.target.closest('[data-skill-new]')) {
-        newSkill();
-        return;
-      }
-      var remove = event.target.closest('[data-skill-delete]');
-      if (remove) {
-        var id = remove.dataset.skillDelete;
-        if (!window.confirm('Delete the skill "' + id + '"? Its folder is removed.')) return;
-        try {
-          await api.deleteSkill(id);
-          toast({ tone: 'neutral', icon: 'close', kicker: 'Skills', title: 'Skill deleted', text: id });
-          refreshSkills();
-        } catch (error) {
-          toast({ tone: 'error', icon: 'alert', kicker: 'Skills', title: 'Could not delete the skill', text: error.message });
-        }
-        return;
-      }
-      var card = event.target.closest('[data-skill]');
-      if (!card) return;
-      var skill = skillsCache.filter(function (item) { return item.id === card.dataset.skill; })[0];
-      if (skill) toast({ tone: 'neutral', icon: 'info', kicker: 'Skill', title: skill.name || skill.id, text: skill.description || 'No description' });
-    });
-  }
-  var newSkillButton = byId('new-skill');
-  if (newSkillButton) newSkillButton.addEventListener('click', newSkill);
+  IM.takePendingSkills = function () {
+    var value = pendingSkills;
+    pendingSkills = null;
+    return value;
+  };
 
   /* -------------------------------------------------------------- persona */
 
@@ -1017,7 +1043,7 @@
 
   on('[data-api-action="rotate-token"]', async function () {
     var btn = this;
-    if (!window.confirm('Rotate the bearer token? Other clients using the old token will stop working.')) return;
+    if (!(await confirmAction({ title: 'Rotate the bearer token?', text: 'Other clients using the old token stop working. This window switches to the new one.', confirmLabel: 'Rotate token', danger: true }))) return;
     btn.disabled = true;
     btn.textContent = 'Rotating…';
     try {
@@ -1040,7 +1066,7 @@
   /* The server's clear deletes downloaded model weights (*.gguf). The old
    * confirm text promised models were kept; it now says what happens. */
   on('[data-resources-action="clear-cache"]', async function () {
-    if (!window.confirm('Clear the model cache? This deletes downloaded model files (*.gguf) from the models folder. Chat history is kept.')) return;
+    if (!(await confirmAction({ title: 'Clear the model cache?', text: 'This deletes downloaded model files (*.gguf) from the models folder. Chat history is kept.', confirmLabel: 'Delete model files', danger: true }))) return;
     var btn = this;
     btn.disabled = true;
     btn.textContent = 'Clearing…';
@@ -1169,40 +1195,63 @@
     var row = document.createElement('div');
     row.className = 'settings-table-row';
     row.dataset.clientId = client.id;
+    row.dataset.clientName = client.name || '';
     var scopes = Array.isArray(client.scopes) ? client.scopes.join(', ') : (client.scope || '');
-    var status = client.status
-      ? '<span class="chip ' + (client.status === 'active' ? 'success' : 'neutral') + '">' + escapeHtml(client.status) + '</span>'
-      : '<span class="muted">—</span>';
+    /* The server sends last_used_at, not a status: a listed client is active. */
+    var status = '<span class="muted">' + (client.last_used_at ? 'Used ' + escapeHtml(util.formatTimeAgo(client.last_used_at)) : 'Not used yet') + '</span>';
     row.innerHTML = '<span>' + escapeHtml(client.name || client.id || 'Unnamed client') + '</span>' +
       '<span class="mono">' + escapeHtml(scopes || '—') + '</span>' + status +
       '<span><button class="btn ghost" type="button" data-clients-action="revoke" data-client-id="' + escapeHtml(client.id) + '">Revoke</button></span>';
     clientsTable.appendChild(row);
   }
 
+  /* In-app dialogs (dialogs.js); window.confirm only if that file is missing. */
+  function confirmAction(options) {
+    if (IM.dialogs && IM.dialogs.confirm) return IM.dialogs.confirm(options);
+    return Promise.resolve(window.confirm(options.title + ' ' + (options.text || '')));
+  }
+
+  function knownClients() {
+    if (!clientsTable) return [];
+    return Array.prototype.map.call(clientsTable.querySelectorAll('.settings-table-row[data-client-id]'), function (row) {
+      return { id: row.dataset.clientId, name: row.dataset.clientName || '' };
+    });
+  }
+
+  function addClientButton() {
+    return document.querySelector('[data-settings-panel="use-by-api"] [data-clients-action="add"]');
+  }
+
   async function addClient() {
-    var name = window.prompt('Client name:');
-    if (!name || !name.trim()) return;
-    var scope = window.prompt('Scopes, comma-separated (chat, sessions, skills, models, connectors, read-only, admin):', 'read-only') || 'read-only';
-    try {
-      var client = await api.createClient({
-        name: name.trim(),
-        scopes: scope.split(',').map(function (s) { return s.trim(); }).filter(Boolean)
-      });
-      addClientRow(client);
-      toast({ tone: 'success', icon: 'check', kicker: 'Client added', title: name.trim(),
-        text: client.token ? 'Copy the token now, it is shown once: ' + client.token : 'Scopes: ' + scope, timeout: client.token ? 0 : undefined });
-    } catch (error) {
-      toast({ tone: 'error', icon: 'alert', kicker: 'Clients', title: 'Could not add the client', text: error.message });
-    }
+    if (!IM.dialogs || !IM.dialogs.addClient) return;
+    var client = await IM.dialogs.addClient({
+      existing: knownClients(),
+      returnFocus: addClientButton,
+      create: function (payload) { return api.createClient(payload); }
+    });
+    if (!client) return;
+    addClientRow(client);
+    toast({ tone: 'success', icon: 'check', kicker: 'Client added', title: client.name || 'Client added',
+      text: 'Revoke it here when the app no longer needs access.' });
   }
 
   async function revokeClient(id) {
-    if (!window.confirm('Revoke this client? Its token stops working immediately.')) return;
+    var known = knownClients().filter(function (c) { return c.id === id; })[0];
+    var label = known && known.name ? '“' + known.name + '”' : 'this client';
+    var ok = await confirmAction({
+      title: 'Revoke ' + label + '?',
+      text: 'Apps using its token stop working at once. This cannot be undone; add a new client to give access again.',
+      confirmLabel: 'Revoke', danger: true, returnFocus: addClientButton
+    });
+    if (!ok) return;
     try {
       await api.revokeClient(id);
       var row = clientsTable && clientsTable.querySelector('[data-client-id="' + id + '"]');
+      var hadFocus = row && row.contains(document.activeElement);
       if (row) row.remove();
       if (clientsTable && clientsTable.querySelectorAll('[data-client-id]').length === 0 && clientsEmpty) clientsTable.appendChild(clientsEmpty);
+      /* The focused Revoke button left with its row: keep keyboard users in place. */
+      if (hadFocus && addClientButton()) addClientButton().focus();
       toast({ tone: 'neutral', icon: 'info', kicker: 'Revoked', title: 'Client revoked', text: 'Its token is no longer accepted.' });
     } catch (error) {
       toast({ tone: 'error', icon: 'alert', kicker: 'Clients', title: 'Could not revoke the client', text: error.message });
@@ -1424,6 +1473,7 @@
     currentPage: function () { return currentPage; },
     openSettings: openSettings,
     createSession: createSession,
+    newChat: newChat,
     activateSession: activateSession,
     deleteSession: deleteSessionById,
     handleCommand: handleCommand,

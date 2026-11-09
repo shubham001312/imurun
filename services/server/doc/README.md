@@ -84,14 +84,21 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | GET | `/api/sessions` | Bearer | Session identities. |
 | GET | `/api/sessions/{id}` | Bearer | One identity. |
 | GET | `/api/sessions/{id}/messages` | Bearer | Transcript, `?limit=` (default 200). |
-| GET | `/api/skills` | Bearer | Skills without file paths. |
-| GET | `/api/skills/{id}` | Bearer | One skill `{id, name, description, origin, body, invoke: "/<id>"}`; 404. |
+| GET | `/api/skills` | Bearer | `{skills: [one skill, as below]}`, never file paths. |
+| GET | `/api/skills/{id}` | Bearer | One skill `{id, name, description, origin, body, invoke: "/<id>", source?}`; `source` = `{repo: "owner/repo", commit, path, url}` for a skill installed from GitHub; 404. |
 | GET | `/api/tools` | Bearer | `{tools: [{name, description, parameters (JSON schema), category, requires_network, available, reason, permission: allow\|ask\|deny, permission_level: allow\|read\|write\|ask\|always}], network, last_results, permissions: {mode, workspace, workspaceExists}, format}`. |
 | GET | `/api/tools/approvals` | Bearer | `{approvals: [{approval_id, tool, args, reasons, turn_id, session_id, call_id, created_at, expires_in}]}`. |
 | GET | `/api/permissions` | Bearer | `{mode, workspaceRoot, workspace, workspaceExists, readFiles, writeFiles, runShell, network, approvalTimeout, modes, table, grants}`; 501 without a policy. |
 | GET | `/api/agent` | Bearer | `{maxSteps, maxStepsLimit: 20, maxDepth: 2, subAgentSteps: 4, subAgentStepsLimit: 8}`. |
 | GET | `/api/turns/{id}` | Bearer | Turn state. |
-| GET | `/api/models` | Bearer | Model catalogue (501 if unavailable). |
+| GET | `/api/models` | Bearer | `{models, hosted, selected, engine, disk}`: the local catalogue, plus `hosted` = every connected provider's switched-on models `[{id: "<provider>:<model>", model, name, provider, provider_label, remote: true, context, selected}]` (501 if the local catalogue is unavailable; the 501 body still carries `hosted`). While a hosted model is selected no local row is `selected`. |
+| POST | `/api/models/select` | Bearer | `{id}`. A local id loads that GGUF (queued while a turn runs; 404 not downloaded, 422 load failed). An id `<provider>:<model>` (`nvidia:`, `openrouter:`, `custom:` …; only the first colon separates) routes generation to that hosted model → `{selected, id, queued: false, remote: true, provider}`; `400` when the provider is not connected. Publishes `model.switch.done`. The choice is restored on the next start; choosing a local model clears the hosted choice. |
+| GET | `/api/remote` | Bearer | Hosted model providers (`services/remote/hosted.py`, see below): `{providers: [view], selected: "<provider>:<model>"\|null, store}`. |
+| GET | `/api/remote/{provider}` | Bearer | One provider view; 404 unknown provider. |
+| GET | `/api/remote/{provider}/models` | Bearer | The key's chat catalogue `{provider, label, models: [{id, name, owner, context, recommended, enabled, listed?}], enabled, has_models}` (`?refresh=1` re-reads; cached 1 h). `has_models: false` when the server has no `/models`. `400` not connected or key rejected, `429` rate limit, `502` other provider errors (`{error, kind}`). |
+| POST | `/api/remote/{provider}/key` | Bearer | `{key}`; custom also `{base_url, name?, no_key?}`. Verified first (authenticated `GET /models`; NVIDIA: a one-token call), then stored → the view + `{verified, warning}`. `400 {error, field, kind?}` for a rejected key, a key that is clearly another provider's, a placeholder, or a custom URL that is not https (http only to loopback). Offline: saved with `verified: false` and a warning. The key is never returned. |
+| POST | `/api/remote/{provider}/models` | Bearer | `{enabled: ["<model id>", ...]}` (≤ 40; `<provider>:` prefixes are stripped) → the view. |
+| DELETE | `/api/remote/{provider}/key` | Bearer | Forget the key (custom: also its address and models); switches back to the local engine when it was in use → the view. |
 | GET | `/api/models/{id}` | Bearer | One model (501/404). |
 | PUT | `/api/persona` | Bearer | Save persona. |
 | PUT | `/api/settings/{section}` | Bearer | Merge one section. |
@@ -111,7 +118,10 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | POST | `/api/sessions/{id}/rename` | Bearer | Rename. |
 | POST | `/api/turns` | Bearer | Start a turn (`session_id`, `text` or `prompt`, optional `language` ISO 639-1 the user spoke: adds one "answer in <language>" line to the system prompt, echoed in `Turn.view().language`); `503 model_unavailable` when no model is configured (now also when the engine reports `available: false`). |
 | POST | `/api/turns/{id}/cancel` | Bearer | Cancel a running turn. |
-| POST | `/api/skills` | Bearer | Create a skill (409 on duplicate). Invoke it with `/<id>` in a prompt. |
+| POST | `/api/skills` | Bearer | Create a skill `{name, description, body}` (all required; 400 otherwise, 409 on duplicate). Invoke it with `/<id>` in a prompt. |
+| POST | `/api/skills/import/preview` | Bearer | `{url}` (a GitHub repo, `/tree/` folder, `/blob/.../SKILL.md` or raw `SKILL.md` link) → `{owner, repo, ref, commit, path, repo_url, skills: [{path, id, invoke, name, description, size, status: ok\|exists\|duplicate\|too_large\|invalid\|failed, installable, files, skipped, skipped_more, warnings}], total, truncated, notes, authenticated}`. No side effects. Errors `{error, code}`: 400 `bad_link`, 404 `not_found`/`no_skills`, 429 `rate_limited`, 502 `host_refused`/`upstream`/`unreachable`, 504 `timeout`. See `services/skills/doc/README.md`. |
+| POST | `/api/skills/import` | Bearer | `{url, paths: [folder paths from the preview], ref?: <commit from the preview>}` → `{owner, repo, commit, results: [{path, id, name, status: installed\|exists\|failed, error?, source?, files?}]}`. At most 50 paths. Never overwrites. Installed skills get `origin: github` and `source`. |
+| POST | `/api/skills/{id}/update` | Bearer | Re-install a GitHub skill from the newest commit of its branch → `{id, status: current\|updated, commit}`; 400 `not_github`. |
 | POST | `/api/tools/run` | Bearer | `{name, args, approved?, session_id?}` → `200 {result: {call_id, tool, args, decision, reasons, approval_id, result: ToolResult}}` (a failed tool is still 200 with `result.ok: false`); `403 {decision: "ask", reasons, tool, args}` → repeat with `approved: true`; `403 {decision: "deny", reasons}`; `400` bad body; `503` no tools. |
 | POST | `/api/tools/approvals/{id}` | Bearer | `{approved: bool, remember?: bool}` → `{approval_id, approved, remember}`; `404` unknown/answered. |
 | POST | `/api/permissions` | Bearer | Any of `{mode, workspaceRoot (absolute, not a drive root), readFiles, writeFiles, runShell, network, approvalTimeout}` → the view; `400` on invalid; publishes `permissions`. Stored in settings section `permissions`. |
@@ -151,9 +161,53 @@ agentic routes live in `services/tools/routes.py` (`handle_get`,
 | GET | `/v1/models/{id}` | API key | One model; `404 model_not_found`. |
 | POST | `/v1/chat/completions` | API key | OpenAI chat completions (JSON or SSE), see below. |
 
-`GET /api/skills/{id}` and `GET /api/models/{id}/path` exist only in
-`models_api.py` / the JS layer, not in this handler. `POST /api/turns` accepts a
+`GET /api/models/{id}/path` exists only in `models_api.py` / the JS layer, not
+in this handler (`GET /api/skills/{id}` is handled here). `POST /api/turns` accepts a
 `mode` field but ignores it.
+
+#### Hosted model providers (`/api/remote/*`, `services/remote/`)
+
+A second compute path next to FISH: models that run on a provider's servers,
+all over the OpenAI-compatible chat API with one standard-library client
+(`model/remote_client.py`, `OpenAICompatClient`; `model/nvidia_client.py` keeps
+`NvidiaClient` as its NVIDIA preset). The registry is
+`services/remote/providers.py`:
+
+| id | Label | Base URL | Key goes only to | Verify | Notes |
+|---|---|---|---|---|---|
+| `nvidia` | NVIDIA | `https://integrate.api.nvidia.com/v1` | `integrate.api.nvidia.com` | one-token chat call (its `/models` is public) | key must start `nvapi-`; `NVIDIA_API_KEY` env still read |
+| `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `openrouter.ai` | `GET /models` | sends `HTTP-Referer`, `X-OpenRouter-Title`, `X-Title`; follows `links.next` on the same host only; ids may contain `:` (`…:free`) |
+| `deepseek` | DeepSeek | `https://api.deepseek.com` (no `/v1`) | `api.deepseek.com` | `GET /models` | `reasoning_content` shown as thinking |
+| `openai` | OpenAI | `https://api.openai.com/v1` | `api.openai.com` | `GET /models` | sends `max_completion_tokens`; no `temperature`/`top_p` for `o1`/`o3`/`o4`/`gpt-5*` |
+| `groq` | Groq | `https://api.groq.com/openai/v1` | `api.groq.com` | `GET /models` | |
+| `together` | Together | `https://api.together.ai/v1` | `api.together.ai` | `GET /models` | the list may be a bare JSON array with `type` |
+| `mistral` | Mistral | `https://api.mistral.ai/v1` | `api.mistral.ai` | `GET /models` | no `stream_options`; `capabilities.completion_chat` filters the list |
+| `custom` | Custom (OpenAI-compatible) | entered by the user | the host the user entered | `GET /models` (a 404 means "type model ids by hand") | https unless loopback; the URL lives in the preference file; the key may be empty |
+
+Keys live in the connector secret store as `model.<id>` (NVIDIA's stays
+`model.nvidia`); `IMURUN_<ID>_API_KEY` (and `NVIDIA_API_KEY`) are read when set.
+Preferences (`enabled`, `contexts`, the custom `base_url`/`name`/`keyless`, and
+`selected`) are `<data root>/remote_models.json`, version 2; the NVIDIA-only
+version 1 (`{"enabled": [...], "selected": "<model>"}`) is read as NVIDIA's.
+`IMURUN_<ID>_BASE_URL` points a provider at a loopback fake (tests, e2e); any
+other host is refused.
+
+Provider view: `{id, provider, label, description, base_url, hosts, key_url
+(= signup_url), key_format, recommended, custom, configured, key_hint
+("****abcd"), from_env, keyless, name, enabled, contexts, active, selected,
+store}`. Errors carry a `kind`: `key`, `credits`, `rate_limit`, `model_gone`,
+`no_models`, `unreachable`, `redirect`, `host`, `server`, `other`. A hosted
+model's agent-loop budget is its catalogue context when that is smaller than
+32 768 tokens, else 32 768.
+
+G5 (keys): a key is only sent to its provider's host, or to loopback; the URL
+of every request (including pagination links) is re-checked; redirects are
+never followed (urllib would resend `Authorization`); loopback calls bypass
+proxies. A custom key is bound to the origin (scheme, host, port) it was saved
+for (`key_origin`): a new address needs the key again (or `no_key`), and a
+client built for another origin gets no key. Keys with whitespace or
+non-printable characters are refused. The key is never returned, logged, or put in an error message
+(provider error text is scrubbed of it and of key-shaped strings).
 
 #### OpenAI-compatible API (`/v1/*`, `services/server/openai_api.py`)
 
@@ -587,6 +641,9 @@ Imported by: `start.py`, `test/services/server/*`, `test/e2e/*`, and the Docker
 - One turn runs per `TurnRunner.start`; cancelling sets the loop's stop flag and
   the thread cleans up in `finally`. `Turn` records are never evicted.
 - Settings section names must match `SECTION_RE`; writes are atomic and private.
+- A hosted provider's key is only ever sent to that provider's own host (custom:
+  the host the user entered), never follows a redirect, and never appears in a
+  response, a log line or an error message (`services/remote/`).
 - `StackController` never runs a shell; it invokes `docker compose` with an
   argument list and a timeout, and reports failures as data.
 

@@ -606,6 +606,14 @@
     return (data && data.messages) || [];
   }
 
+  /* Edit and resend: drop the fromEnd-th user message counted from the end
+   * (1 = the last) and everything after it. */
+  async function truncateSession(id, fromEnd) {
+    return fetchAPI(`/api/sessions/${encodeURIComponent(id)}/truncate`, {
+      method: 'POST', body: JSON.stringify({ fromEnd: fromEnd }),
+    });
+  }
+
   async function updateSession(id, data) {
     return fetchAPI(`/api/sessions/${encodeURIComponent(id)}/rename`, {
       method: 'POST',
@@ -651,6 +659,23 @@
 
   async function deleteSkill(id) {
     return fetchAPI(`/api/skills/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  }
+
+  /* Install from GitHub: preview has no side effects; import installs the
+   * chosen folder paths at the previewed commit (ref). */
+  async function previewSkillImport(url) {
+    return fetchAPI('/api/skills/import/preview', { method: 'POST', body: JSON.stringify({ url: url }) });
+  }
+
+  async function importSkills(url, paths, ref) {
+    return fetchAPI('/api/skills/import', {
+      method: 'POST',
+      body: JSON.stringify({ url: url, paths: paths, ref: ref || '' }),
+    });
+  }
+
+  async function updateSkill(id) {
+    return fetchAPI(`/api/skills/${encodeURIComponent(id)}/update`, { method: 'POST', body: '{}' });
   }
 
   /* ------------------------------------------------------------ Connectors */
@@ -889,6 +914,13 @@
     return fetchAPI('/api/permissions', { method: 'POST', body: JSON.stringify(changes || {}) });
   }
 
+  /* Show the computer's own folder dialog (the server runs on this machine) and
+   * make the chosen folder the workspace. Resolves {cancelled: true} when the
+   * dialog was closed, else the permissions view. */
+  async function pickWorkspaceFolder() {
+    return fetchAPI('/api/permissions/pick-folder', { method: 'POST', body: '{}' });
+  }
+
   async function getAgent() {
     return fetchAPI('/api/agent');
   }
@@ -927,9 +959,44 @@
 
   /* ----------------------------------------------------------- Model files */
 
+  /* The local catalogue. The same reply also carries `hosted` (every
+   * connected provider's enabled models) and `selected`; they are kept in
+   * lastModels and announced on the bus as 'models.hosted' for the model
+   * picker (hosted-models.js), so models.js keeps its plain list. */
+  let lastModels = null;
   async function listModels() {
     const data = await fetchAPI('/api/models');
+    lastModels = data && typeof data === 'object' ? data : null;
+    const bus = window.IMURUN && window.IMURUN.bus;
+    if (bus && lastModels) bus.emit('models.hosted', lastModels.hosted || []);
     return (data && data.models) || [];
+  }
+
+  /* ------------------------------------------------- Hosted model providers */
+
+  function providerPath(id, rest) {
+    return `/api/remote/${encodeURIComponent(id)}${rest || ''}`;
+  }
+
+  async function listProviders() {
+    return fetchAPI('/api/remote');
+  }
+
+  async function providerModels(id, refresh) {
+    return fetchAPI(providerPath(id, '/models') + (refresh ? '?refresh=1' : ''));
+  }
+
+  /* body: {key} — the custom provider also takes {base_url, name, no_key}. */
+  async function saveProviderKey(id, body) {
+    return fetchAPI(providerPath(id, '/key'), { method: 'POST', body: JSON.stringify(body || {}) });
+  }
+
+  async function saveProviderModels(id, enabled) {
+    return fetchAPI(providerPath(id, '/models'), { method: 'POST', body: JSON.stringify({ enabled: enabled }) });
+  }
+
+  async function removeProvider(id) {
+    return fetchAPI(providerPath(id, '/key'), { method: 'DELETE' });
   }
 
   async function deleteModel(id) {
@@ -1060,6 +1127,9 @@
     createSkill,
     getSkill,
     deleteSkill,
+    previewSkillImport,
+    importSkills,
+    updateSkill,
     connectConnector,
     disconnectConnector,
     getConnectorStatus,
@@ -1104,10 +1174,18 @@
     answerApproval,
     getPermissions,
     setPermissions,
+    truncateSession,
+    pickWorkspaceFolder,
     getAgent,
     setAgent,
     shareLocation,
     listModels,
+    get lastModels() { return lastModels; },
+    listProviders,
+    providerModels,
+    saveProviderKey,
+    saveProviderModels,
+    removeProvider,
     deleteModel,
     selectModel,
     downloadModel,

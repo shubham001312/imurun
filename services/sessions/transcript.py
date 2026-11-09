@@ -108,6 +108,38 @@ class TranscriptStore:
             messages.append(message)
         return messages
 
+    def truncate_at_user(self, session_id: str, from_end: int) -> int:
+        """Drop the ``from_end``-th user message counted from the end (1 = the
+        last one) and everything after it, for "edit and resend". Counting from
+        the end works however much history the client has loaded. Returns how
+        many messages were removed; raises ``ValueError`` when there is no such
+        message."""
+        if not session_id:
+            raise ValueError("session_id is required")
+        if not isinstance(from_end, int) or from_end < 1:
+            raise ValueError("from_end must be a positive integer")
+        path = self._path(session_id)
+        if not path.is_file():
+            raise ValueError("this session has no messages")
+        with self._lock_for(session_id):
+            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            users = []
+            for index, line in enumerate(lines):
+                try:
+                    if json.loads(line).get("role") == "user":
+                        users.append(index)
+                except (ValueError, AttributeError):
+                    continue
+            if from_end > len(users):
+                raise ValueError("that message is not in this session")
+            cut = users[len(users) - from_end]
+            kept = lines[:cut]
+            temporary = path.with_name(path.name + ".tmp")
+            temporary.write_text("".join(line + "\n" for line in kept), encoding="utf-8")
+            _private_file(temporary)
+            os.replace(temporary, path)
+        return len(lines) - cut
+
     def _failure(self, path: Path, why: str) -> None:
         if self._mark is None:
             return

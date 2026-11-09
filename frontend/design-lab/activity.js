@@ -2,8 +2,8 @@
  *
  *   IMURUN.activity.handles(type)          true for the frames this module renders
  *   IMURUN.activity.attach(turn)           -> controller for one chat.js Turn
- *   IMURUN.activity.finish(turn, turnEnd)  footer: "Used: ...", skill chips,
- *                                          verification badge, sources row
+ *   IMURUN.activity.finish(turn, turnEnd)  sources row, "Not verified live",
+ *                                          skills / missed tool-call footer
  *   IMURUN.activity.noteVerification(turn, frame)   keep `verification`/`sources`
  *   IMURUN.activity.stripCalls(text)       drop the server's "Using `tool` {...}" lines
  *   IMURUN.activity.stripNotes(text)       drop "[note: unable to verify]" style notes
@@ -105,7 +105,9 @@
     if (index === undefined || index === null || index === '' || !isFinite(Number(index))) {
       index = turn.order.length ? turn.order[turn.order.length - 1] : 1;
     }
-    var block = turn.traceBlock(Number(index));
+    /* Tool rows go in the message flow (Turn.flowBlock), not inside the
+     * collapsed thinking panel: the user sees each action as it happens. */
+    var block = turn.flowBlock ? turn.flowBlock(Number(index)) : turn.traceBlock(Number(index));
     var list = block.querySelector(':scope > .trace-tools');
     if (!list) {
       list = el('ul', 'trace-tools');
@@ -413,31 +415,25 @@
     return node;
   }
 
-  function sourcesRow(sources) {
-    var wrap = el('section', 'msg-sources');
+  /* One collapsed row under the answer: "Searched the web · 4 sources",
+   * with a check when the answer is verified (reply.js draws the toggle).
+   * Open, it lists each source on one line: initial, title, domain, and the
+   * snippets behind "Show snippets". `[n]` citations point at item n. */
+  function sourcesRow(sources, options) {
+    var o = options || {};
+    var wrap = el('section', 'msg-sources reply-sources');
     wrap.setAttribute('aria-label', 'Sources');
-    var head = el('div', 'msg-sources-head');
-    head.appendChild(el('span', 'msg-sources-k', 'Sources'));
+    var panel = el('div', 'reply-source-panel');
+    var list = el('ol', 'msg-sources-chips reply-source-list');
     var withSnippets = sources.some(function (s) { return s.snippet; });
-    var toggle = null;
-    if (withSnippets) {
-      toggle = el('button', 'msg-sources-toggle', 'Show snippets');
-      toggle.type = 'button';
-      toggle.setAttribute('aria-expanded', 'false');
-      head.appendChild(toggle);
-    }
-    wrap.appendChild(head);
-    var chips = el('div', 'msg-sources-chips');
-    var snippets = el('ol', 'msg-sources-snippets');
-    snippets.hidden = true;
     sources.forEach(function (source, index) {
+      var item = el('li', 'reply-source');
       var chip = el('a', 'source-chip');
       chip.dataset.n = String(index + 1);
       chip.href = source.url;
       chip.target = '_blank';
       chip.rel = 'noopener noreferrer';
       chip.title = source.title + '\n' + source.url;
-      chip.style.setProperty('--i', String(index));
       /* Remote favicons are blocked by the CSP (img-src 'self'): a
        * domain-initial avatar stands in for them. */
       var avatar = el('span', 'source-avatar', (source.domain.charAt(0) || '?').toUpperCase());
@@ -446,34 +442,49 @@
       chip.appendChild(el('span', 'source-n', String(index + 1)));
       chip.lastChild.setAttribute('aria-label', 'Source ' + (index + 1));
       chip.appendChild(avatar);
-      chip.appendChild(el('span', 'source-title', clip(source.title, 48)));
+      chip.appendChild(el('span', 'source-title', source.title));
       chip.appendChild(el('span', 'source-domain', source.domain));
-      chips.appendChild(chip);
-      if (source.snippet) {
-        var item = el('li', 'source-snippet');
-        var link = el('a', '', source.title);
-        link.href = source.url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        item.appendChild(link);
-        item.appendChild(el('span', 'source-domain', source.domain));
-        item.appendChild(el('p', '', clip(source.snippet, 320)));
-        snippets.appendChild(item);
-      }
+      item.appendChild(chip);
+      if (source.snippet) item.appendChild(el('p', 'source-snippet', clip(source.snippet, 320)));
+      list.appendChild(item);
     });
-    wrap.appendChild(chips);
-    if (toggle) {
-      wrap.appendChild(snippets);
+    panel.appendChild(list);
+    if (withSnippets) {
+      var toggle = el('button', 'msg-sources-toggle', 'Show snippets');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', 'false');
       toggle.addEventListener('click', function () {
-        var open = snippets.hidden;
-        snippets.hidden = !open;
+        var open = !wrap.classList.contains('show-snippets');
+        wrap.classList.toggle('show-snippets', open);
         toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
         toggle.textContent = open ? 'Hide snippets' : 'Show snippets';
       });
+      panel.appendChild(toggle);
     }
-    if (!util.reducedMotion()) wrap.classList.add('is-entering');
+    var head = IM.reply
+      ? IM.reply.sourcesToggle(sources.length, { web: o.web, verified: o.verified, panel: panel })
+      : el('span', 'msg-sources-k', 'Sources');
+    wrap.appendChild(head);
+    wrap.appendChild(panel);
     return wrap;
   }
+
+  /* Did this reply look anything up on the web (model call, pre-fetch or
+   * the research engine)? Decides "Searched the web · N sources". */
+  function usedWeb(turn) {
+    if (turn.search || turn.searchResults || (turn.research && !turn.research.skip)) return true;
+    var records = turn.activity ? turn.activity.records : [];
+    return records.some(function (r) { return r.tool === 'web_search' || r.tool === 'web_fetch'; });
+  }
+
+  /* The folded pill names the tools ("Used web_search"), so the footer does
+   * not have to repeat them. */
+  Activity.prototype.label = function () {
+    var names = [];
+    this.records.forEach(function (r) { if (!r.depth && names.indexOf(r.tool) === -1) names.push(r.tool); });
+    if (!names.length || this.count > 3 || names.length > 2) return 'Used ' + this.count + (this.count === 1 ? ' tool' : ' tools');
+    return 'Used ' + names.join(' and ') + (this.count > names.length ? ' · ' + this.count + ' calls' : '');
+  };
 
   /* ------------------------------------------------------------- finish */
 
@@ -490,43 +501,43 @@
 
     /* Sources: the server's list, else the pre-fetch search results. */
     var sources = normaliseSources(turn.sources && turn.sources.length ? turn.sources : turn.searchResults);
+    var verified = turn.verification === 'verified';
     /* Up to 12 (the server's own cap): "[n]" in the answer refers to the
      * n-th source, so the list is never re-ordered or cut below that. */
     if (sources.length && turn.status !== 'error') {
-      var row = sourcesRow(sources.slice(0, 12));
+      var row = sourcesRow(sources.slice(0, 12), { web: usedWeb(turn), verified: verified });
       node.insertBefore(row, actions);
       if (IM.research && IM.research.citations) IM.research.citations(turn.bubble, sources.slice(0, 12), row);
+      verified = false; /* the row's check says it */
+    }
+    /* The live "Searching the web… / Found N sources" status has done its
+     * job once the reply is in; a search that found nothing or failed stays. */
+    if (turn.search && !turn.search.classList.contains('is-empty')) {
+      turn.search.remove();
+      turn.search = null;
     }
 
+    /* Tool calls are listed in the folded pill above the answer; the footer
+     * only says what the pill cannot: skills when no tool ran (the pill may
+     * have folded away), and the bare count when the tool frames were missed. */
     var groups = activity ? activity.usage() : [];
     var reported = Number(event.tool_calls) || 0;
-    var skills = activity ? activity.skills : [];
-    if (groups.length || reported || skills.length) {
+    var skills = activity && !groups.length ? activity.skills : [];
+    if ((!groups.length && reported) || skills.length) {
       var foot = el('div', 'msg-agent-foot');
-      if (groups.length || reported) foot.appendChild(el('span', 'msg-agent-k', 'Used'));
-      groups.forEach(function (group) {
-        var state = group.failed ? 'is-failed' : (group.denied && !group.ok ? 'is-denied' : 'is-ok');
-        var chip = el('span', 'tool-chip ' + state, group.tool + (group.n > 1 ? ' ×' + group.n : ''));
-        var notes = [];
-        if (group.ok) notes.push(group.ok + ' ok');
-        if (group.failed) notes.push(group.failed + ' failed');
-        if (group.denied) notes.push(group.denied + ' denied');
-        chip.title = notes.join(', ');
-        foot.appendChild(chip);
-      });
-      if (!groups.length && reported) {
-        /* The frames were missed (reload, recovered stream): say only what
-         * turn.end reports. */
-        foot.appendChild(el('span', 'tool-chip', reported + (reported === 1 ? ' tool call' : ' tool calls')));
-      }
+      foot.appendChild(el('span', 'msg-agent-k', 'Used'));
+      if (!groups.length && reported) foot.appendChild(el('span', 'tool-chip', reported + (reported === 1 ? ' tool call' : ' tool calls')));
       skills.forEach(function (id) { foot.appendChild(el('span', 'skill-chip', '/' + id)); });
       node.insertBefore(foot, actions);
     }
 
-    var mark = badge(turn.verification, sources.length);
-    if (mark && actions) {
-      var meta = actions.querySelector('.msg-meta');
-      actions.insertBefore(mark, meta ? meta.nextSibling : actions.firstChild);
+    /* Verified without a source list, or not verified: a small note where
+     * the sources row would be. */
+    var mark = badge(verified ? 'verified' : (turn.verification === 'unverified' ? 'unverified' : ''), 0);
+    if (mark) {
+      var note = el('div', 'reply-evidence');
+      note.appendChild(mark);
+      node.insertBefore(note, actions);
     }
   }
 

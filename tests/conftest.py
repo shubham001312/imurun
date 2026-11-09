@@ -19,6 +19,12 @@ if not os.environ.get("IMURUN_BIN_DIR"):
     import tempfile
 
     os.environ["IMURUN_BIN_DIR"] = tempfile.mkdtemp(prefix="imurun-test-bin-")
+# The agent issue log (services/response/issues.py) never lands in the real data root.
+if not os.environ.get("IMURUN_ISSUES_LOG"):
+    import tempfile
+
+    os.environ["IMURUN_ISSUES_LOG"] = os.path.join(tempfile.mkdtemp(prefix="imurun-test-issues-"),
+                                                   "agent-issues.log")
 
 
 def pytest_configure(config):
@@ -55,3 +61,6 @@ def _no_builtin_connector_apps(tmp_path_factory, monkeypatch):
     for key in list(__import__("os").environ):
         if key.endswith(("_CLIENT_ID", "_CLIENT_SECRET")) and key.startswith("IMURUN_"):
             monkeypatch.delenv(key)
+# Restore the saved hosted model during build_server, not in a background
+# thread (services/remote/hosted.attach), so tests see it immediately.
+os.environ.setdefault("IMURUN_SYNC_REMOTE_RESTORE", "1")

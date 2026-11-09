@@ -46,6 +46,13 @@ class NotesTool(Tool):
     }
     requires_network = False
 
+    def permission_level(self, args: dict[str, Any]) -> tuple[str, str]:
+        """Saving or deleting memory asks (not in Auto): saved memory is read
+        into every later prompt, so injected text must not plant it (review M2)."""
+        if str(args.get("action") or "").lower() in ("save", "delete"):
+            return "write", "saves to IMURUN's memory of you, used in later chats"
+        return "allow", "reads IMURUN's memory"
+
     def __init__(self, storage_dir: str | None = None):
         if storage_dir is None:
             from ..paths import data_root  # honours IMURUN_DATA_ROOT
@@ -246,6 +253,13 @@ class FactsTool(Tool):
         "required": ["action"],
     }
     requires_network = False
+
+    def permission_level(self, args: dict[str, Any]) -> tuple[str, str]:
+        """Saving or deleting memory asks (not in Auto): saved memory is read
+        into every later prompt, so injected text must not plant it (review M2)."""
+        if str(args.get("action") or "").lower() in ("set", "delete"):
+            return "write", "saves to IMURUN's memory of you, used in later chats"
+        return "allow", "reads IMURUN's memory"
 
     def __init__(self, storage_dir: str | None = None):
         if storage_dir is None:

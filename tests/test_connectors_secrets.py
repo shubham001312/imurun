@@ -121,7 +121,11 @@ def test_backend_choice(tmp_path):
     fallback = build_secret_store(tmp_path, platform="linux", which=which(set()), keyring_module=False, choice="")
     assert isinstance(fallback, FileTokenStore)
     fake = type("K", (), {"get_password": lambda *a: None, "get_keyring": lambda self: self})()
-    assert isinstance(build_secret_store(tmp_path, keyring_module=fake, choice=""), KeyringTokenStore)
+    # Default: the keyring plus an encrypted file copy (a locked keyring must
+    # not lose saved keys); explicit "keyring" is the keyring alone.
+    auto = build_secret_store(tmp_path, keyring_module=fake, choice="")
+    assert isinstance(getattr(auto, "primary", auto), KeyringTokenStore)
+    assert isinstance(build_secret_store(tmp_path, keyring_module=fake, choice="keyring"), KeyringTokenStore)
     assert isinstance(build_secret_store(tmp_path, choice="memory"), MemoryTokenStore)
     assert isinstance(build_secret_store(tmp_path, choice="file", keyring_module=fake), FileTokenStore)
     with pytest.raises(TokenStoreUnavailable):

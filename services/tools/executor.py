@@ -64,6 +64,10 @@ class Execution:
         }
 
 
+# Tool categories whose results may hold the user's private data.
+PRIVATE_READ_CATEGORIES = frozenset({"read", "connector-read", "shell", "mcp"})
+
+
 class ToolExecutor:
     def __init__(
         self,
@@ -79,6 +83,11 @@ class ToolExecutor:
         self.approvals = approvals
         self._publish = publish
         self._mark = mark
+        # Turns that have read private data (files, connector content, command
+        # output). Afterwards a network call in the same turn asks first, so
+        # injected text cannot read a file and quietly send it out (security
+        # review H1). Bounded: oldest turns are forgotten.
+        self._read_turns: dict[str, None] = {}
 
     # ------------------------------------------------------------- offering
     def offered(self, *, depth: int = 0, allowed: frozenset[str] | None = None) -> list[Tool]:
@@ -130,9 +139,34 @@ class ToolExecutor:
                 return Decision("allow", "G3-tool", ("no policy: read-only tool",))
             return Decision("ask", "G3-tool", ("no permission policy is configured",))
         try:
-            return self.policy.decide(tool, args, session_id=ctx.session_id)
+            decision = self.policy.decide(tool, args, session_id=ctx.session_id)
         except Exception as exc:  # noqa: BLE001 - a broken policy denies
             return Decision("deny", "G3-tool", (f"permission check failed: {type(exc).__name__}",))
+        return self._after_private_read(tool, ctx, decision)
+
+    def _after_private_read(self, tool: Tool, ctx: CallContext, decision: Decision) -> Decision:
+        """A network call after private data was read in this turn asks (not in Auto)."""
+        if decision.kind != "allow" or tool.category != "network" or not ctx.turn_id:
+            return decision
+        if ctx.turn_id not in self._read_turns:
+            return decision
+        try:
+            values = self.policy.values()
+            granted = self.policy._granted(ctx.session_id, tool.name)
+        except Exception:  # noqa: BLE001 - unsure means ask
+            values, granted = {}, False
+        if values.get("mode") == "allow-all" or granted:
+            return decision
+        return Decision("ask", "G3-exfiltration", (
+            "sends a request to the internet after reading your files or messages in this turn",))
+
+    def _note_private_read(self, tool: Tool | None, ctx: CallContext, result: ToolResult) -> None:
+        if tool is None or not ctx.turn_id or not result.ok:
+            return
+        if tool.category in PRIVATE_READ_CATEGORIES:
+            self._read_turns[ctx.turn_id] = None
+            while len(self._read_turns) > 64:
+                self._read_turns.pop(next(iter(self._read_turns)))
 
     # ------------------------------------------------------------- running
     def execute(self, name: str, args: dict[str, Any] | None, ctx: CallContext | None = None) -> Execution:
@@ -180,6 +214,7 @@ class ToolExecutor:
             result = failed(tool.name, f"The {tool.name} tool failed: {type(exc).__name__}: {exc}")
         result.latency_ms = result.latency_ms or int((time.monotonic() - started) * 1000)
         result.source = result.source or tool.name
+        self._note_private_read(tool, ctx, result)
         return self._finish(call_id, tool.name, clean, result, decision, ctx, approval_id)
 
     def _approve(

@@ -492,3 +492,17 @@ needs these to use it:
       tested in `tests/test_resources_detect.py`). Presets stay
       `gentle|balanced|performance|custom` (`eco` accepted as alias).
       `PUT/POST /api/resources` is routed as of 2026-11-03 (api.py do_PUT/do_POST).
+
+35. **DONE 2026-11-09** (`services/config.saved_context_size`, `api._apply_context_size`): the saved size is used at startup and after a save, from the next model load; `FISH_CONTEXT_SIZE` still wins. Tests: `tests/test_context_size_setting.py`.
+    Original request: **Apply Settings > Engine `contextSize` (2026-11-09, frontend)** - the
+    setting is saved (`services/server/settings.py` default 8192) but nothing
+    reads it: `services/config.py` takes `context_size` from
+    `FISH_CONTEXT_SIZE` (default 0, so the specs engine picks
+    min(model maximum, 8192) and halves it until the KV cache fits a quarter
+    of the RAM budget). The Performance panel therefore shows it as "saved,
+    not applied yet". Wanted: pass `server.contextSize` to the engine on the
+    next load (or say in `/api/status` which value is in effect and why), so
+    the panel can offer "raise it in Settings > Engine" honestly. Already
+    available and used: `engine.model.context` (n_ctx in use) and
+    `engine.model.context_train` (GGUF context length), both only while the
+    model is loaded; `last_generation.context_used` / `context_size`.

@@ -1,14 +1,40 @@
 /* Settings > Use by API: the OpenAI-compatible API card (openai-settings.js). */
-.openai-api-root { display: grid; gap: 12px; margin-bottom: 18px; }
+.openai-api-root { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin-bottom: 18px; }
+.oai-card { min-width: 0; }
+.oai-card .settings-note .mono { overflow-wrap: anywhere; }
 .oai-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
 .oai-head .settings-card-title { margin: 0; }
-.oai-line .v { user-select: all; }
-.oai-actions { display: flex; gap: 6px; align-items: center; }
-.oai-actions .btn { padding: 4px 10px; }
+/* Base URL, API key, model id: label above, value full width, monospace,
+ * wrapping anywhere so a long key is never cut off; Copy stays beside it. */
+.oai-line { display: grid; gap: 5px; padding: 10px 0; border-top: 1px solid var(--line); }
+.oai-callout + .oai-line, .settings-note + .oai-line { border-top: 0; }
+.oai-k { font-size: 12.5px; font-weight: 550; color: var(--muted); }
+.oai-field { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.oai-v {
+  flex: 1; min-width: 0; display: block; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text);
+  font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;
+  user-select: all; cursor: text;
+}
+.oai-v:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--focus-ring); }
+.oai-v.is-placeholder { color: var(--muted); font-family: var(--font); user-select: text; word-break: normal; }
+.oai-actions { display: flex; gap: 6px; align-items: center; flex: none; padding-top: 3px; }
+.oai-actions .btn { padding: 5px 10px; }
+.oai-callout {
+  margin: 8px 0 4px; padding: 9px 12px;
+  border: 1px solid var(--line); border-left: 2px solid var(--accent); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font-size: 12.5px; line-height: 1.5;
+}
+.oai-link {
+  padding: 0; border: 0; background: none; color: var(--accent);
+  font: inherit; text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+}
 .oai-rotate { margin-top: 10px; }
 .oai-card .md-codeblock { margin: 8px 0 10px; }
 .oai-card .md-code { white-space: pre; max-height: 360px; }
 .oai-clients-title { margin: 6px 0 4px; }
-@media (max-width: 640px) {
-  .oai-line { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 520px) {
+  .oai-field { flex-direction: column; align-items: stretch; }
+  .oai-actions { padding-top: 0; justify-content: flex-end; }
 }

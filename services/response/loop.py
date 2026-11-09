@@ -56,8 +56,11 @@ from ..tools.protocol import (
     retry_message,
     tool_prompt,
 )
+from . import bridge
 from . import context as ctxmod
+from . import issues
 from . import profile as model_profile
+from . import user_context
 from .profile import compact_context
 from .style import (DEFAULT_DIRECTIVE, FAKE_RESULT_NOTE, LIVE_DATA_RULE,
                     looks_like_fake_tool_result, scrub_disclaimers)
@@ -72,6 +75,113 @@ HISTORY_MESSAGES = 6
 # routes by heuristic instead of spending a generation (time to first token).
 PLANNER_MIN_PREFILL_TPS = 400.0
 LIVE_NUDGE = False  # see _needs_live_nudge
+# Attempts per kind of recovery in one turn: an unreadable tool call, a
+# "cannot run commands" refusal while tools were offered, and a tool that
+# failed. Each attempt is logged to logs/agent-issues.log.
+MAX_RETRIES = 3
+ACTION_TOOLS = frozenset({"shell", "file_read", "file_list", "file_write", "make_dir"})
+_REFUSAL = re.compile(
+    r"(?:\b(?:i|we)\s+(?:can(?:not|'t|’t| not)|am\s+(?:not\s+able|unable)\s+to|"
+    r"(?:do\s+not|don't|don’t)\s+have(?:\s+\w+){0,3}?\s+(?:ability|access|permission)s?|"
+    r"have\s+no(?:\s+\w+){0,2}?\s+(?:way|access))"
+    r"|\bas\s+an?\s+(?:ai|virtual\s+assistant|language\s+model|text-based)\b)"
+    r"[^.!?\n]{0,90}?\b(?:run|execute|access|reach|open|read|list|see|use|interact|create|write|make)\w*"
+    r"[^.!?\n]{0,70}?\b(?:commands?|shell|terminal|computer|system|machine|files?|folders?|"
+    r"director(?:y|ies)|desktop|tools?|device)\b",
+    re.IGNORECASE,
+)
+# "Do it" requests: an action on files/folders/projects of this computer. When
+# the model answers one of these with instructions instead of a tool call, it
+# is sent back to act (shares the refusal budget).
+_ACTION_REQUEST = re.compile(
+    r"\b(?:create|make|build|write|save|generate|set\s*up|scaffold|copy|"
+    r"list|show|open|run|install|edit|update|fix)\b[^.?!\n]{0,80}?\b(?:files?|folders?|"
+    r"director(?:y|ies)|websites?|site|project|app|desktop|documents|downloads|repo|script|page|"
+    r"html|css|readme)\b|\b(?:what'?s|what\s+is|what\s+are)\s+(?:on|in)\s+(?:my|the)\s+"
+    r"(?:desktop|documents|downloads|folder|directory)\b",
+    re.IGNORECASE,
+)
+# A how-to question is answered with words, not acted on (security review H2):
+# "how do I delete...", "explain how to build...", "what is a README?".
+_HOW_TO = re.compile(
+    r"^\s*(?:how|why|what|when|where|which|who|should|is|are|does|do|explain|tell\s+me\s+(?:how|why|about)|"
+    r"teach|describe|show\s+me\s+how)\b|\bhow\s+(?:do|can|would|should)\s+(?:i|you|we|one)\b|"
+    r"\bhow\s+to\b|\bexplain\b|\binstructions?\b|\bsteps?\s+(?:to|for)\b",
+    re.IGNORECASE,
+)
+_POLITE_REQUEST = re.compile(r"^\s*(?:please\s+)?(?:can|could|would|will)\s+you\b", re.IGNORECASE)
+_LISTING_QUESTION = re.compile(
+    r"\b(?:what'?s|what\s+is|what\s+are)\s+(?:on|in)\s+(?:my|the)\s+"
+    r"(?:desktop|documents|downloads|folder|directory)\b", re.IGNORECASE)
+# Never send back a reply that declined for a reason (safety, privacy, harm):
+# only plain "I cannot access your computer" claims are corrected (review M1).
+_REASONED_REFUSAL = re.compile(
+    r"\b(?:harm\w*|unsafe|danger\w*|illegal|unethical|malicious|inappropriate|not\s+appropriate|"
+    r"privacy|private|security|secure|risk\w*|policy|polic(?:y|ies)|guidelines?|"
+    r"won'?t|will\s+not|should(?:\s+not|n'?t)|not\s+comfortable|refuse|destroy\w*|"
+    r"irreversibl\w*|permanent\w*|credentials?|passwords?)\b",
+    re.IGNORECASE,
+)
+
+
+# "Let me fix both." / "I'll create script.js next." as the last words of a
+# reply, with no tool call: the model announced work and stopped. Seen with
+# Nemotron on "this site is not proper, fix it" (2026-11-09).
+_ANNOUNCED = re.compile(
+    r"(?:\blet me|\bi(?:'|’)ll|\bi will|\bi(?:'|’)m going to|\bi am going to|\bnext,? i|\bnow,? i(?:'|’)ll|"
+    r"\bnow let me|\bi need to|\bi should)\b[^.!?\n]{0,120}?\b(?:fix|creat|writ|updat|add|run|mak|edit|"
+    r"build|install|open|patch|chang|complet|implement|generat|set ?up|test|check|read|list|look)\w*"
+    r"[^\n]{0,160}$",
+    re.IGNORECASE,
+)
+
+
+def _announced_work(answer: str) -> bool:
+    """The reply ends by announcing an action it did not take."""
+    tail = (answer or "").strip()[-320:]
+    if not tail or tail.endswith("?"):
+        return False
+    last = re.split(r"(?<=[.!])\s+", tail)[-1] if re.search(r"[.!]\s+\S", tail) else tail
+    return bool(_ANNOUNCED.search(last))
+
+
+def _asks_for_action(question: str) -> bool:
+    """True for a request to do something here, not a question about how."""
+    text = (question or "").strip()
+    if not text:
+        return False
+    if _LISTING_QUESTION.search(text):
+        return True
+    if not _ACTION_REQUEST.search(text):
+        return False
+    polite = bool(_POLITE_REQUEST.match(text))
+    if _HOW_TO.search(text) and not (polite and not re.search(r"\bhow\b|\bexplain\b", text, re.I)):
+        return False
+    if text.endswith("?") and not polite:
+        return False
+    return True
+
+
+def _capability_refusal(answer: str) -> bool:
+    """The reply claims it cannot act here, without giving a reason to decline."""
+    text = answer or ""
+    return bool(_REFUSAL.search(text)) and not _REASONED_REFUSAL.search(text)
+
+
+# Plan mode: the agent may look but not touch. Only these tool categories are
+# offered, and the executor refuses everything else (CallContext.allowed).
+PLAN_CATEGORIES = frozenset({"info", "network", "read", "connector-read", "agent"})
+PLAN_DIRECTIVE = "\n".join([
+    "# Plan mode",
+    "The user switched to Plan mode: do not change anything. You can read files, list folders",
+    "and search; writing, deleting and running commands are switched off in this mode.",
+    "Look at what you need, then answer with a plan:",
+    "1. A one-line goal.",
+    "2. Numbered steps, each naming the files to create or change and the commands to run.",
+    "3. Risks or open questions, if any.",
+    "End with: \"Switch to Build to carry out this plan.\"",
+])
+_NOT_RETRYABLE = ("Permission denied for", "The turn was stopped", "There is no tool called")
 _FAKE_RESULT_HEADER = re.compile(r"^\s*\[tool result[^\]]*\]\s*", re.IGNORECASE)
 
 SUBAGENT_DIRECTIVE = "\n".join([
@@ -188,6 +298,9 @@ class _TurnState:
     prefetched: bool = False
     offline: bool = False
     retried: bool = False
+    retries: int = 0          # unreadable tool calls answered with a retry note
+    refusals: int = 0         # "I cannot run commands" answers sent back
+    tool_failures: dict = field(default_factory=dict)  # tool name -> failed calls
     nudged: bool = False
     empty_retry: bool = False
     tool_steps: int = 0
@@ -228,6 +341,8 @@ class AgentLoop:
         prefetch: bool = True,
         parent_stop=None,
         compact: bool | None = None,
+        settings=None,
+        mode: str = "build",
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be positive")
@@ -260,6 +375,10 @@ class AgentLoop:
         # deciding there keeps weight loading off the request thread.
         self._compact = compact
         self._parent_stop = parent_stop
+        # Settings store (profile) for the "About the user" block; None in
+        # sub-agents and tests that do not care who the user is.
+        self._settings = settings
+        self._mode = "plan" if str(mode or "").lower() == "plan" else "build"
         self._stopped = False
         self._kill = kill
         self._kill_id = (
@@ -300,12 +419,20 @@ class AgentLoop:
         if not prompt or not prompt.strip():
             raise ValueError("a prompt is required")
         state = _TurnState(question=prompt)
+        if self._mode == "plan":
+            self._restrict_to_reading()
         if self._compact is None:
             self._compact = model_profile.is_compact(self._raw_model)
         # A small model cannot drive tools: it copies the protocol's example
         # call instead of answering (see profile.py). It gets no catalogue.
         self._offered = [] if self._compact else self._offer(prompt)
         prefetch_text = self._run_prefetch(prompt, state) if self._prefetch else ""
+        bridged = self._run_bridge(prompt, state)
+        if bridged:
+            prefetch_text = f"{prefetch_text}\n\n{bridged}" if prefetch_text else bridged
+        remembered = self._remember(prompt)
+        if remembered:
+            prefetch_text = f"{prefetch_text}\n\n{remembered}" if prefetch_text else remembered
         messages = self._initial_messages(prompt, prefetch_text)
         new_messages: list[dict] = []
         steps: list[Step] = []
@@ -343,14 +470,21 @@ class AgentLoop:
                 self._tool_step(index, raw, parsed, messages, steps, state)
                 continue
 
-            if parsed.error and not parsed.calls and not state.retried and not last:
-                state.retried = True
-                steps.append(Step(index - 1, raw, kind="retry"))
-                messages.append({"role": "assistant", "content": visible or "(empty)", "_kind": "tool_call"})
-                messages.append({**retry_message(parsed.error, [t.name for t in self._offered]),
-                                 "_kind": "note"})
-                self._mark("G3-loop", self._session_id, "unreadable tool call; asked to retry")
-                continue
+            if parsed.error and not parsed.calls and not last:
+                if state.retries < MAX_RETRIES:
+                    state.retries += 1
+                    state.retried = True
+                    steps.append(Step(index - 1, raw, kind="retry"))
+                    messages.append({"role": "assistant", "content": visible or "(empty)", "_kind": "tool_call"})
+                    messages.append({**retry_message(parsed.error, [t.name for t in self._offered]),
+                                     "_kind": "note"})
+                    self._mark("G3-loop", self._session_id,
+                               f"unreadable tool call; retry {state.retries} of {MAX_RETRIES}")
+                    self._issue("unreadable-call", error=parsed.error, attempt=state.retries,
+                                detail=visible[:300])
+                    continue
+                self._issue("retries-exhausted", error=parsed.error, attempt=state.retries,
+                            detail="unreadable tool call")
 
             # The model wrote "[tool result: web_search] ..." itself: that is a
             # hallucinated result, never an answer. One retry, then whatever it
@@ -370,6 +504,40 @@ class AgentLoop:
                 steps.append(Step(index - 1, raw, kind="retry"))
                 messages.append({"role": "user", "content": "[note] Give your final answer now, without thinking out loud.",
                                  "_kind": "note"})
+                continue
+
+            refused = _capability_refusal(answer_text)
+            explained = (self._mode != "plan" and not refused and state.tool_steps == 0
+                         and not _REASONED_REFUSAL.search(answer_text or "")
+                         and _asks_for_action(question))
+            announced = (self._mode != "plan" and not refused and not parsed.calls
+                         and _announced_work(answer_text))
+            if (not last and state.refusals < MAX_RETRIES and self._offers_action_tools()
+                    and (announced or ((refused or explained) and not state.tool_ok))):
+                state.refusals += 1
+                tools = ", ".join(sorted(t.name for t in self._offered if t.name in ACTION_TOOLS))
+                steps.append(Step(index - 1, raw, kind="retry"))
+                messages.append({"role": "assistant", "content": answer_text, "_kind": "draft"})
+                if announced and not refused and not explained:
+                    note = ("[note] You said what you will do next but did not do it. Do it now: reply "
+                            "with one tool block (" + tools + "). Do not describe it again. When "
+                            "everything is done, answer briefly with what changed.")
+                elif refused:
+                    note = ("[note] You do have tools that act on this computer: " + tools + ". Do not say "
+                            "you lack access. If the request is safe and the user wants it, call the right tool now "
+                            "with one tool block; risky steps still show the user an approval card. If you "
+                            "should not do it, say why.")
+                else:
+                    note = ("[note] The user asked you to do this on their computer, not to explain how. "
+                            "Do it now with the tools (" + tools + "): make_dir and file_write create real "
+                            "folders and files (paths like ~/Desktop/demo/index.html work), shell runs "
+                            "commands, file_list shows what is in a folder. Call one tool now unless the request is unsafe or "
+                            "destructive; after the work is done, answer briefly with what you did.")
+                messages.append({"role": "user", "_kind": "note", "content": note})
+                kind = ("refusal" if refused else "explained-instead-of-acting" if explained
+                        else "announced-without-acting")
+                self._mark("G3-loop", self._session_id, f"{kind}; retry {state.refusals} of {MAX_RETRIES}")
+                self._issue(kind, attempt=state.refusals, detail=answer_text[:300])
                 continue
 
             if not last and self._needs_live_nudge(question, answer_text, state):
@@ -409,6 +577,8 @@ class AgentLoop:
             if status == "done" and not last and self._deliver(messages, new_messages):
                 question = messages[-1]["content"]
                 state.nudged = state.retried = state.empty_retry = False
+                state.retries = state.refusals = 0
+                state.tool_failures = {}
                 continue
             if self._queue.has_pending(self._session_id):
                 self._mark("G1-prompt", self._session_id, "queued prompt pending for the next turn")
@@ -439,6 +609,96 @@ class AgentLoop:
             elif result.offline:
                 state.offline = True
             messages.append({**result_message(call.name, result, limit=limit), "_kind": "tool_result"})
+            if not result.ok and not result.offline and not _not_retryable(result):
+                count = state.tool_failures.get(call.name, 0) + 1
+                state.tool_failures[call.name] = count
+                error = result.error or result.content or "failed"
+                self._issue("tool-failed", tool=call.name, error=error, attempt=count,
+                            detail=json.dumps(call.args, ensure_ascii=False)[:300])
+                if count < MAX_RETRIES:
+                    note = (f"[note] {call.name} failed (attempt {count} of {MAX_RETRIES}): {error}\n"
+                            "Find the cause (a wrong path, command, flag or argument), then call the tool "
+                            "again with the fix. Do not repeat the exact same call.")
+                else:
+                    note = (f"[note] {call.name} has failed {count} times. Do not call it again in this "
+                            "turn. Tell the user exactly what failed and the last error, and suggest a fix.")
+                    self._issue("retries-exhausted", tool=call.name, error=error, attempt=count)
+                messages.append({"role": "user", "content": note, "_kind": "note"})
+
+    # ------------------------------------------------- bridge and recovery
+    def _restrict_to_reading(self) -> None:
+        """Plan mode: only read-only tools, enforced by the executor (``allowed``)."""
+        names: set[str] = set()
+        if self._executor is not None:
+            try:
+                tools = self._executor.offered(depth=self._depth)
+            except Exception:  # noqa: BLE001 - no catalogue means nothing is allowed
+                tools = []
+            names = {t.name for t in tools if getattr(t, "category", "info") in PLAN_CATEGORIES}
+        allowed = frozenset(names)
+        self._allowed = allowed if self._allowed is None else (self._allowed & allowed)
+
+    def _remember(self, prompt: str) -> str:
+        """Save a name the user states ("my name is ..."), by code (user_context.capture)."""
+        if self._depth != 0 or self._directive is not None:
+            return ""
+        try:
+            return user_context.capture(prompt, self._settings)
+        except Exception as exc:  # noqa: BLE001 - memory never breaks a turn
+            self._issue("memory-failed", error=f"{type(exc).__name__}: {exc}")
+            return ""
+
+    def _offers_action_tools(self) -> bool:
+        return any(t.name in ACTION_TOOLS for t in self._offered)
+
+    def _issue(self, kind: str, **fields) -> None:
+        issues.record(kind, session=self._session_id, turn=self._turn_id, **fields)
+
+    def _run_bridge(self, prompt: str, state: _TurnState) -> str:
+        """Run the command the message explicitly asks for (``bridge.py``).
+
+        Works for every model size: the loop runs the ``shell`` tool itself,
+        through the executor (permissions, approval card, audit, events). A
+        start-up failure is retried up to ``MAX_RETRIES`` times; a command
+        that ran and failed (non-zero exit, timeout) is a result, not retried,
+        because running it again could repeat side effects. The output goes
+        to the model as context so it can explain it.
+        """
+        # Only the user's own message at the top level: a sub-agent's task text
+        # is written by the model, not the user (security review L1).
+        if self._depth > 0 or self._directive is not None:
+            return ""
+        command = bridge.extract_command(prompt)
+        if not command or self._executor is None:
+            return ""
+        if self._allowed is not None and "shell" not in self._allowed:
+            return ""
+        ctx = CallContext(
+            turn_id=self._turn_id, session_id=self._session_id, depth=self._depth, step=0,
+            stop=self.stopped, interactive=True, allowed=self._allowed, spawn=self._spawn,
+            source="user",
+        )
+        result: ToolResult | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                result = self._executor.execute("shell", {"command": command}, ctx).result
+            except Exception as exc:  # noqa: BLE001 - the executor never raises, but be sure
+                result = failed("shell", f"The shell tool failed: {type(exc).__name__}: {exc}")
+            if result.ok or not _transient(result) or self.stopped() or attempt == MAX_RETRIES:
+                break
+            self._issue("bridge-retry", tool="shell", error=result.error, attempt=attempt, detail=command)
+        assert result is not None
+        state.names.append("shell")
+        state.cache[ToolCall("shell", {"command": command}).key()] = result
+        if result.ok:
+            state.tool_ok = True
+        else:
+            self._issue("bridge-failed", tool="shell", error=result.error or result.content,
+                        detail=command)
+        body = result_message("shell", result, limit=ctxmod.result_chars(self._context_limit))["content"]
+        return ("The user asked to run a command on this computer, and IMURUN ran it for them:\n"
+                f"{body}\n"
+                "Explain the result briefly. Do not run the same command again.")
 
     def _call(self, call: ToolCall, index: int, state: _TurnState) -> ToolResult:
         key = call.key()
@@ -469,7 +729,7 @@ class AgentLoop:
             return failed("run_agent", "Sub-agents cannot go deeper here.")
         parent = {t.name for t in self._offered}
         wanted = set(tools) if tools else set(parent)
-        allowed = (wanted & parent) if parent else wanted
+        allowed = wanted & parent  # never more than this agent was offered (review L5)
         if depth >= MAX_DEPTH:
             allowed.discard("run_agent")
         self._publish("agent.start", {"turn_id": self._turn_id, "depth": depth, "task": task[:500],
@@ -568,6 +828,14 @@ class AgentLoop:
             if persona:
                 parts.append(persona)
             parts.append(model_profile.COMPACT_DIRECTIVE if self._compact else DEFAULT_DIRECTIVE)
+            if self._mode == "plan":
+                parts.append(PLAN_DIRECTIVE)
+            if self._depth == 0:
+                try:
+                    parts.append(user_context.block(
+                        self._settings, can_save=any(t.name == "facts" for t in self._offered)))
+                except Exception:  # noqa: BLE001 - never block a turn on the profile
+                    pass
         if self._language:
             # The user spoke this language (voice, docs/agentic/REQUESTS.md #13).
             from ..voice.languages import answer_directive
@@ -577,14 +845,21 @@ class AgentLoop:
                 parts.append(line)
         parts.append(self._platform_line())
         if self._offered:
-            workspace = ""
+            workspace, folders = "", []
             try:
                 policy = getattr(self._executor, "policy", None)
-                workspace = str(policy.workspace.root) if policy is not None else ""
+                if policy is not None:
+                    workspace = str(policy.workspace.root)
+                    home = os.path.expanduser("~")
+                    folders = [("~" + str(p)[len(home):]) if str(p).startswith(home + os.sep) else str(p)
+                               for p in policy.workspace.extra_roots]
             except Exception:  # noqa: BLE001
-                workspace = ""
+                workspace, folders = "", []
+            # The compact tool list for every model: the JSON-schema form tripled
+            # the system prompt (about 1,800 tokens against 670) and thinking
+            # models spent long passages deliberating over it.
             parts.append(tool_prompt(self._offered, max_steps=self._max_steps,
-                                     full=self._context_limit >= 16384, workspace=workspace,
+                                     full=False, workspace=workspace, folders=folders,
                                      hidden_services=getattr(self, "_hidden_services", [])))
         if self._skills:
             from ..skills.invoke import skills_prompt
@@ -658,7 +933,14 @@ class AgentLoop:
                 # of seconds before the first token. Only a fast-prefilling
                 # model may route; unknown speed (first turn) routes by heuristic.
                 use_model = use_model and self._prefill_fast()
+                # A model that is offered web_search decides itself whether to
+                # search: no keyword or routing search runs ahead of it ("what's
+                # on my desktop right now" searched the web). Only compact models,
+                # which get no tools, keep the pre-fetched search.
+                model_searches = (not self._compact
+                                  and any(t.name == "web_search" for t in self._offered))
                 extra = {
+                    "search": not model_searches,
                     "history": [m for m in self._prior_messages[-HISTORY_MESSAGES:]
                                 if m.get("role") in ("user", "assistant")],
                     "model": self._raw_model if use_model else None,
@@ -666,7 +948,7 @@ class AgentLoop:
                     "turn_id": self._turn_id,
                 }
             names = list(self._tools.intents(prompt, **extra)) if hasattr(self._tools, "intents") else []
-            if extra and hasattr(self._tools, "plan"):
+            if extra and extra.get("search") and hasattr(self._tools, "plan"):
                 try:
                     plan = self._tools.plan(prompt, extra["history"], extra["model"])  # cache hit
                     state.needs_web = bool(getattr(plan, "needs_web", False))
@@ -762,3 +1044,15 @@ def _canonical(parsed: ParsedReply) -> str:
         blocks.append("```tool\n" + json.dumps({"name": call.name, "args": call.args},
                                                ensure_ascii=False) + "\n```")
     return "\n".join(blocks)
+
+
+def _not_retryable(result: ToolResult) -> bool:
+    """Denied, declined, stopped or unknown-tool results are never retried."""
+    text = str(result.error or result.content or "")
+    return any(text.startswith(prefix) for prefix in _NOT_RETRYABLE)
+
+
+def _transient(result: ToolResult) -> bool:
+    """The tool could not start (not: the command ran and failed)."""
+    text = str(result.error or "")
+    return text.startswith("The shell tool failed") or text == "the tool returned no result"

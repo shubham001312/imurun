@@ -144,7 +144,7 @@ def handle_get(server: Any, path: str) -> Reply | None:
 
 def is_post_route(path: str) -> bool:
     parts = [p for p in path.split("/") if p]
-    if path in ("/api/tools/run", "/api/permissions", "/api/agent"):
+    if path in ("/api/tools/run", "/api/permissions", "/api/agent", "/api/permissions/pick-folder"):
         return True
     if any(module.is_post_route(path) for module in _extensions()):
         return True
@@ -170,6 +170,8 @@ def handle_post(server: Any, path: str, payload: dict) -> Reply:
                                                              "writeFiles", "runShell", "network")})
         _record(server, "permissions", f"mode {view.get('mode')}")
         return 200, view
+    if path == "/api/permissions/pick-folder":
+        return _pick_folder(server)
     if path == "/api/agent":
         settings = getattr(server, "_settings", None)
         if settings is None:
@@ -259,3 +261,33 @@ def _record(server: Any, subject: str, why: str) -> None:
     record = getattr(server, "_record", None)
     if callable(record):
         record(subject, why)
+
+
+def _pick_folder(server: Any) -> Reply:
+    """Home > "Change folder": the native folder dialog, then the usual
+    validated workspace change. ``{"cancelled": true}`` when closed."""
+    from .folder_picker import PickerUnavailable, pick_folder
+
+    policy = getattr(server, "_policy", None)
+    if policy is None:
+        return 501, {"error": "permissions are not configured"}
+    try:
+        start = str(policy.workspace.root)
+    except Exception:  # noqa: BLE001
+        start = None
+    try:
+        chosen = pick_folder(start)
+    except PickerUnavailable as exc:
+        return 409, {"error": str(exc), "unavailable": True}
+    except Exception as exc:  # noqa: BLE001 - a dialog failure is a reply, not a crash
+        return 500, {"error": f"the folder dialog failed ({type(exc).__name__})"}
+    if not chosen:
+        return 200, {"cancelled": True}
+    try:
+        view = policy.update({"workspaceRoot": chosen})
+    except ValueError as exc:
+        return 400, {"error": str(exc)}
+    _publish(server, "permissions", {k: view[k] for k in ("mode", "workspace", "readFiles",
+                                                         "writeFiles", "runShell", "network")})
+    _record(server, "permissions", "workspace changed from the folder dialog")
+    return 200, view

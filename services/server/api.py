@@ -16,6 +16,7 @@ GET  /api/sessions         session identities
 POST /api/sessions         start a session from the first command
 GET  /api/sessions/{id}/messages
 POST /api/sessions/{id}/rename
+POST /api/sessions/{id}/truncate   {fromEnd} drop a user message and what followed (edit and resend)
 GET/POST /api/skills
 POST /api/turns            start an agent turn
 GET  /api/turns/{id}       turn state
@@ -69,8 +70,10 @@ from ..prompts.queue import PromptQueue
 from ..safety.decisions import PermissionRequired
 from ..sessions.session import Session
 from ..sessions.transcript import TranscriptStore
+from ..skills.github import GitHubError, GitHubFetcher, SkillImporter, source_view
 from ..skills.store import SkillsStore
 from ..tools import routes as tool_routes
+from ..remote import hosted as remote_routes  # /api/remote/* hosted model providers
 from ..voice import routes as voice_routes  # /api/voice/* (docs/voice/README.md)
 from ..tuning import routes as tuning_routes  # /api/tuning/* (docs/tuning/README.md)
 from ..tools.approvals import ApprovalBroker
@@ -310,6 +313,10 @@ class ApiServer:
         self._version = version
         self._started_at = time.time()
         self._skills = skills or SkillsStore(mark=self._skill_mark)
+        # Install from GitHub. Production always uses the real hosts; tests
+        # replace this attribute with an importer pointed at a local fake.
+        self._skill_importer = SkillImporter(
+            self._skills, GitHubFetcher(token_provider=self._github_token))
         self._transcripts = transcripts or TranscriptStore(
             sessions_root, mark=self._transcript_mark
         )
@@ -462,6 +469,30 @@ class ApiServer:
 
     def _skill_mark(self, rule: str, subject: str, why: str) -> None:
         self._record(subject, f"{rule}: {why}")
+
+    def _github_token(self) -> str | None:
+        """The GitHub connector's token when it is connected, else ``None``.
+
+        Optional: skill import works anonymously; a token only raises the rate
+        limit and reaches private repositories. Never logged or returned.
+        """
+        connector = self._connectors.get("github") if self._connectors else None
+        if connector is None:
+            return None
+        try:
+            if not connector.connected():
+                return None
+            return connector._access_token()  # noqa: SLF001 - BearerConnector's token accessor
+        except Exception:  # noqa: BLE001 - a broken connector means anonymous
+            return None
+
+    def _skill_view(self, skill) -> dict:
+        view = {"id": skill.id, "name": skill.name, "description": skill.description,
+                "origin": skill.origin, "body": skill.body, "invoke": f"/{skill.id}"}
+        source = source_view(getattr(skill, "source", ""))
+        if source:
+            view["source"] = source
+        return view
 
     def _event_mark(self, rule: str, subject: str, why: str) -> None:
         self._record(subject, f"{rule}: {why}")
@@ -797,7 +828,8 @@ class ApiServer:
                     voice_routes.dispatch(server, self, path)
                     return
                 handled = (tuning_routes.handle_get(server, path, query=parse_qs(urlsplit(self.path).query))
-                           or tool_routes.handle_get(server, path))
+                           or tool_routes.handle_get(server, path)
+                           or remote_routes.handle_get(server, self.path))
                 if handled is not None:
                     self._reply(*handled)
                     return
@@ -807,10 +839,7 @@ class ApiServer:
                     if skill is None:
                         self._reply(404, {"error": "unknown skill"})
                         return
-                    self._reply(200, {"id": skill.id, "name": skill.name,
-                                      "description": skill.description,
-                                      "origin": skill.origin, "body": skill.body,
-                                      "invoke": f"/{skill.id}"})
+                    self._reply(200, server._skill_view(skill))
                     return
                 if len(parts) == 3 and parts[:2] == ["api", "connectors"]:
                     connector = server._connectors.get(parts[2])
@@ -865,16 +894,7 @@ class ApiServer:
                     self._reply(
                         200,
                         {
-                            "skills": [
-                                {
-                                    "id": skill.id,
-                                    "name": skill.name,
-                                    "description": skill.description,
-                                    "origin": skill.origin,
-                                    "body": skill.body,
-                                }
-                                for skill in server._skills.list()
-                            ]
+                            "skills": [server._skill_view(skill) for skill in server._skills.list()]
                         },
                     )
                     return
@@ -904,17 +924,23 @@ class ApiServer:
                     return
                 # Models API
                 if path == "/api/models" or path == "/api/models/":
+                    try:  # hosted providers' enabled models; never break the local list
+                        hosted = remote_routes.model_entries(server)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("hosted model rows failed")
+                        hosted = []
                     if not _HAS_MODELS_API or get_model_manager is None:
-                        self._reply(501, {"error": "models API not available"})
+                        self._reply(501, {"error": "models API not available", "hosted": hosted})
                         return
                     manager = get_model_manager()
                     models = manager.list_models()
                     selected = _selected_model_name(server)
+                    remote_active = bool(getattr(getattr(server, "_model", None), "remote", False))
                     payload = []
                     for model in models:
                         view = asdict(model)
                         view["selected"] = bool(
-                            selected and model.path and Path(model.path).name == selected
+                            not remote_active and selected and model.path and Path(model.path).name == selected
                         )
                         payload.append(view)
                     disk = (manager.disk_status() if hasattr(manager, "disk_status")
@@ -923,6 +949,7 @@ class ApiServer:
                         200,
                         {
                             "models": payload,
+                            "hosted": hosted,
                             "selected": selected,
                             "engine": _model_status(server),
                             "disk": disk,
@@ -985,6 +1012,12 @@ class ApiServer:
                     if payload is None:
                         return
                     self._reply(*resources_update(server, payload))
+                    return
+                if remote_routes.is_post_route(path):
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    self._reply(*remote_routes.handle_post(server, path, payload))
                     return
                 if tuning_routes.is_post_route(path) or tool_routes.is_post_route(path):
                     payload = self._body()
@@ -1089,6 +1122,31 @@ class ApiServer:
                     self._reply(200, {"turn_id": turn.id})
                     return
 
+                if path in ("/api/skills/import/preview", "/api/skills/import") or (
+                        len(parts) == 4 and parts[:2] == ["api", "skills"] and parts[3] == "update"):
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    importer = server._skill_importer
+                    try:
+                        if path == "/api/skills/import/preview":
+                            result = importer.preview(_text(payload, "url"))
+                        elif path == "/api/skills/import":
+                            ref = _text(payload, "ref").strip() or None
+                            result = importer.install(_text(payload, "url"), payload.get("paths"), ref)
+                            for item in result["results"]:
+                                if item["status"] == "installed":
+                                    server._record("skills", f"installed {item['id']} from {item['source']}")
+                        else:
+                            result = importer.update(parts[2])
+                            if result["status"] == "updated":
+                                server._record("skills", f"updated {parts[2]} to {result['commit']}")
+                    except GitHubError as exc:
+                        self._reply(exc.status, {"error": str(exc), "code": exc.code})
+                        return
+                    self._reply(200, result)
+                    return
+
                 if path == "/api/skills":
                     payload = self._body()
                     if payload is None:
@@ -1115,6 +1173,30 @@ class ApiServer:
                             "origin": skill.origin,
                         },
                     )
+                    return
+
+                if (
+                    len(parts) == 4
+                    and parts[:2] == ["api", "sessions"]
+                    and parts[3] == "truncate"
+                ):
+                    # Edit and resend: drop a user message and what followed it.
+                    payload = self._body()
+                    if payload is None:
+                        return
+                    try:
+                        Session.load(parts[2], server._sessions_root)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        self._reply(404, {"error": "unknown session"})
+                        return
+                    try:
+                        removed = server._transcripts.truncate_at_user(
+                            parts[2], int(payload.get("fromEnd", 0)))
+                    except (ValueError, TypeError) as exc:
+                        self._reply(400, {"error": str(exc)})
+                        return
+                    server._record("session", f"truncated {parts[2]} ({removed} messages)")
+                    self._reply(200, {"removed": removed})
                     return
 
                 if (
@@ -1261,15 +1343,19 @@ class ApiServer:
 
                 # Select the model the engine should use.
                 if path == "/api/models/select":
-                    if not _HAS_MODELS_API or get_model_manager is None:
-                        self._reply(501, {"error": "models API not available"})
-                        return
                     payload = self._body()
                     if payload is None:
                         return
                     model_id = str(payload.get("id") or payload.get("model_id") or "")
                     if not model_id:
                         self._reply(400, {"error": "id is required"})
+                        return
+                    # "<provider>:<model>" (nvidia:, openrouter:, custom: ...) is a hosted model.
+                    if remote_routes.is_hosted_id(model_id):
+                        self._reply(*remote_routes.select(server, model_id))
+                        return
+                    if not _HAS_MODELS_API or get_model_manager is None:
+                        self._reply(501, {"error": "models API not available"})
                         return
                     manager = get_model_manager()
                     target = manager.get_model_path(model_id)
@@ -1300,6 +1386,7 @@ class ApiServer:
                         save_last_model(server._home, model_id)
                     except Exception:
                         pass
+                    remote_routes.local_selected(server)  # a hosted choice is not restored next start
                     self._reply(200, {
                         "selected": target.name, 
                         "id": model_id,
@@ -1489,6 +1576,8 @@ class ApiServer:
                     if parts[2] == "search":
                         apply_search_env(merged)
                         server._record("settings", "search providers updated")
+                    if parts[2] == "server" and "contextSize" in payload:
+                        _apply_context_size(server, merged.get("contextSize"))
                     values = mask_secrets(parts[2], merged)
                     if parts[2] == "resources":
                         server._governor.refresh()
@@ -1506,7 +1595,8 @@ class ApiServer:
                     return
                 path = unquote(urlsplit(self.path).path)
                 parts = [part for part in path.split("/") if part]
-                handled = tool_routes.handle_delete(server, path)  # DELETE /api/mcp/servers/{id}
+                handled = (tool_routes.handle_delete(server, path)  # DELETE /api/mcp/servers/{id}
+                           or remote_routes.handle_delete(server, path))  # DELETE /api/remote/<p>/key
                 if handled is not None:
                     self._reply(*handled)
                     return
@@ -1553,3 +1643,27 @@ class ApiServer:
             if _name in Handler.__dict__:
                 setattr(Handler, _name, _guarded(Handler.__dict__[_name]))
         return Handler
+
+
+def _apply_context_size(server, value) -> None:
+    """Use a new Settings > Engine context size at the next model load.
+
+    The engine reads ``config.context_size`` when it loads a model, so this
+    changes no running generation; it takes effect on the next load or switch.
+    """
+    from ..config import CONTEXT_MAX, CONTEXT_MIN
+
+    try:
+        size = int(value or 0)
+    except (TypeError, ValueError):
+        return
+    if size and not (CONTEXT_MIN <= size <= CONTEXT_MAX):
+        return
+    model = getattr(server, "_model", None)
+    for candidate in (model, getattr(model, "_fish", None), getattr(model, "inner", None)):
+        config = getattr(candidate, "config", None)
+        if config is not None and hasattr(config, "context_size"):
+            try:
+                config.context_size = size
+            except Exception:  # noqa: BLE001 - a frozen config keeps its value
+                pass

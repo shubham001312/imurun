@@ -240,12 +240,25 @@ def guess_entities(prompt: str) -> list[str]:
     return found[:6]
 
 
+def _ONLY_TIME_WORDS(text: str) -> bool:
+    """is_realtime matched only on a time word ("now", "today", a year)."""
+    from ..tools.policy import REALTIME_PATTERNS
+
+    lowered = (text or "").lower()
+    hits = [p for p in REALTIME_PATTERNS if re.search(p, lowered)]
+    time_only = (REALTIME_PATTERNS[0], REALTIME_PATTERNS[-1], REALTIME_PATTERNS[-2])
+    return bool(hits) and all(p in time_only for p in hits)
+
+
 def heuristic_plan(prompt: str, history: list[dict] | None = None) -> Plan:
     """The fallback when the model cannot plan: the regex live-data rules."""
-    from ..tools.policy import detect_intents, is_realtime
+    from ..tools.policy import detect_intents, is_local, is_realtime
 
     text = prompt or ""
-    needs = "web_search" in detect_intents(text) or is_realtime(text)
+    # Never for a question about this computer, and a bare "now" / "today" is
+    # not a reason to search (it only says the user wants it current).
+    needs = "web_search" in detect_intents(text) or (is_realtime(text) and not is_local(text)
+                                                      and not _ONLY_TIME_WORDS(text))
     if _LIVE_WORDS.search(text):
         fresh = "live"
     elif _RECENT_WORDS.search(text):

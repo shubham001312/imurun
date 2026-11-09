@@ -4,6 +4,165 @@ All changes are in `frontend/design-lab/` unless noted. Bug fixes are listed
 one by one, with causes, in `BUGS-FIXED.md`; this file says what changed and
 why.
 
+## 2026-11-09: Chat messages read like a conversation, not a log
+
+The user called the chat "not good": every reply carried an "IMURUN" label, a
+stats line, three text buttons, a "Sources" heading with chips, a "Used
+web_search" footer and a "Verified · 4 sources" badge, several saying the
+same thing. New: `styles/chat.css` (after workspace.css) and `reply.js`
+(chat.js is at its size limit); edits in `chat.js`, `activity.js`, `index.html`.
+
+- **Layout.** One centred 760 px column. The user's turn is a subtle bubble on
+  the right; the reply is plain text at full column width (prose capped at
+  ~72ch, line height 1.65, more room between turns). The mono all-caps
+  "IMURUN" / "YOU" labels are gone (still there for screen readers).
+- **Numbers.** "114 tok • 28.5 tok/s • prefill 1.48 s • 8.45 s" is now a
+  quiet "8.5 s" at the end of the action row. Its tooltip and accessible name
+  hold every figure; click or Enter spells them out in place. Nothing was
+  dropped, and `turn.stats` still feeds the Performance drawer.
+- **Actions.** Copy, Read aloud, thumbs up / down and Teach are one row of
+  28 px line icons with tooltips and aria-labels, shown on hover or keyboard
+  focus of the message, always on touch screens, and kept visible while a
+  reply is being read aloud. The icons are CSS masks, so voice.js /
+  voice-server.js ("Stop reading"), copy ("Copied") and feedback.js
+  ("Taught") still relabel the same buttons and the icon follows (stop, check).
+- **Sources.** One collapsed row, "Searched the web · 4 sources", with a
+  check when the server marked the answer verified (it replaces "Verified ·
+  4 sources" and the "Sources" heading). Open, each source is one line:
+  initial, title (ellipsis), domain; "Show snippets" adds the snippets. A
+  `[n]` citation opens the list before jumping to item n. The live "Found N
+  sources / Search finished" status is removed once the reply is in (a
+  search that failed or found nothing still says so). "Not verified live"
+  sits in the same place when there are no sources.
+- **Tools.** The folded pill above the answer names the tools ("Used
+  web_search", "Used web_search and web_fetch", "Used 5 tools") and opens to
+  the same tool rows with arguments and output. The "Used web_search" footer
+  that repeated it is gone; the footer now only shows skills when no tool ran
+  and the bare count when the tool frames were missed. The pill and the
+  sources row share one style; trace and research labels are sentence case.
+- **Markdown.** Headings, lists (muted markers), tables (sentence-case header
+  row, hairline frame) and code blocks (language in plain words, quiet Copy,
+  sideways scroll inside the block) restyled for the reading view.
+- **Plan mode.** A reply generated while the composer was on Plan (read at
+  send time, `Turn.mode`) gets a "Plan" tag and a "Switch to Build and do
+  this" button under it. The button switches the composer to Build and sends
+  "Carry out the plan above." in the same session; it shows only on the
+  newest reply. Plan turn ids are remembered in `localStorage`
+  (`imurun.chat.planTurns`, last 200) so the tag survives a reload.
+- Empty state: a line icon instead of the diamond glyph. Thinking indicator,
+  streaming caret, approval cards, queued / stopped / recovered chips and
+  error cards are unchanged apart from sentence-case chips.
+- Checked in headless Chrome on the response gallery and a replayed
+  transcript (light and ImuTechz Console dark, 1280 px and 390 px, no
+  horizontal page scroll).
+
+## 2026-11-09: Access level beside the composer, /permission, type-to-focus
+
+- `access.js`: an "Access" pill next to Plan / Build and a `/permission` (or
+  `/permissions`) command open one popover with three levels: **Manual** (asks
+  before every file read, change and command), **Ask for changes** (default:
+  reads run, changes and commands ask) and **Auto** (runs without asking;
+  deny-listed commands, protected files and credential folders stay blocked).
+  It saves `POST /api/permissions {mode}`, the same setting as Settings >
+  Permissions. Checked in the browser: Auto sets `allow-all` on the server,
+  and switching back restores `allow-reads`.
+- `typeahead.js`: typing on Home or Chat with nothing focused lands in the
+  message box (it used to be lost).
+- `hosted-models.js`: the model button and picker show the model the engine
+  is running even when it was loaded from outside the models folder.
+
+## 2026-11-09: Skills page and the Add skill dialog
+
+- **Add skill** (`skills.js`, `styles/skills.css`) is one dialog with two tabs.
+  *Write one*: name, description, instructions, a live preview of the `/<id>` it
+  will get (same slug rules as the server) and inline checks that mirror the
+  server's limits and catch an id that already exists. *From GitHub*: paste a
+  link, Find skills, then a checklist of what the link holds (name, `/id`,
+  path, size, status, warnings, files copied and files skipped), select all,
+  and Install; each row then says installed, already installed or failed.
+  Esc closes, focus is trapped while open and returned on close, arrow keys move
+  between the tabs.
+- **Cards** show the name, `/<id>`, description and the source (Written by you,
+  or GitHub `owner/repo` linking to the commit), with Use in chat (puts `/<id>`
+  in the composer), Copy command, Update (GitHub skills) and Delete (confirmed
+  in a dialog). A search box appears with more than six skills; the empty state
+  offers both ways to add one.
+- Fixed: the old New skill button used two `window.prompt`s and sent no
+  instructions, so the server refused every skill it tried to create (400
+  "a skill needs instructions").
+## 2026-11-09: API client dialog, visible API key, Performance panel
+
+- **Add API client is a dialog**, not three browser prompts (`dialogs.js`,
+  `styles/dialogs.css`). A name field with inline validation (required, at
+  most 80 characters, not a duplicate), the scopes as checkboxes with one
+  line each in plain words, grouped into "Works today" (chat, admin: the
+  only scopes the server enforces, on `/v1`) and "Saved on the token, not
+  enforced yet" (the rest), a warning when none of the chosen scopes can
+  call anything, and Create. The token then shows once in a copy box with
+  Copy, "You will not see this token again", and Done; a click outside does
+  not close that step. Server errors show in the dialog. The client row
+  shows "Not used yet" / "Used 3 min ago" instead of a status the server
+  never sends.
+- **In-app confirms** replace `window.confirm` for Revoke client, Rotate
+  token, Clear cache (Settings > Resources) and Regenerate key (Use by API).
+  Destructive confirms start on Cancel; Esc cancels; focus returns.
+- **Use by API: the key is visible by default.** Hide masks it and is
+  remembered (`imurun.openai.keyHidden`, try/catch). Base URL, key and model
+  id are full width, monospace and wrap instead of being cut off; Copy stays.
+  With no model loaded the panel still shows the base URL and key with a
+  note that a model must be loaded to answer, and a link to Settings > Models.
+  The cards no longer widen past a narrow column.
+- **Performance panel redesigned** (`stats-view.js`, `styles/stats.css`):
+  Model (name; size, quantisation, architecture; runs on CPU/GPU, GPU name,
+  layers, threads, weight memory, each only when reported), Last reply
+  (speed, time to first token or prompt read, tokens as stat tiles),
+  Context, Speed trend (sparkline with latest/average/best and per-reply
+  tooltips). Rows that were "not reported" and raw keys such as
+  `loaded: false` or `Engine: none` are gone. With no model: one line and a
+  single "Choose a model" button (Settings > Models). Esc closes the panel
+  and focus returns to the Stats button; re-renders keep keyboard focus.
+- **Context numbers are correct.** The window in use is
+  `engine.model.context` (what the engine loaded with), shown next to the
+  model maximum (`engine.model.context_train`, the GGUF context length) and
+  the size saved in Settings > Engine; a note says when the run uses less
+  than the model supports. The saved `server.contextSize` is not read by the
+  server (the engine takes `FISH_CONTEXT_SIZE` or sizes the window to fit
+  memory), so the panel labels it "saved, not applied yet" instead of
+  showing it as the window (API-REQUESTS 35). No context number is shown
+  while no model is loaded. Usage is for the current chat: exact when its
+  last reply carried engine counters, else an estimate, labelled as such.
+
+## 2026-11-09: Workspace layout, home launchpad, draft chats
+
+- **Side panel** is a tool rail: New chat on top (Alt N), pages grouped under
+  Workspace (Home, Chat, Sessions) and Agent (Skills, Persona, Apps) with line
+  icons, Recent sessions, and Settings plus the engine status in the footer.
+  Collapsed, it is a 56 px icon rail, where it used to show only the logo.
+  Long names end in "…" instead of running past the edge.
+- **Settings** is one sheet with an index of 4 groups instead of 17 flat tabs:
+  Workspace (Profile, Appearance, Usage), Models (Models, Engine, Resources,
+  Voice, Fine-tuning), Agent (Agent, Tools, Permissions, Web search) and
+  Connections (Apps, MCP servers, Use by API, API clients). "API" and
+  "Use by API" were easy to mix up; the first is now "API clients". Labels
+  are in sentence case. Models shows one download button at a time, and line
+  icons replace the emoji.
+- **Home** is a launchpad instead of a landing page: a greeting, "What are we
+  working on?" and the composer, then Recent work (name and time, without the
+  internal id) and This machine (engine, model and apps, each with its state
+  and the next action).
+- **New chat no longer creates an empty session.** The button, Alt+N and the
+  palette open a draft; the session is created when the first message is
+  sent, so nothing is left behind by a click. Before this, every click saved
+  a session called "New chat".
+- **Session names read like titles** (`services/sessions/session.derive_name`):
+  the first line of real text, without markdown or code fences, URLs shortened
+  to their host, "please"/"can you" dropped, cut at a word with "…" (44
+  characters at most). Before this: the raw first 60 characters, often cut
+  mid-word. Tests: `tests/test_session_names.py`.
+- All styling is in `styles/workspace.css` and uses only theme variables.
+  Checked: the default light theme, ImuTechz Console (dark), mobile width,
+  and the collapsed panel.
+
 ## 2026-11-03: Hardware card and GPU chip
 
 - New `hardware.js`: a "Hardware" card at the top of Settings > Resource
