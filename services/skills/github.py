@@ -338,9 +338,20 @@ def parse_skill_file(text: str) -> tuple[dict[str, str], str]:
     return meta, text[match.end():].strip()
 
 
+_LINE_BREAKS = "\x00-\x1f\x7f\x85  "
+
+
+def _safe_tree_path(value) -> bool:
+    if not isinstance(value, str) or not value or len(value) > 1000 or "\\" in value:
+        return False
+    if re.search(f"[{_LINE_BREAKS}]", value):
+        return False
+    return all(part not in ("", ".", "..") for part in value.split("/"))
+
+
 def _field(value: str) -> str:
-    """A frontmatter-safe single line: no newlines, no ``---`` fence."""
-    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", value or "")
+    """A frontmatter-safe single line: no line breaks of any kind, no ``---`` fence."""
+    cleaned = re.sub(f"[{_LINE_BREAKS}]+", " ", value or "")
     cleaned = re.sub(r"-{3,}", "-", cleaned)
     return re.sub(r"\s+", " ", cleaned).strip()
 
@@ -430,7 +441,10 @@ class SkillImporter:
         if tree.get("truncated"):
             notes.append("The repository is too large for GitHub to list in full; "
                          "some skills may be missing. Link the folder instead.")
-        entries = {str(e.get("path")): e for e in tree["tree"] if isinstance(e, dict) and e.get("path")}
+        # Tree paths are attacker-controlled: drop any that could be normalised
+        # into another URL path (dot segments, empty parts, backslashes, controls).
+        entries = {str(e.get("path")): e for e in tree["tree"]
+                   if isinstance(e, dict) and _safe_tree_path(e.get("path"))}
         if base and (entries.get(base) or {}).get("type") != "tree":
             raise GitHubError(f"The folder {base!r} is not in this commit.", 404, "not_found")
         found, total = self._discover(entries, base, single)
@@ -462,32 +476,37 @@ class SkillImporter:
         dirs = dirs[:MAX_SKILLS]
         all_dirs = set(path.rsplit("/", 1)[0] if "/" in path else ""
                        for path, entry in entries.items() if is_skill_file(path, entry))
-        found: list[Found] = []
+        items: dict[str, Found] = {}
         for folder in dirs:
             skill_file = entries[_join(folder, "SKILL.md")]
-            item = Found(path=folder, file_size=int(skill_file.get("size") or 0))
-            inner = folder + "/" if folder else ""
-            nested = [d for d in all_dirs if d != folder and (d.startswith(inner) or not folder)]
-            for path in sorted(entries):
-                entry = entries[path]
-                if folder and not path.startswith(inner):
-                    continue
-                if path == _join(folder, "SKILL.md") or entry.get("type") == "tree":
-                    continue
-                if any(path.startswith(d + "/") for d in nested if d):
-                    continue  # belongs to a nested skill
-                relative = path[len(inner):]
-                reason = self._skip_reason(relative, entry, len(item.resources))
-                if reason:
-                    if len(item.skipped) < MAX_SKIPPED_LISTED:
-                        item.skipped.append({"path": relative, "reason": reason})
-                    else:
-                        item.skipped_more += 1
-                    continue
-                item.resources.append({"path": relative, "size": int(entry.get("size") or 0),
-                                       "repo_path": path})
-            found.append(item)
-        return found, total
+            items[folder] = Found(path=folder, file_size=int(skill_file.get("size") or 0))
+        # One pass: each file belongs to its nearest folder holding a SKILL.md
+        # (O(entries x depth), so a repo with thousands of skills cannot stall us).
+        for path in sorted(entries):
+            entry = entries[path]
+            if entry.get("type") == "tree" or path.split("/")[-1] == "SKILL.md" and is_skill_file(path, entry):
+                continue
+            owner = path
+            while True:
+                owner = owner.rsplit("/", 1)[0] if "/" in owner else ""
+                if owner in all_dirs or owner == "":
+                    break
+            if owner not in all_dirs:
+                continue
+            item = items.get(owner)
+            if item is None:
+                continue  # belongs to a skill that is not listed
+            relative = path[len(owner) + 1:] if owner else path
+            reason = self._skip_reason(relative, entry, len(item.resources))
+            if reason:
+                if len(item.skipped) < MAX_SKIPPED_LISTED:
+                    item.skipped.append({"path": relative, "reason": reason})
+                else:
+                    item.skipped_more += 1
+                continue
+            item.resources.append({"path": relative, "size": int(entry.get("size") or 0),
+                                   "repo_path": path})
+        return [items[folder] for folder in dirs], total
 
     @staticmethod
     def _skip_reason(relative: str, entry: dict, kept: int) -> str:
@@ -725,22 +744,28 @@ class SkillImporter:
             raise GitHubError("The recorded branch is not valid.", 400, "bad_source")
         if path and (any(p in ("", ".", "..") for p in path.split("/")) or "\\" in path):
             raise GitHubError("The recorded path is not valid.", 400, "bad_source")
-        url = f"{WEB_BASE}/{owner}/{repo}/tree/{ref}/{path}".rstrip("/")
-        if path:
-            url = f"{WEB_BASE}/{owner}/{repo}/blob/{ref}/{path}/SKILL.md"
+        # Always the one SKILL.md it came from (a root skill too), never a scan
+        # that could pick a different skill if this one moved.
+        url = f"{WEB_BASE}/{owner}/{repo}/blob/{ref}/{_join(path, 'SKILL.md')}"
         resolved = self.resolve(url)
         if resolved.commit == manifest.get("commit"):
             return {"id": skill_id, "status": "current", "commit": resolved.commit}
-        if not resolved.found:
+        item = next((found for found in resolved.found if found.path == path), None)
+        if item is None:
             raise GitHubError("The skill is no longer at its source.", 404, "not_found")
-        item = resolved.found[0]
         described = self._scan(resolved, {item.path})
         info = described[0] if described else None
-        if not info or info["status"] not in ("ok", "exists"):
-            raise GitHubError("; ".join((info or {}).get("warnings") or ["The new version is not valid."]),
-                              422, "invalid")
+        if not info or info["status"] not in ("ok", "exists", "duplicate"):
+            raise GitHubError((info or {}).get("_blocker") or "The new version is not valid.", 422, "invalid")
         files, _ = self._fetch_resources(resolved, item, 0)
-        skill = self._write(resolved, item.path, info, files, replace=True, skill_id=skill_id)
+        try:
+            skill = self._write(resolved, item.path, info, files, replace=True, skill_id=skill_id)
+        except FileExistsError as exc:
+            raise GitHubError(str(exc), 409, "exists") from None
+        except ValueError as exc:
+            raise GitHubError(str(exc), 422, "invalid") from None
+        except OSError as exc:
+            raise GitHubError(f"Could not write the skill ({type(exc).__name__}).", 500, "write_failed") from None
         return {"id": skill.id, "status": "updated", "commit": resolved.commit, "source": skill.source}
 
 

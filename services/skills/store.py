@@ -50,8 +50,12 @@ class Skill:
 
 
 def _single_line(value: str, limit: int) -> str:
-    """Frontmatter is line-based: a newline in a field would inject YAML."""
-    cleaned = re.sub(r"[\r\n]+", " ", value).strip()
+    """Frontmatter is line-based: a line break in a field would inject YAML.
+
+    Every character ``str.splitlines`` breaks on counts, not only CR/LF
+    (\\v, \\f, \\x1c-\\x1e, \\x85, U+2028, U+2029).
+    """
+    cleaned = re.sub(r"[\r\n\x0b\x0c\x1c-\x1e\x85  ]+", " ", value).strip()
     return cleaned[:limit]
 
 
@@ -145,8 +149,13 @@ class SkillsStore:
                 # Only the files this store writes (SKILL.md, the sidecar and the
                 # resources the sidecar lists); a folder holding anything else is
                 # left alone rather than deleted recursively.
+                real_folder = os.path.realpath(folder)
                 for relative in _manifest_files(folder):
                     file = folder.joinpath(*relative.split("/"))
+                    # A parent swapped for a symlink must not lead outside the folder.
+                    real_parent = os.path.realpath(file.parent)
+                    if os.path.commonpath([real_folder, real_parent]) != real_folder:
+                        continue
                     if not file.is_symlink() and file.is_file():
                         file.unlink()
                     _prune_empty(file.parent, folder)
@@ -294,11 +303,14 @@ class SkillsStore:
                 body=text.strip(),
                 path=str(path),
             )
-        parts = text.split("---", 2)
-        if len(parts) < 3:
+        # The frontmatter ends at the first line that is exactly "---"; a "---"
+        # inside a value (or the body) does not end it. Split on \n only.
+        match = re.match(r"---[ \t]*\r?\n(.*?)^---[ \t]*\r?$", text, re.DOTALL | re.MULTILINE)
+        if not match:
             return None
+        parts = ["", match.group(1), text[match.end():]]
         meta: dict[str, str] = {}
-        for line in parts[1].splitlines():
+        for line in parts[1].replace("\r\n", "\n").split("\n"):
             key, _, value = line.partition(":")
             if key.strip():
                 meta[key.strip()] = value.strip()

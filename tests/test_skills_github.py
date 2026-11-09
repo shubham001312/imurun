@@ -308,7 +308,10 @@ def test_preview_whole_repo(fake, store):
     assert "scripts/fill.py" in skipped and "logo.png" in skipped
     assert skipped["run.md"] == "executable file"
     assert skipped["link.md"] == "symbolic link"
-    assert skipped["../../escape.md"].startswith("unsafe")
+    # A tree entry with dot segments is dropped before discovery (it could be
+    # normalised into another URL path), so it is neither copied nor fetched.
+    assert not any("escape" in p for p in skipped)
+    assert not any(".." in path for path, _ in fake.requests)
     assert by_path["skills/huge"]["status"] == "too_large"
     assert not by_path["skills/huge"]["installable"]
     assert store.list() == []  # preview has no side effects
@@ -543,3 +546,86 @@ def test_routes_errors(api, fake):
     assert status == 429 and body["code"] == "rate_limited"
     status, body = _req(api, "POST", "/api/skills/import", {"url": "https://github.com/o/r", "paths": []})
     assert status == 400
+
+
+# ---------------------------------------------------------------- review fixes
+
+
+def test_discovery_is_linear_in_the_tree(store):
+    # A root SKILL.md plus thousands of nested skills used to be O(n^2).
+    import time as _time
+
+    entries = {"SKILL.md": {"path": "SKILL.md", "type": "blob", "mode": "100644", "size": 10}}
+    for i in range(20_000):
+        entries[f"d{i}/SKILL.md"] = {"path": f"d{i}/SKILL.md", "type": "blob", "mode": "100644", "size": 10}
+        entries[f"d{i}/notes.md"] = {"path": f"d{i}/notes.md", "type": "blob", "mode": "100644", "size": 5}
+    started = _time.monotonic()
+    found, total = SkillImporter(store, GitHubFetcher())._discover(entries, "", False)
+    assert _time.monotonic() - started < 3.0
+    assert total == 20_001 and len(found) == gh.MAX_SKILLS
+    root = [item for item in found if item.path == ""][0]
+    assert root.resources == []  # nested skills' files are theirs, not the root's
+    assert [r["path"] for r in found[1].resources] == ["notes.md"]
+
+
+@pytest.mark.parametrize("folder", ["x origin: user", "x\x85origin: user", "p---q", "a\x1eorigin: user"])
+def test_source_cannot_inject_frontmatter(store, folder):
+    store.install("n", "d", "Body.", skill_id="inj", origin="github",
+                  source=f"o/r@{SHA1}:{folder}", manifest={"provider": "github"})
+    skill = store.get("inj")
+    assert skill.origin == "github"
+    assert skill.body == "Body."
+    assert skill.source.startswith(f"o/r@{SHA1}:")
+
+
+def test_parse_ignores_dashes_inside_values(store):
+    store.create("a --- b", "c --- d", "Body\n---\nmore", skill_id="dash")
+    skill = store.get("dash")
+    assert (skill.name, skill.description) == ("a --- b", "c --- d")
+    assert skill.body == "Body\n---\nmore"
+
+
+def test_update_never_swaps_in_another_skill(fake, store):
+    files = {"SKILL.md": ("100644", "---\nname: rooty\ndescription: root\n---\n\nRoot body.\n"),
+             "skills/docx/SKILL.md": ("100644", DOCX_SKILL)}
+    fake.trees[SHA1] = files
+    importer = importer_for(fake, store)
+    assert importer.install("https://github.com/o/r", [""])["results"][0]["status"] == "installed"
+    fake.trees[SHA2] = {"skills/docx/SKILL.md": ("100644", DOCX_SKILL)}  # root skill removed
+    fake.refs["main"] = SHA2
+    with pytest.raises(GitHubError) as caught:
+        importer.update("rooty")
+    assert caught.value.status == 404
+    assert store.get("rooty").body == "Root body."
+
+
+def test_update_write_failures_are_reported_not_raised(fake, store, monkeypatch):
+    importer = importer_for(fake, store)
+    importer.install("https://github.com/o/r", ["skills/pdf"])
+    fake.trees[SHA2] = repo_files(PDF_SKILL + "\nNew line.\n")
+    fake.refs["main"] = SHA2
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store, "install", boom)
+    with pytest.raises(GitHubError) as caught:
+        importer.update("pdf")
+    assert caught.value.status == 500 and caught.value.code == "write_failed"
+
+
+def test_delete_does_not_follow_a_symlinked_parent(fake, store, tmp_path):
+    importer_for(fake, store).install("https://github.com/o/r", ["skills/pdf"])
+    folder = store.root / "pdf"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "guide.txt").write_text("keep me")
+    for child in (folder / "forms").iterdir():
+        child.unlink()
+    (folder / "forms").rmdir()
+    try:
+        os.symlink(outside, folder / "forms", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not available")
+    assert store.delete("pdf")
+    assert (outside / "guide.txt").read_text() == "keep me"

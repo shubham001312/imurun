@@ -30,7 +30,13 @@ add a GitHub link to add the skills."
   characters (shortened, warned), and 13 of the 19 installable bodies are longer
   than the 4 000 characters a turn injects (`invoke.MAX_SKILL_CHARS`), so those skills reach
   the model cut; raising that cap is a follow-up, not done here.
-- Tests: `tests/test_skills_github.py` (59) against a fake GitHub on 127.0.0.1.
+- A security review then found, and this fixes: O(n²) discovery (a huge repo
+  could stall a preview for minutes), tree paths with `..` reaching other API
+  paths through URL normalisation, frontmatter injection through Unicode line
+  separators or `---` in a folder name, Update taking a different skill when a
+  root skill moved, Update write errors surfacing as 500 tracebacks, and
+  `delete()` following a symlinked subfolder.
+- Tests: `tests/test_skills_github.py` (68) against a fake GitHub on 127.0.0.1.
 
 ## 2026-11-03 — time to first token
 
