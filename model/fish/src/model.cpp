@@ -766,6 +766,18 @@ void LlamaModel::reset_kv() {
     if (!ssm_S_.empty()) std::fill(ssm_S_.begin(), ssm_S_.end(), 0.0f);
 }
 
+void LlamaModel::save_recurrent(std::vector<float>& out) const {
+    out.resize(conv_hist_.size() + ssm_S_.size());
+    if (!conv_hist_.empty()) std::memcpy(out.data(), conv_hist_.data(), conv_hist_.size() * sizeof(float));
+    if (!ssm_S_.empty()) std::memcpy(out.data() + conv_hist_.size(), ssm_S_.data(), ssm_S_.size() * sizeof(float));
+}
+
+void LlamaModel::restore_recurrent(const std::vector<float>& in) {
+    if (in.size() != conv_hist_.size() + ssm_S_.size()) return;
+    if (!conv_hist_.empty()) std::memcpy(conv_hist_.data(), in.data(), conv_hist_.size() * sizeof(float));
+    if (!ssm_S_.empty()) std::memcpy(ssm_S_.data(), in.data() + conv_hist_.size(), ssm_S_.size() * sizeof(float));
+}
+
 void LlamaModel::set_kv_len(int n) {
     if (n != kv_len_ && !conv_hist_.empty()) {
         // A rewind invalidates the recurring state; generation re-prefills
@@ -1606,6 +1618,12 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
     if (!tokens || n_tok <= 0) return false;
     if (pos0 < 0 || pos0 + n_tok > cfg_.n_ctx) return false;
     if (n_tok > max_batch_) return false;
+    aborted_ = false;
+    // Only multi-token batches (prefill, speculative verify) are abortable:
+    // one decoded token is short, and the caller checks between tokens.
+    const bool abortable = abort_ != nullptr && n_tok > 1;
+    if (abortable && abort_->load(std::memory_order_relaxed)) { aborted_ = true; return false; }
+    if (abortable && recurrent()) save_recurrent(batch_snapshot_);
 
     const int E = cfg_.n_embd;
     const int Q = cfg_.q_dim();
@@ -1648,6 +1666,13 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
                 return false;
             }
             kv_len_ = 0;
+            return false;
+        }
+        if (abortable && li > 0 && abort_->load(std::memory_order_relaxed)) {
+            // Nothing past kv_len_ is visible yet (it only advances at the
+            // end); only the recurrent state has moved, so put it back.
+            if (recurrent()) restore_recurrent(batch_snapshot_);
+            aborted_ = true;
             return false;
         }
         const LayerTensors& L = layers_[static_cast<size_t>(li)];

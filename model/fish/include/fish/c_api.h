@@ -23,7 +23,7 @@
 extern "C" {
 #endif
 
-#define FISH_ABI_VERSION 4
+#define FISH_ABI_VERSION 5
 
 typedef struct fish_ctx fish_ctx;
 
@@ -148,6 +148,20 @@ FISH_API int fish_generate_to(fish_ctx* ctx, const char* prompt, int add_bos,
                               float top_p, float repeat_penalty,
                               char* out, int cap);
 
+/* ABI 5: read a prompt into the cache without generating. Same tokenising
+ * and prefix reuse as fish_generate; afterwards a fish_generate whose prompt
+ * starts with this one only runs the new tokens, and one whose prompt is
+ * exactly this one starts sampling at once (no forward at all; this also
+ * holds for hybrid Qwen 3.5 models). The prompt is fitted to the context as
+ * for max_tokens = 256. fish_cancel stops it between batches and inside a
+ * batch (between layers); the cache then keeps what was completed.
+ * Returns the number of prompt tokens now cached (fewer than the prompt when
+ * cancelled), or -1 on error. */
+FISH_API int fish_prefill(fish_ctx* ctx, const char* prompt, int add_bos);
+#define FISH_HAVE_PREFILL 1
+
+/* Stops the generation or prefill in progress: decoding at the next token,
+ * prefill at the next layer boundary. A later fish_generate clears it. */
 FISH_API void fish_cancel(fish_ctx* ctx);
 FISH_API void fish_reset(fish_ctx* ctx);
 FISH_API void fish_get_stats(fish_ctx* ctx, fish_stats* out);

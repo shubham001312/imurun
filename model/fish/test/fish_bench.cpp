@@ -12,6 +12,9 @@
  *     --sample    temperature 0.7 / top-k 20 / top-p 0.8 / penalty 1.1
  *                 (what the phone app uses) instead of greedy
  *     --prefill   also time fish_prefill + a generate that continues it
+ *     --cancel-ms N  also start a fish_prefill, fish_cancel it after N ms,
+ *                 report how long the cancel took, then check that a
+ *                 generate afterwards gives the same tokens as a clean run
  *
  * Every run resets the cache first so prefill is measured from zero.
  * Output is plain text, one "key value" pair per line, easy to grep.
@@ -24,6 +27,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -57,6 +61,7 @@ int main(int argc, char** argv) {
     const char* path = argv[1];
     int n_prompt = 128, n_gen = 64, reps = 2, threads = 0;
     bool print_ids = false, sample = false, test_prefill = false;
+    int cancel_ms = -1;
     std::string text, chat;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -70,6 +75,7 @@ int main(int argc, char** argv) {
         else if (a == "--ids") print_ids = true;
         else if (a == "--sample") sample = true;
         else if (a == "--prefill") test_prefill = true;
+        else if (a == "--cancel-ms") cancel_ms = std::atoi(next());
     }
     if (threads > 0) {
         char buf[16];
@@ -111,12 +117,20 @@ int main(int argc, char** argv) {
     }
     const int ptoks = fish_tokenize(ctx, prompt.c_str(), 0, nullptr, 0);
     std::printf("prompt_tokens %d\n", ptoks);
+    if (print_ids) {
+        std::vector<int32_t> pids(static_cast<size_t>(ptoks));
+        fish_tokenize(ctx, prompt.c_str(), 0, pids.data(), ptoks);
+        std::printf("prompt_ids");
+        for (int id : pids) std::printf(" %d", id);
+        std::printf("\n");
+    }
 
     const float temp = sample ? 0.7f : 0.0f;
     const int top_k = sample ? 20 : 1;
     const float top_p = sample ? 0.8f : 1.0f;
     const float pen = sample ? 1.1f : 1.0f;
 
+    std::vector<int> ref_ids;
     for (int r = 0; r <= reps; ++r) {
         fish_reset(ctx);
         Sink s;
@@ -129,6 +143,7 @@ int main(int argc, char** argv) {
                     st.prefill_seconds, st.prefill_tokens_per_second, got, st.decode_seconds,
                     st.tokens_per_second, s.first_token_s);
         if (r == reps) {
+            ref_ids = s.ids;
             if (print_ids) {
                 std::printf("ids");
                 for (int id : s.ids) std::printf(" %d", id);
@@ -156,8 +171,33 @@ int main(int argc, char** argv) {
             for (int id : s.ids) std::printf(" %d", id);
             std::printf("\n");
         }
+        std::printf("prefill_then_generate_same_ids %s\n", s.ids == ref_ids ? "yes" : "NO");
 #else
         std::printf("prefill_call unavailable in this build\n");
+#endif
+    }
+
+    if (cancel_ms >= 0) {
+#ifdef FISH_HAVE_PREFILL
+        fish_reset(ctx);
+        double t_cancel = 0;
+        std::thread killer([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(cancel_ms));
+            t_cancel = now_s();
+            fish_cancel(ctx);
+        });
+        const int pr = fish_prefill(ctx, prompt.c_str(), 0);
+        const double t_ret = now_s();
+        killer.join();
+        std::printf("cancel after %d ms: prefill returned %d of %d tokens, %.1f ms after the cancel\n",
+                    cancel_ms, pr, ptoks, (t_ret - t_cancel) * 1000.0);
+        Sink s;
+        s.t0 = std::chrono::steady_clock::now();
+        fish_generate(ctx, prompt.c_str(), 0, n_gen, temp, top_k, top_p, pen, on_token, &s);
+        fish_stats st{};
+        fish_get_stats(ctx, &st);
+        std::printf("after cancel: generate reused %d tokens, same ids as clean run: %s\n",
+                    st.cached_tokens, s.ids == ref_ids ? "yes" : "NO");
 #endif
     }
     fish_destroy(ctx);

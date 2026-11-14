@@ -42,6 +42,10 @@ struct fish_ctx {
     // prefix cache keeps hitting on an append-only conversation.
     int trunc_head = 0, trunc_drop_end = 0;
     std::vector<int32_t> trunc_head_ids;
+    // The model's logits belong to cache_ids.back() (set after every forward
+    // that ends on a committed token). Lets a generate whose prompt is exactly
+    // the cache, e.g. right after fish_prefill, start without any forward.
+    bool logits_valid = false;
     // Speculative decoding: a small model with the same vocabulary.
     std::unique_ptr<LlamaModel> draft;
     std::vector<int32_t> draft_cache_ids;
@@ -194,6 +198,9 @@ static int load_locked(fish_ctx* ctx, const char* path, int n_ctx) {
     ctx->model_path = path;
     ctx->n_ctx_req = n_ctx;
     ctx->cache_ids.clear();
+    ctx->logits_valid = false;
+    // fish_cancel also reaches inside a prefill batch (between layers).
+    ctx->model->set_abort_flag(&ctx->cancel);
     ctx->draft.reset();          // a draft belongs to one target vocabulary
     ctx->draft_cache_ids.clear();
     ctx->stats = fish_stats{};
@@ -405,6 +412,7 @@ void fish_reset(fish_ctx* ctx) {
     if (ctx->draft) ctx->draft->reset_kv();
     ctx->cache_ids.clear();
     ctx->draft_cache_ids.clear();
+    ctx->logits_valid = false;
 }
 
 int fish_set_draft(fish_ctx* ctx, const char* path, int k) {
@@ -501,14 +509,27 @@ const char* fish_specs_json(fish_ctx* ctx) {
 
 // ---------------------------------------------------------------- generation
 
-static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
-                               int max_tokens, float temperature, int top_k,
-                               float top_p, float repeat_penalty,
-                               fish_token_cb cb, void* user,
-                               std::string* collected) {
-    if (!ctx->model || !ctx->tok) { ctx->err = "no model loaded"; return -1; }
-    if (ids.empty()) { ctx->err = "empty prompt"; return -1; }
+// fish_prefill fits its prompt as a generation of this many tokens would, so
+// a following fish_generate with max_tokens <= this sees the same tokens.
+static constexpr int kPrefillReserve = 256;
 
+// What one prefill did: prompt tokens after fitting, how many came from the
+// prefix cache, how far the cache now reaches, and how long it took.
+struct PrefillResult {
+    int prefix = 0;      // tokens reused from the cache
+    int pos = 0;         // tokens of `ids` now in the cache (== ids.size() unless cancelled)
+    double seconds = 0;
+    bool full_hit = false;   // the whole prompt was cached with its logits: no forward at all
+};
+
+// Fit `ids` to the context (in place), reuse the longest cached prefix and
+// prefill the rest in batches. Caller holds ctx->mu and has checked that a
+// model is loaded. A cancel (fish_cancel) is honoured between batches and,
+// through the model's abort flag, between the layers of a batch; the cache
+// then holds exactly the batches that completed. Returns false on an engine
+// error (ctx->err set).
+static bool prefill_ids_locked(fish_ctx* ctx, std::vector<int32_t>& ids, int max_tokens,
+                               PrefillResult* out) {
     LlamaModel& m = *ctx->model;
     const LlamaConfig& c = m.config();
     if (max_tokens <= 0) max_tokens = c.n_ctx;
@@ -550,55 +571,99 @@ static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
         }
     }
 
-    ctx->cancel = false;
-
     // ---- prefix cache: reuse the KV already computed for the longest common
     // token prefix. A repeated system prompt plus history then costs almost
     // nothing; only the new user message is prefilled.
+    const int n_ids = static_cast<int>(ids.size());
     int prefix = 0;
+    bool full_hit = false;
     {
         const int lim = static_cast<int>(std::min(ids.size(), ctx->cache_ids.size()));
         while (prefix < lim && ids[static_cast<size_t>(prefix)] == ctx->cache_ids[static_cast<size_t>(prefix)])
             ++prefix;
-        // An identical prompt still needs a fresh forward for the logits.
-        if (prefix >= static_cast<int>(ids.size()))
-            prefix = static_cast<int>(ids.size()) - 1;
-        // Too little overlap is not worth the bookkeeping; start clean.
-        if (prefix < 8) prefix = 0;
-        // Recurrent layers hold the state at kv_len, not at `prefix`; a
-        // rewind would run the rest of the prompt on a wrong (zeroed) state.
-        if (m.recurrent() && prefix != m.kv_len()) prefix = 0;
-    }
-    ctx->stats.cached_tokens = prefix;
-
-    // ---- prefill in batches
-    const double t0 = now_s();
-    const int batch = std::min(m.max_batch(), c.n_ctx);
-    int pos = 0;
-    if (prefix > 0) {
-        pos = prefix;
-        ctx->cache_ids.resize(static_cast<size_t>(prefix));
-        m.set_kv_len(prefix);
-    } else {
-        m.reset_kv();
-        ctx->cache_ids.clear();
-    }
-    while (pos < static_cast<int>(ids.size())) {
-        const int n = std::min(batch, static_cast<int>(ids.size()) - pos);
-        if (!m.forward(ids.data() + pos, n, pos)) {
-            ctx->err = "prefill failed";
-            ctx->cache_ids.clear();
-            return -1;
+        if (prefix >= n_ids) {
+            // The whole prompt is cached. If the model still holds the logits
+            // of its last token (fish_prefill of this very prompt, or a
+            // previous generation that stopped here), nothing has to run;
+            // otherwise the last token is run again for its logits, which a
+            // recurrent (hybrid) model cannot do without starting over.
+            if (ctx->logits_valid && static_cast<int>(ctx->cache_ids.size()) == n_ids && m.kv_len() == n_ids)
+                full_hit = true;
+            else
+                prefix = n_ids - 1;
         }
-        pos += n;
-        if (ctx->cancel) break;
+        if (!full_hit) {
+            // Too little overlap is not worth the bookkeeping; start clean.
+            if (prefix < 8) prefix = 0;
+            // Recurrent layers hold the state at kv_len, not at `prefix`; a
+            // rewind would run the rest of the prompt on a wrong (zeroed) state.
+            if (m.recurrent() && prefix != m.kv_len()) prefix = 0;
+        }
     }
-    if (ctx->cancel)
+
+    const double t0 = now_s();
+    int pos = n_ids;
+    if (!full_hit) {
+        const int batch = std::min(m.max_batch(), c.n_ctx);
+        pos = 0;
+        if (prefix > 0) {
+            pos = prefix;
+            ctx->cache_ids.resize(static_cast<size_t>(prefix));
+            m.set_kv_len(prefix);
+        } else {
+            m.reset_kv();
+            ctx->cache_ids.clear();
+        }
+        ctx->logits_valid = false;
+        bool ran = false;
+        while (pos < n_ids) {
+            if (ctx->cancel) break;
+            const int n = std::min(batch, n_ids - pos);
+            if (!m.forward(ids.data() + pos, n, pos)) {
+                if (m.aborted()) break;   // cancelled inside the batch; model as before it
+                ctx->err = "prefill failed";
+                ctx->cache_ids.clear();
+                return false;
+            }
+            pos += n;
+            ran = true;
+        }
         ctx->cache_ids.assign(ids.begin(), ids.begin() + pos);
-    else
-        ctx->cache_ids = ids;
+        // Logits belong to the last token of the last completed batch.
+        ctx->logits_valid = ran;
+    }
+    out->prefix = full_hit ? n_ids : prefix;
+    out->pos = pos;
+    out->seconds = now_s() - t0;
+    out->full_hit = full_hit;
+    ctx->stats.cached_tokens = out->prefix;
+    return true;
+}
+
+static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
+                               int max_tokens, float temperature, int top_k,
+                               float top_p, float repeat_penalty,
+                               fish_token_cb cb, void* user,
+                               std::string* collected) {
+    if (!ctx->model || !ctx->tok) { ctx->err = "no model loaded"; return -1; }
+    if (ids.empty()) { ctx->err = "empty prompt"; return -1; }
+
+    LlamaModel& m = *ctx->model;
+    const LlamaConfig& c = m.config();
+    if (max_tokens <= 0) max_tokens = c.n_ctx;
+
+    // A cancel sent before this call (e.g. to stop a background fish_prefill
+    // that held the lock) must not stop this generation.
+    ctx->cancel = false;
+
+    const double t0 = now_s();
+    PrefillResult pr;
+    if (!prefill_ids_locked(ctx, ids, max_tokens, &pr)) return -1;
+    int pos = pr.pos;
+    const int prefix = pr.prefix;
     const double t1 = now_s();
     const int prefilled = pos - prefix;
+    const int batch = std::min(m.max_batch(), c.n_ctx);   // draft catch-up below
 
     // ---- decode
     SampleParams sp;
@@ -663,9 +728,11 @@ static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
             if (!m.forward(&next, 1, pos)) {
                 ctx->err = "decode failed";
                 ctx->cache_ids.clear();
+                ctx->logits_valid = false;
                 break;
             }
             ctx->cache_ids.push_back(next);
+            ctx->logits_valid = true;
             ++pos;
             std::memcpy(logits.data(), m.logits(), sizeof(float) * static_cast<size_t>(c.vocab));
             next = ctx->sampler.sample(logits.data(), c.vocab, sp, recent);
@@ -711,7 +778,11 @@ static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
         verify.clear();
         verify.push_back(next);
         verify.insert(verify.end(), drafts.begin(), drafts.end());
+        // After a verify the logits are those of the last draft, which may be
+        // rejected: never reuse them for a later full-prompt hit.
+        ctx->logits_valid = false;
         if (!m.forward(verify.data(), static_cast<int>(verify.size()), pos, /*all_logits=*/true)) {
+            if (m.aborted()) break;   // fish_cancel inside the verify batch; nothing committed
             ctx->err = "decode failed";
             ctx->cache_ids.clear();
             break;
@@ -791,6 +862,28 @@ static int generate_ids_locked(fish_ctx* ctx, std::vector<int32_t> ids,
 
     if (collected) *collected = sink;
     return generated;
+}
+
+int fish_prefill(fish_ctx* ctx, const char* prompt, int add_bos) {
+    if (!ctx || !prompt) return -1;
+    std::lock_guard<std::mutex> lock(ctx->mu);
+    if (!ctx->model || !ctx->tok) { ctx->err = "no model loaded"; return -1; }
+    std::vector<int32_t> ids = ctx->tok->encode(prompt, add_bos != 0, true);
+    if (ids.empty()) { ctx->err = "empty prompt"; return -1; }
+    // Like fish_generate, start with a clear cancel flag: a fish_cancel that
+    // ended the previous reply must not stop this one. To stop a background
+    // prefill, call fish_cancel while it runs.
+    ctx->cancel = false;
+    PrefillResult pr;
+    if (!prefill_ids_locked(ctx, ids, kPrefillReserve, &pr)) return -1;
+    ctx->stats.prefill_seconds = pr.seconds;
+    ctx->stats.decode_seconds = 0;
+    ctx->stats.prompt_tokens = static_cast<int>(ids.size());
+    ctx->stats.generated_tokens = 0;
+    ctx->stats.context_used = pr.pos;
+    ctx->stats.tokens_per_second = 0;
+    ctx->stats.prefill_tokens_per_second = pr.seconds > 0 ? (pr.pos - pr.prefix) / pr.seconds : 0.0;
+    return pr.pos;
 }
 
 int fish_generate(fish_ctx* ctx, const char* prompt, int add_bos,

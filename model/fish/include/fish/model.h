@@ -220,6 +220,23 @@ public:
     bool recurrent() const { return !conv_hist_.empty(); }
     void set_kv_len(int n);
 
+    // Cooperative cancel inside a long batch. With a flag set, forward()
+    // checks it before every layer of a multi-token batch; when it is raised
+    // the call returns false, aborted() is true, and the model is exactly as
+    // before the call: kv_len() unchanged, and on hybrid models the recurrent
+    // state is restored from a per-batch snapshot (recurrent_state_bytes(),
+    // ~20 MB for Qwen3.5-0.8B/2B, copied once per prefill batch).
+    void set_abort_flag(const std::atomic<bool>* flag) { abort_ = flag; }
+    bool aborted() const { return aborted_; }
+    size_t recurrent_state_bytes() const {
+        return (conv_hist_.size() + ssm_S_.size()) * sizeof(float);
+    }
+    // Copy of the recurrent state (conv history + delta-rule state) and its
+    // restore, for callers that want to roll a hybrid model back to a
+    // position they saved (rewinding is otherwise impossible).
+    void save_recurrent(std::vector<float>& out) const;
+    void restore_recurrent(const std::vector<float>& in);
+
     uint64_t weights_bytes() const { return weights_bytes_; }
     uint64_t kv_bytes() const { return kv_bytes_; }
     bool streaming() const { return stream_; }
@@ -361,6 +378,9 @@ private:
     uint64_t weights_bytes_ = 0;
     uint64_t kv_bytes_ = 0;
     int kv_len_ = 0;
+    const std::atomic<bool>* abort_ = nullptr;
+    bool aborted_ = false;
+    std::vector<float> batch_snapshot_;   // recurrent state at the start of an abortable batch
     std::string placement_note_;
     std::string load_profile_;
     double calib_seconds_ = 0, upload_seconds_ = 0;
