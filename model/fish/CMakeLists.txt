@@ -301,6 +301,20 @@ if(FISH_BUILD_TESTS)
     endif()
 endif()
 
+# ---------------------------------------------------------------------------
+# fish_bench: speed / determinism check through the public C ABI only
+# (test/fish_bench.cpp). Built with the tests by default; cross-compiles for
+# Android so the engine can be measured without the app around it.
+# ---------------------------------------------------------------------------
+option(FISH_BUILD_BENCH "Build the fish_bench C-ABI benchmark" ${FISH_BUILD_TESTS})
+if(FISH_BUILD_BENCH)
+    add_executable(fish_bench test/fish_bench.cpp)
+    target_link_libraries(fish_bench PRIVATE fish)
+    if(MINGW)
+        target_link_options(fish_bench PRIVATE -static)
+    endif()
+endif()
+
 install(TARGETS fish
         RUNTIME DESTINATION bin
         LIBRARY DESTINATION lib

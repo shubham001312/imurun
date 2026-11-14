@@ -1,0 +1,165 @@
+/*
+ * fish_bench — standalone speed and determinism check through the C ABI.
+ *
+ *   fish_bench <model.gguf> [options]
+ *     -p N        prompt length in tokens (synthetic text, default 128)
+ *     -n N        tokens to generate (default 64)
+ *     -t N        threads (sets FISH_THREADS before the pool exists)
+ *     -r N        measured repetitions after one cold run (default 2)
+ *     --text S    use S as the prompt instead of the synthetic text
+ *     --chat S    wrap S as one ChatML user turn (Qwen style, empty think)
+ *     --ids       print the generated token ids (greedy, for A/B checks)
+ *     --sample    temperature 0.7 / top-k 20 / top-p 0.8 / penalty 1.1
+ *                 (what the phone app uses) instead of greedy
+ *     --prefill   also time fish_prefill + a generate that continues it
+ *
+ * Every run resets the cache first so prefill is measured from zero.
+ * Output is plain text, one "key value" pair per line, easy to grep.
+ */
+#include <fish/c_api.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+namespace {
+
+struct Sink {
+    std::vector<int> ids;
+    std::string text;
+    double first_token_s = -1;
+    std::chrono::steady_clock::time_point t0;
+};
+
+void on_token(const char* text, int id, void* user) {
+    auto* s = static_cast<Sink*>(user);
+    if (s->first_token_s < 0)
+        s->first_token_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - s->t0).count();
+    s->ids.push_back(id);
+    s->text += text;
+}
+
+double now_s() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::fprintf(stderr, "usage: fish_bench <model.gguf> [-p N] [-n N] [-t N] [-r N] [--text S] [--chat S] [--ids] [--sample] [--prefill]\n");
+        return 2;
+    }
+    const char* path = argv[1];
+    int n_prompt = 128, n_gen = 64, reps = 2, threads = 0;
+    bool print_ids = false, sample = false, test_prefill = false;
+    std::string text, chat;
+    for (int i = 2; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto next = [&]() -> const char* { return i + 1 < argc ? argv[++i] : ""; };
+        if (a == "-p") n_prompt = std::atoi(next());
+        else if (a == "-n") n_gen = std::atoi(next());
+        else if (a == "-t") threads = std::atoi(next());
+        else if (a == "-r") reps = std::atoi(next());
+        else if (a == "--text") text = next();
+        else if (a == "--chat") chat = next();
+        else if (a == "--ids") print_ids = true;
+        else if (a == "--sample") sample = true;
+        else if (a == "--prefill") test_prefill = true;
+    }
+    if (threads > 0) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%d", threads);
+#ifdef _WIN32
+        _putenv_s("FISH_THREADS", buf);
+#else
+        setenv("FISH_THREADS", buf, 1);
+#endif
+    }
+
+    std::printf("version %s\nkernel %s\n", fish_version(), fish_kernel_name());
+    fish_ctx* ctx = fish_create();
+    const double tl = now_s();
+    if (fish_load(ctx, path, 2048) != 0) {
+        std::printf("load_error %s\n", fish_last_error(ctx));
+        return 1;
+    }
+    std::printf("load_s %.3f\n", now_s() - tl);
+    fish_model_info mi{};
+    fish_model_info_of(ctx, &mi);
+    std::printf("arch %s layers %d embd %d vocab %d quant %s\n", mi.arch, mi.n_layers, mi.n_embd, mi.vocab, mi.quant);
+
+    std::string prompt;
+    if (!chat.empty()) {
+        prompt = "<|im_start|>user\n" + chat + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    } else if (!text.empty()) {
+        prompt = text;
+    } else {
+        // Synthetic prose, cut to n_prompt tokens.
+        const char* base = "The quick brown fox jumps over the lazy dog while the river runs past the old mill. ";
+        while (fish_tokenize(ctx, prompt.c_str(), 0, nullptr, 0) < n_prompt) prompt += base;
+        std::vector<int32_t> ids(static_cast<size_t>(n_prompt) + 64);
+        const int n = fish_tokenize(ctx, prompt.c_str(), 0, ids.data(), static_cast<int>(ids.size()));
+        ids.resize(static_cast<size_t>(std::min(n, n_prompt)));
+        std::vector<char> back(65536);
+        fish_detokenize(ctx, ids.data(), static_cast<int>(ids.size()), back.data(), static_cast<int>(back.size()));
+        prompt = back.data();
+    }
+    const int ptoks = fish_tokenize(ctx, prompt.c_str(), 0, nullptr, 0);
+    std::printf("prompt_tokens %d\n", ptoks);
+
+    const float temp = sample ? 0.7f : 0.0f;
+    const int top_k = sample ? 20 : 1;
+    const float top_p = sample ? 0.8f : 1.0f;
+    const float pen = sample ? 1.1f : 1.0f;
+
+    for (int r = 0; r <= reps; ++r) {
+        fish_reset(ctx);
+        Sink s;
+        s.t0 = std::chrono::steady_clock::now();
+        const int got = fish_generate(ctx, prompt.c_str(), 0, n_gen, temp, top_k, top_p, pen, on_token, &s);
+        fish_stats st{};
+        fish_get_stats(ctx, &st);
+        std::printf("run %d%s threads %d prefill_tok %d prefill_s %.3f prefill_tps %.2f gen %d decode_s %.3f decode_tps %.2f ttft_s %.3f\n",
+                    r, r == 0 ? " (cold)" : "", st.n_threads, st.prompt_tokens - st.cached_tokens,
+                    st.prefill_seconds, st.prefill_tokens_per_second, got, st.decode_seconds,
+                    st.tokens_per_second, s.first_token_s);
+        if (r == reps) {
+            if (print_ids) {
+                std::printf("ids");
+                for (int id : s.ids) std::printf(" %d", id);
+                std::printf("\n");
+            }
+            std::printf("text %s\n", s.text.c_str());
+        }
+    }
+
+    if (test_prefill) {
+#ifdef FISH_HAVE_PREFILL
+        fish_reset(ctx);
+        const double t0 = now_s();
+        const int pr = fish_prefill(ctx, prompt.c_str(), 0);
+        const double t1 = now_s();
+        Sink s;
+        s.t0 = std::chrono::steady_clock::now();
+        const int got = fish_generate(ctx, prompt.c_str(), 0, n_gen, temp, top_k, top_p, pen, on_token, &s);
+        fish_stats st{};
+        fish_get_stats(ctx, &st);
+        std::printf("prefill_call rc %d s %.3f then generate cached %d of %d, ttft_s %.3f gen %d\n",
+                    pr, t1 - t0, st.cached_tokens, st.prompt_tokens, s.first_token_s, got);
+        if (print_ids) {
+            std::printf("ids_after_prefill");
+            for (int id : s.ids) std::printf(" %d", id);
+            std::printf("\n");
+        }
+#else
+        std::printf("prefill_call unavailable in this build\n");
+#endif
+    }
+    fish_destroy(ctx);
+    return 0;
+}
