@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <new>
 #include <vector>
 
 namespace fish {
@@ -174,22 +175,37 @@ void ActBatch::quantize(const float* x, int n_tok_, int n_in_) {
     }
 }
 
-void matmul_batch(GgmlType type, const void* w,
-                  const float* x, const ActBatch* acts, int n_tok,
-                  int n_in, int n_out, float* y) {
-    const size_t row_bytes = ggml_row_size(type, static_cast<uint64_t>(n_in));
-    const uint8_t* base = static_cast<const uint8_t*>(w);
-    ThreadPool& pool = ThreadPool::instance();
+namespace {
 
-    const bool k_path = acts && acts->has256() && has_q8k_kernel(type) && (n_in % kQ8ActKBlock) == 0;
-    const bool q_path = acts && has_q8_kernel(type) && (n_in % kQ8ActBlock) == 0;
+// One weight matrix times a batch of activations, split by output rows so
+// several matrices that read the same input can share one pool job.
+struct MatmulRows {
+    GgmlType type;
+    const uint8_t* base;
+    size_t row_bytes;
+    const float* x;
+    const ActBatch* acts;
+    int n_tok, n_in, n_out;
+    float* y;
+    bool k_path, q_path;
+    int rows_per_tile;
 
-    if (k_path || q_path) {
-        // Every (row, token) pair is one packed-byte dot product. A tile of
-        // rows stays in L1 while the tokens are the outer loop, so each
-        // activation row is read once per tile and each weight byte once.
-        const int rows_per_tile = std::max(1, static_cast<int>((24u * 1024u) / std::max<size_t>(1, row_bytes)));
-        pool.parallel_range(n_out, [&](int r0, int r1) {
+    MatmulRows(GgmlType t, const void* w, const float* x_, const ActBatch* a,
+               int n_tok_, int n_in_, int n_out_, float* y_)
+        : type(t), base(static_cast<const uint8_t*>(w)),
+          row_bytes(ggml_row_size(t, static_cast<uint64_t>(n_in_))),
+          x(x_), acts(a), n_tok(n_tok_), n_in(n_in_), n_out(n_out_), y(y_) {
+        k_path = acts && acts->has256() && has_q8k_kernel(type) && (n_in % kQ8ActKBlock) == 0;
+        q_path = acts && has_q8_kernel(type) && (n_in % kQ8ActBlock) == 0;
+        rows_per_tile = std::max(1, static_cast<int>((24u * 1024u) / std::max<size_t>(1, row_bytes)));
+    }
+    bool int8() const { return k_path || q_path; }
+
+    void run(int r0, int r1) const {
+        if (k_path || q_path) {
+            // Every (row, token) pair is one packed-byte dot product. A tile of
+            // rows stays in L1 while the tokens are the outer loop, so each
+            // activation row is read once per tile and each weight byte once.
             for (int tile = r0; tile < r1; tile += rows_per_tile) {
                 const int tile_end = std::min(r1, tile + rows_per_tile);
                 for (int t = 0; t < n_tok; ++t) {
@@ -213,23 +229,17 @@ void matmul_batch(GgmlType type, const void* w,
                     }
                 }
             }
-        }, /*grain=*/std::max(rows_per_tile, n_out / (pool.active_threads() * 8)));
-        return;
-    }
-
-    if (n_tok == 1) {
-        pool.parallel_range(n_out, [&](int r0, int r1) {
+            return;
+        }
+        if (n_tok == 1) {
             for (int i = r0; i < r1; ++i) {
                 const void* row = base + static_cast<size_t>(i) * row_bytes;
                 y[i] = vec_dot(type, row, x, static_cast<uint64_t>(n_in));
             }
-        });
-        return;
-    }
-
-    // f32 fallback for formats without an integer kernel: dequantise each
-    // weight row once and reuse it for every token.
-    pool.parallel_range(n_out, [&](int r0, int r1) {
+            return;
+        }
+        // f32 fallback for formats without an integer kernel: dequantise each
+        // weight row once and reuse it for every token.
         thread_local std::vector<float> row_buf;
         if (static_cast<int>(row_buf.size()) < n_in) row_buf.resize(static_cast<size_t>(n_in));
         for (int i = r0; i < r1; ++i) {
@@ -248,7 +258,18 @@ void matmul_batch(GgmlType type, const void* w,
                                  static_cast<uint64_t>(n_in));
             }
         }
-    });
+    }
+};
+
+} // namespace
+
+void matmul_batch(GgmlType type, const void* w,
+                  const float* x, const ActBatch* acts, int n_tok,
+                  int n_in, int n_out, float* y) {
+    ThreadPool& pool = ThreadPool::instance();
+    const MatmulRows job(type, w, x, acts, n_tok, n_in, n_out, y);
+    const int grain = job.int8() ? std::max(job.rows_per_tile, n_out / (pool.active_threads() * 8)) : 0;
+    pool.parallel_range(n_out, [&](int r0, int r1) { job.run(r0, r1); }, grain);
 }
 
 void matmul_batch(GgmlType type, const void* w,
@@ -295,7 +316,38 @@ void matmul_tensors(const TensorInfo* const* ts, int n, const float* x, const Ac
     bool all_gpu = g_gpu != nullptr && n > 0 && g_obs == nullptr;
     for (int i = 0; i < n && all_gpu; ++i) all_gpu = g_gpu->resident(ts[i]);
     if (all_gpu && g_gpu->matmul_group(ts, n, x, acts, n_tok, n_in, n_outs, ys)) return;
-    for (int i = 0; i < n; ++i) matmul_tensor(ts[i], x, acts, n_tok, n_in, n_outs[i], ys[i]);
+
+    // CPU: every matrix reads the same input, so run them as ONE pool job
+    // over their concatenated output rows (q|k|v, gate|up, the DeltaNet
+    // projections). One decoded token is otherwise ~8 fork/joins per layer,
+    // and the hand-off, not the arithmetic, is what a phone pays for.
+    bool any_gpu = false;
+    for (int i = 0; i < n && g_gpu; ++i) any_gpu = any_gpu || g_gpu->resident(ts[i]);
+    if (any_gpu || g_obs != nullptr || n <= 1 || n > 8) {
+        for (int i = 0; i < n; ++i) matmul_tensor(ts[i], x, acts, n_tok, n_in, n_outs[i], ys[i]);
+        return;
+    }
+    alignas(MatmulRows) unsigned char storage[8][sizeof(MatmulRows)];
+    const MatmulRows* jobs[8];
+    int start[9];
+    int total = 0, tile = 1 << 30;
+    for (int i = 0; i < n; ++i) {
+        jobs[i] = new (storage[i]) MatmulRows(ts[i]->type, ts[i]->data, x, acts, n_tok, n_in, n_outs[i], ys[i]);
+        start[i] = total;
+        total += n_outs[i];
+        tile = std::min(tile, jobs[i]->rows_per_tile);
+    }
+    start[n] = total;
+    ThreadPool& pool = ThreadPool::instance();
+    const int grain = std::max(tile, total / (pool.active_threads() * 8));
+    pool.parallel_range(total, [&](int r0, int r1) {
+        for (int i = 0; i < n && r0 < r1; ++i) {
+            if (r0 >= start[i + 1]) continue;
+            const int e = std::min(r1, start[i + 1]);
+            jobs[i]->run(r0 - start[i], e - start[i]);
+            r0 = e;
+        }
+    }, grain);
 }
 
 // ---------------------------------------------------------------- attention
