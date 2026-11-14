@@ -271,7 +271,7 @@ bool LlamaModel::bind_layer(int i, std::string* err) {
             return fail("missing DeltaNet tensors in layer " + std::to_string(i) +
                         " (attn_gate / ssm_alpha / ssm_beta / ssm_out)");
         if (L.wqkv->ne.size() < 2 ||
-            L.wqkv->ne[1] != static_cast<uint64_t>(3 * cfg_.ssm_inner))
+            L.wqkv->ne[1] != static_cast<uint64_t>(cfg_.conv_dim()))
             return fail("fused attn_qkv has an unexpected shape in DeltaNet layer " +
                         std::to_string(i));
     } else {
@@ -362,9 +362,9 @@ bool LlamaModel::bind_layer(int i, std::string* err) {
         const TensorInfo* sn = need("ssm_norm.weight");
         if (!sn || !load_vector(sn, L.ssm_norm_w))
             return fail("bad ssm_norm in layer " + std::to_string(i));
-        if (L.ssm_a.size() != static_cast<size_t>(cfg_.ssm_heads) ||
-            L.dt_bias.size() != static_cast<size_t>(cfg_.ssm_heads) ||
-            L.ssm_norm_w.size() != static_cast<size_t>(cfg_.ssm_state) ||
+        if (L.ssm_a.size() != static_cast<size_t>(cfg_.ssm_v_heads) ||
+            L.dt_bias.size() != static_cast<size_t>(cfg_.ssm_v_heads) ||
+            L.ssm_norm_w.size() != static_cast<size_t>(cfg_.ssm_v_dim()) ||
             L.conv_w.size() != static_cast<size_t>(cfg_.conv_dim()) *
                                static_cast<size_t>(cfg_.ssm_conv_kernel))
             return fail("DeltaNet vector shapes disagree with metadata in layer " +
@@ -469,10 +469,12 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
         c.full_attn_interval = static_cast<int>(g.u64(key("full_attention_interval"), 4));
         c.ssm_state = static_cast<int>(g.u64(key("ssm.state_size"), 128));
         c.ssm_heads = static_cast<int>(g.u64(key("ssm.group_count"), 16));
+        c.ssm_v_heads = static_cast<int>(g.u64(key("ssm.time_step_rank"), static_cast<uint64_t>(c.ssm_heads)));
         c.ssm_conv_kernel = static_cast<int>(g.u64(key("ssm.conv_kernel"), 4));
         c.ssm_inner = static_cast<int>(g.u64(key("ssm.inner_size"), c.n_embd));
         if (c.full_attn_interval <= 0 || c.ssm_state <= 0 || c.ssm_heads <= 0 ||
-            c.ssm_conv_kernel <= 1 || c.ssm_inner <= 0 || c.ssm_inner % c.ssm_heads != 0)
+            c.ssm_v_heads <= 0 || c.ssm_v_heads % c.ssm_heads != 0 ||
+            c.ssm_conv_kernel <= 1 || c.ssm_inner <= 0 || c.ssm_inner % c.ssm_v_heads != 0)
             return fail("qwen35: bad ssm.* / full_attention_interval metadata");
         // The Vulkan span has no DeltaNet (conv + recurrence) or fused q|gate
         // code yet, so whole-layer spans are off; the matmuls still go to the
@@ -558,8 +560,8 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
         try {
             m->conv_hist_.assign(static_cast<size_t>(nd) * (c.ssm_conv_kernel - 1) *
                                  static_cast<size_t>(c.conv_dim()), 0.0f);
-            m->ssm_S_.assign(static_cast<size_t>(nd) * c.ssm_heads * c.ssm_state *
-                             static_cast<size_t>(c.ssm_state), 0.0f);
+            m->ssm_S_.assign(static_cast<size_t>(nd) * c.ssm_v_heads * c.ssm_state *
+                             static_cast<size_t>(c.ssm_v_dim()), 0.0f);
         } catch (const std::bad_alloc&) {
             return fail("not enough memory for the DeltaNet state");
         }
@@ -581,7 +583,7 @@ std::unique_ptr<LlamaModel> LlamaModel::load(const std::string& path, int n_ctx,
         m->xb_.assign(static_cast<size_t>(mb) * E, 0.0f);
         m->qkv_.assign(static_cast<size_t>(mb) *
                        std::max<size_t>(static_cast<size_t>(Q + 2 * KV),
-                                        c.ssm_inner > 0 ? 3 * static_cast<size_t>(c.ssm_inner) : 0), 0.0f);
+                                        static_cast<size_t>(c.conv_dim())), 0.0f);
         m->q_.assign(static_cast<size_t>(mb) * Q, 0.0f);
         m->k_.assign(static_cast<size_t>(mb) * KV, 0.0f);
         m->v_.assign(static_cast<size_t>(mb) * KV, 0.0f);
@@ -1822,112 +1824,134 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
 bool LlamaModel::delta_mixer(const LayerTensors& L, int li, int pos0, int n_tok) {
     (void)pos0;
     const int E = cfg_.n_embd;
-    const int G = cfg_.ssm_inner;
-    const int CD = cfg_.conv_dim();
+    const int G = cfg_.ssm_inner;        // v width = z width = ssm_out input (not n_embd on 0.8B)
+    const int QK = cfg_.ssm_qk_dim();    // q width = k width
+    const int CD = cfg_.conv_dim();      // q | k | v
     const int K = cfg_.ssm_conv_kernel;
-    const int NS = cfg_.ssm_state;
-    const int NH = cfg_.ssm_heads;
-    if (NH > 64 || NS > 128 || K != 4) return false;
-    if (CD != 3 * E || G != E || NH * NS != G) return false;  // v1 geometry (2B / 9B)
+    const int NS = cfg_.ssm_state;       // q/k head dim (rows of S)
+    const int NK = cfg_.ssm_heads;       // q/k heads
+    const int NV = cfg_.ssm_v_heads;     // v heads = recurrence heads
+    const int DV = cfg_.ssm_v_dim();     // v head dim (columns of S)
+    constexpr int kMaxDim = 256, kMaxTaps = 8;
+    if (NS > kMaxDim || DV > kMaxDim || K < 2 || K > kMaxTaps || NK <= 0 || NV % NK != 0) return false;
+    if (CD != 2 * QK + G || NV * DV != G) return false;
+    const int v_per_k = NV / NK;
     const size_t slot = static_cast<size_t>(delta_slot_[static_cast<size_t>(li)]);
     if (slot == static_cast<size_t>(-1)) return false;
     const size_t T = static_cast<size_t>(n_tok);
 
     // History row j holds the conv input of token t-1-j while computing t.
     float* hist = conv_hist_.data() + slot * (static_cast<size_t>(K) - 1) * static_cast<size_t>(CD);
-    float* S0 = ssm_S_.data() + slot * static_cast<size_t>(NH) * NS * NS;
+    float* S0 = ssm_S_.data() + slot * static_cast<size_t>(NV) * NS * DV;
 
     // 1. every projection that only reads the block input, batched over all
     //    tokens (the caller already quantised xb_ into xq_): q|k|v (pre-conv),
     //    the output gate z, and the per-head alpha / beta.  Doing these one
     //    token at a time made prefill as slow as decode.
     ensure(dn_qkv_, T * CD);
-    ensure(dn_z_, T * E);
-    ensure(dn_ab_, T * 2 * NH);
-    ensure(dn_o_, T * E);
+    ensure(dn_z_, T * G);
+    ensure(dn_ab_, T * 2 * NV);
+    ensure(dn_o_, T * G);
     {
         const TensorInfo* ts[4] = {L.wqkv, L.wgate, L.ssm_alpha, L.ssm_beta};
-        const int ns[4] = {CD, E, NH, NH};
-        float* ys[4] = {dn_qkv_.data(), dn_z_.data(), dn_ab_.data(), dn_ab_.data() + T * NH};
+        const int ns[4] = {CD, G, NV, NV};
+        float* ys[4] = {dn_qkv_.data(), dn_z_.data(), dn_ab_.data(), dn_ab_.data() + T * NV};
         matmul_tensors(ts, 4, xb_.data(), &xq_, n_tok, E, ns, ys);
     }
     const float* alpha = dn_ab_.data();
-    const float* beta_raw = dn_ab_.data() + T * NH;
+    const float* beta_raw = dn_ab_.data() + T * NV;
 
     ThreadPool& pool = ThreadPool::instance();
 
-    // 2. causal depthwise conv (kernel 4, newest tap last) + SiLU, in place,
+    // 2. causal depthwise conv (newest tap last) + SiLU, in place,
     //    channel-parallel: each channel walks its own tokens and history.
     pool.parallel_range(CD, [&](int c0, int c1) {
         for (int c = c0; c < c1; ++c) {
-            const float* cw = L.conv_w.data() + static_cast<size_t>(c) * 4;
-            float h0 = hist[c], h1 = hist[CD + c], h2 = hist[2 * static_cast<size_t>(CD) + c];
+            const float* cw = L.conv_w.data() + static_cast<size_t>(c) * K;
+            if (K == 4) {
+                float h0 = hist[c], h1 = hist[CD + c], h2 = hist[2 * static_cast<size_t>(CD) + c];
+                for (size_t t = 0; t < T; ++t) {
+                    float* p = dn_qkv_.data() + t * CD + c;
+                    const float x = *p;
+                    float acc = cw[3] * x + cw[2] * h0 + cw[1] * h1 + cw[0] * h2;
+                    *p = acc / (1.0f + std::exp(-acc));   // SiLU
+                    h2 = h1; h1 = h0; h0 = x;
+                }
+                hist[c] = h0; hist[CD + c] = h1; hist[2 * static_cast<size_t>(CD) + c] = h2;
+                continue;
+            }
+            float h[kMaxTaps];
+            for (int j = 0; j < K - 1; ++j) h[j] = hist[static_cast<size_t>(j) * CD + c];
             for (size_t t = 0; t < T; ++t) {
                 float* p = dn_qkv_.data() + t * CD + c;
                 const float x = *p;
-                float acc = cw[3] * x + cw[2] * h0 + cw[1] * h1 + cw[0] * h2;
+                float acc = cw[K - 1] * x;
+                for (int j = 0; j < K - 1; ++j) acc += cw[K - 2 - j] * h[j];
                 *p = acc / (1.0f + std::exp(-acc));   // SiLU
-                h2 = h1; h1 = h0; h0 = x;
+                for (int j = K - 2; j > 0; --j) h[j] = h[j - 1];
+                h[0] = x;
             }
-            hist[c] = h0; hist[CD + c] = h1; hist[2 * static_cast<size_t>(CD) + c] = h2;
+            for (int j = 0; j < K - 1; ++j) hist[static_cast<size_t>(j) * CD + c] = h[j];
         }
     }, 256);
 
-    // 3. delta-rule recurrence, head-parallel (heads are independent; tokens
-    //    are sequential within a head).  Per token: L2-normalise q and k (q
-    //    also scaled by 1/sqrt(NS)), decay = exp(ssm_a * softplus(alpha +
-    //    dt_bias)), beta = sigmoid(beta_raw), then with S' = decay * S:
+    // 3. delta-rule recurrence, head-parallel over the v heads (independent;
+    //    tokens are sequential within a head). v head h reads q/k head
+    //    h / v_per_k. Per token: L2-normalise q and k (q also scaled by
+    //    1/sqrt(NS)), decay = exp(ssm_a * softplus(alpha + dt_bias)),
+    //    beta = sigmoid(beta_raw), then with S' = decay * S (S is NS x DV):
     //      r = S'^T k,  delta = beta (v - r),  S = S' + k delta^T,  o = S^T q.
     //    Two passes over S per token (read; update + output).  Then gated
     //    RMSNorm(o, ssm_norm) * silu(z) into dn_o_.
     const float inv = 1.0f / std::sqrt(static_cast<float>(NS));
-    pool.parallel_for(NH, [&](int h) {
-        float* S = S0 + static_cast<size_t>(h) * NS * NS;
-        float kn[128], qn[128], r[128], delta[128], o[128];
+    pool.parallel_for(NV, [&](int h) {
+        float* S = S0 + static_cast<size_t>(h) * NS * DV;
+        float kn[kMaxDim], qn[kMaxDim], r[kMaxDim], delta[kMaxDim], o[kMaxDim];
         const float a_bias = L.dt_bias[static_cast<size_t>(h)];
         const float a_neg = L.ssm_a[static_cast<size_t>(h)];
+        const size_t kh = static_cast<size_t>(h / v_per_k);
         for (size_t t = 0; t < T; ++t) {
             const float* row = dn_qkv_.data() + t * CD;
-            const float* qh = row + static_cast<size_t>(h) * NS;
-            const float* kh = row + G + static_cast<size_t>(h) * NS;
-            const float* vh = row + 2 * static_cast<size_t>(G) + static_cast<size_t>(h) * NS;
+            const float* qh = row + kh * NS;
+            const float* khp = row + QK + kh * NS;
+            const float* vh = row + 2 * static_cast<size_t>(QK) + static_cast<size_t>(h) * DV;
             float ks = 0.0f, qs = 0.0f;
-            for (int d = 0; d < NS; ++d) { ks += kh[d] * kh[d]; qs += qh[d] * qh[d]; }
+            for (int d = 0; d < NS; ++d) { ks += khp[d] * khp[d]; qs += qh[d] * qh[d]; }
             const float kf = 1.0f / std::sqrt(ks + 1e-6f);
             const float qf = inv / std::sqrt(qs + 1e-6f);
-            for (int d = 0; d < NS; ++d) { kn[d] = kh[d] * kf; qn[d] = qh[d] * qf; }
+            for (int d = 0; d < NS; ++d) { kn[d] = khp[d] * kf; qn[d] = qh[d] * qf; }
 
-            const float a_raw = alpha[t * NH + h] + a_bias;
+            const float a_raw = alpha[t * NV + h] + a_bias;
             const float sp = a_raw > 30.0f ? a_raw : std::log1p(std::exp(a_raw));
             const float decay = std::exp(a_neg * sp);
-            const float beta = 1.0f / (1.0f + std::exp(-beta_raw[t * NH + h]));
+            const float beta = 1.0f / (1.0f + std::exp(-beta_raw[t * NV + h]));
 
-            for (int j = 0; j < NS; ++j) r[j] = 0.0f;
+            for (int j = 0; j < DV; ++j) r[j] = 0.0f;
             for (int i = 0; i < NS; ++i) {
                 const float ki = kn[i];
-                const float* Si = S + static_cast<size_t>(i) * NS;
-                for (int j = 0; j < NS; ++j) r[j] += Si[j] * ki;
+                const float* Si = S + static_cast<size_t>(i) * DV;
+                for (int j = 0; j < DV; ++j) r[j] += Si[j] * ki;
             }
-            for (int j = 0; j < NS; ++j) { delta[j] = beta * (vh[j] - decay * r[j]); o[j] = 0.0f; }
+            for (int j = 0; j < DV; ++j) { delta[j] = beta * (vh[j] - decay * r[j]); o[j] = 0.0f; }
             for (int i = 0; i < NS; ++i) {
                 const float ki = kn[i], qi = qn[i];
-                float* Si = S + static_cast<size_t>(i) * NS;
-                for (int j = 0; j < NS; ++j) {
+                float* Si = S + static_cast<size_t>(i) * DV;
+                for (int j = 0; j < DV; ++j) {
                     const float s = Si[j] * decay + ki * delta[j];
                     Si[j] = s;
                     o[j] += s * qi;
                 }
             }
-            float* out = dn_o_.data() + t * E + static_cast<size_t>(h) * NS;
-            rmsnorm(out, o, L.ssm_norm_w.data(), NS, cfg_.eps);
-            const float* z = dn_z_.data() + t * E + static_cast<size_t>(h) * NS;
-            for (int d = 0; d < NS; ++d) out[d] *= z[d] / (1.0f + std::exp(-z[d]));
+            float* out = dn_o_.data() + t * G + static_cast<size_t>(h) * DV;
+            rmsnorm(out, o, L.ssm_norm_w.data(), DV, cfg_.eps);
+            const float* z = dn_z_.data() + t * G + static_cast<size_t>(h) * DV;
+            for (int d = 0; d < DV; ++d) out[d] *= z[d] / (1.0f + std::exp(-z[d]));
         }
     });
 
-    // 4. output projection (batched) and residual add
-    xq_.quantize(dn_o_.data(), n_tok, E);
-    matmul_tensor(L.ssm_out, dn_o_.data(), &xq_, n_tok, E, E, proj_.data());
+    // 4. output projection (batched, inner width G -> n_embd) and residual add
+    xq_.quantize(dn_o_.data(), n_tok, G);
+    matmul_tensor(L.ssm_out, dn_o_.data(), &xq_, n_tok, G, E, proj_.data());
     for (int t = 0; t < n_tok; ++t) {
         float* xr = row_ptr(x_, t, E);
         const float* pr = row_ptr(proj_, t, E);

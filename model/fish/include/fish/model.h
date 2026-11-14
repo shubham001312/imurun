@@ -90,11 +90,23 @@ struct LlamaConfig {
     // attention. full_attention_interval = N means layer i attends fully iff
     // (i+1) % N == 0; every other layer runs the Gulf DeltaNet mixer instead
     // (causal depthwise conv -> delta-rule recurrence over a per-head state).
+    //
+    // Geometry, from the GGUF (llama.cpp's qwen35 keys):
+    //   ssm.state_size     ssm_state    head dim of q and k        (0.8B/2B: 128)
+    //   ssm.group_count    ssm_heads    q/k heads                  (0.8B/2B: 16)
+    //   ssm.time_step_rank ssm_v_heads  v heads = recurrence heads (0.8B/2B: 16)
+    //   ssm.inner_size     ssm_inner    v width = z width = ssm_out input
+    //                                   (0.8B/2B: 2048; NOT n_embd on the 0.8B,
+    //                                   whose n_embd is 1024)
+    // The conv stream is q | k | v = 2 * heads * state + inner channels. With
+    // more v heads than q/k heads, v head h reads q/k head h / (v_heads/heads)
+    // (repeat_interleave, as in the reference implementation).
     int full_attn_interval = 0;    // 0 = plain transformer
-    int ssm_state = 0;             // delta-rule state/head dim (2B: 128)
-    int ssm_heads = 0;             // delta-rule heads/groups (2B: 16)
-    int ssm_conv_kernel = 0;       // depthwise conv taps (2B: 4)
-    int ssm_inner = 0;             // q|k|v branch width (2B: 2048)
+    int ssm_state = 0;
+    int ssm_heads = 0;
+    int ssm_v_heads = 0;
+    int ssm_conv_kernel = 0;       // depthwise conv taps (4)
+    int ssm_inner = 0;
 
     int kv_dim() const { return n_head_kv * head_dim; }
     int q_dim() const { return n_head * head_dim; }
@@ -109,7 +121,9 @@ struct LlamaConfig {
                                       : n_layers;
     }
     int kv_slot(int i) const { return full_attn_interval > 0 ? i / full_attn_interval : i; }
-    int conv_dim() const { return ssm_inner > 0 ? 3 * ssm_inner : 0; }
+    int ssm_qk_dim() const { return ssm_heads * ssm_state; }          // width of q (and of k)
+    int ssm_v_dim() const { return ssm_v_heads > 0 ? ssm_inner / ssm_v_heads : 0; }  // per v head
+    int conv_dim() const { return ssm_inner > 0 ? 2 * ssm_qk_dim() + ssm_inner : 0; }
 };
 
 struct LayerTensors {
@@ -151,9 +165,9 @@ struct LayerTensors {
 
     // Qwen3.5 DeltaNet small vectors (dequantised; fp32 state lives in the model)
     std::vector<float> conv_w;             // [conv_dim][kernel], channel-major
-    std::vector<float> ssm_a;              // [heads]: negative decay per head
+    std::vector<float> ssm_a;              // [v_heads]: negative decay per head
     std::vector<float> dt_bias;            // [heads]
-    std::vector<float> ssm_norm_w;         // [state]: gated-RMSNorm weight, raw (no +1)
+    std::vector<float> ssm_norm_w;         // [v head dim]: gated-RMSNorm weight, raw (no +1)
 
     // Byte range of this layer's weights in the file, for prefetch.
     uint64_t file_begin = 0, file_end = 0;
@@ -286,7 +300,7 @@ private:
     std::vector<float> conv_hist_;     // [n_delta][kernel-1][conv_dim]
     // DeltaNet batch scratch: q|k|v stream, gate z, alpha|beta, normed output
     std::vector<float> dn_qkv_, dn_z_, dn_ab_, dn_o_;
-    std::vector<float> ssm_S_;         // [n_delta][heads][state][state]
+    std::vector<float> ssm_S_;         // [n_delta][v_heads][state][v head dim]
 
     // Work buffers, sized for the largest batch FISH will prefill at once.
     int max_batch_ = 256;
