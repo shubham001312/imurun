@@ -77,6 +77,7 @@ private:
     std::atomic<int> sleepers_{0};       // workers waiting on cv_start_
     std::atomic<bool> stop_{false};
     std::atomic<int> limit_{1};
+    int park_gen_ = 0;                   // generation at the last set_active_threads (under mu_)
     long spin_ns_ = 2000000;
 };
 

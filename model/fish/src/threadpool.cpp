@@ -160,6 +160,9 @@ void ThreadPool::set_active_threads(int n) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         limit_.store(std::max(1, std::min(n, size())), std::memory_order_seq_cst);
+        // A worker that unparks resumes from here: every job issued after
+        // this call counts it, so it must not skip any of them.
+        park_gen_ = generation_.load();
     }
     cv_park_.notify_all();
     cv_start_.notify_all();
@@ -180,7 +183,11 @@ ThreadPool::~ThreadPool() {
 
 void ThreadPool::worker_loop(int index) {
     lower_priority();
-    int seen = generation_.load(std::memory_order_acquire);
+    // Start from 0, not from the current value: on a busy machine the first
+    // job can be issued before this thread has run at all, and a worker that
+    // started by reading the already-bumped counter would never take part in
+    // it while the caller waits for it forever (seen on the emulator).
+    int seen = 0;
     for (;;) {
         if (stop_.load(std::memory_order_relaxed)) return;
         if (index >= limit_.load(std::memory_order_relaxed)) {
@@ -188,7 +195,7 @@ void ThreadPool::worker_loop(int index) {
             std::unique_lock<std::mutex> lk(mu_);
             cv_park_.wait(lk, [&] { return stop_.load() || index < limit_.load(); });
             if (stop_.load()) return;
-            seen = generation_.load();
+            seen = park_gen_;
             continue;
         }
 

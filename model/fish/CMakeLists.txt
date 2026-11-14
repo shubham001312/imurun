@@ -265,7 +265,7 @@ if(FISH_BUILD_TESTS)
     set(FISH_TEST_SOURCES ${FISH_CORE})
     list(REMOVE_ITEM FISH_TEST_SOURCES src/c_api.cpp)
 
-    foreach(name m1 m2 m5 gpu kernels)
+    foreach(name m1 m2 m5 gpu kernels threadpool)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test/test_${name}.cpp)
             add_executable(fish_test_${name} test/test_${name}.cpp ${FISH_TEST_SOURCES})
             target_include_directories(fish_test_${name} PRIVATE include src)
