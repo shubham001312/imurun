@@ -12,6 +12,9 @@
  *     --sample    temperature 0.7 / top-k 20 / top-p 0.8 / penalty 1.1
  *                 (what the phone app uses) instead of greedy
  *     --prefill   also time fish_prefill + a generate that continues it
+ *     --partial   time to first token of a voice turn: system prompt
+ *                 cached / partial user text prefilled first / partial
+ *                 text revised by the final transcript
  *     --cancel-ms N  also start a fish_prefill, fish_cancel it after N ms,
  *                 report how long the cancel took, then check that a
  *                 generate afterwards gives the same tokens as a clean run
@@ -62,6 +65,7 @@ int main(int argc, char** argv) {
     int n_prompt = 128, n_gen = 64, reps = 2, threads = 0;
     bool print_ids = false, sample = false, test_prefill = false;
     int cancel_ms = -1;
+    bool partial_test = false;
     std::string text, chat;
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
@@ -76,6 +80,7 @@ int main(int argc, char** argv) {
         else if (a == "--sample") sample = true;
         else if (a == "--prefill") test_prefill = true;
         else if (a == "--cancel-ms") cancel_ms = std::atoi(next());
+        else if (a == "--partial") partial_test = true;
     }
     if (threads > 0) {
         char buf[16];
@@ -136,6 +141,7 @@ int main(int argc, char** argv) {
         Sink s;
         s.t0 = std::chrono::steady_clock::now();
         const int got = fish_generate(ctx, prompt.c_str(), 0, n_gen, temp, top_k, top_p, pen, on_token, &s);
+        if (got < 0) std::printf("generate_error %s\n", fish_last_error(ctx));
         fish_stats st{};
         fish_get_stats(ctx, &st);
         std::printf("run %d%s threads %d prefill_tok %d prefill_s %.3f prefill_tps %.2f gen %d decode_s %.3f decode_tps %.2f ttft_s %.3f\n",
@@ -174,6 +180,49 @@ int main(int argc, char** argv) {
         std::printf("prefill_then_generate_same_ids %s\n", s.ids == ref_ids ? "yes" : "NO");
 #else
         std::printf("prefill_call unavailable in this build\n");
+#endif
+    }
+
+    if (partial_test) {
+#ifdef FISH_HAVE_PREFILL
+        // Time to first token for a voice turn, three ways: system prompt
+        // cached only; partial user text prefilled while "speaking" and then
+        // extended; partial text that the final transcript revises (hybrid
+        // models then fall back to a checkpoint). Greedy output must be the
+        // same in every case.
+        const std::string sys =
+            "<|im_start|>system\nYou are Orange, a warm, cheerful friend from Kolkata. You speak "
+            "simple English mixed with a little Hindi and Bengali, keep replies short, and ask "
+            "one gentle question back. Never mention that you are an AI model.<|im_end|>\n"
+            "<|im_start|>user\n";
+        const std::string user = chat.empty() ? "Can you tell me what the weather is like in Kolkata today?" : chat;
+        const std::string tail = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        const std::string full = sys + user + tail;
+        auto turn = [&](const char* label, const std::vector<std::string>& partials) {
+            fish_reset(ctx);
+            fish_prefill(ctx, sys.c_str(), 0);
+            double t_partials = 0;
+            for (const std::string& p : partials) {
+                const double a = now_s();
+                fish_prefill(ctx, (sys + p).c_str(), 0);
+                t_partials += now_s() - a;
+            }
+            Sink s;
+            s.t0 = std::chrono::steady_clock::now();
+            fish_generate(ctx, full.c_str(), 0, n_gen, temp, top_k, top_p, pen, on_token, &s);
+            fish_stats st{};
+            fish_get_stats(ctx, &st);
+            std::printf("%s: partial prefills %.3f s, then generate reused %d of %d tokens, ttft %.3f s\n",
+                        label, t_partials, st.cached_tokens, st.prompt_tokens, s.first_token_s);
+            return s.ids;
+        };
+        const size_t cut1 = user.size() * 2 / 5, cut2 = user.size() * 7 / 10;
+        const auto a = turn("system only", {});
+        const auto b = turn("partial text, then final", {user.substr(0, cut1), user.substr(0, cut2), user});
+        std::string revised = user.substr(0, cut2);
+        if (!revised.empty()) revised[revised.size() - 1] = revised[revised.size() - 1] == 'x' ? 'y' : 'x';
+        const auto c = turn("partial text revised", {user.substr(0, cut1), revised});
+        std::printf("partial_test same tokens: %s %s\n", a == b ? "yes" : "NO", a == c ? "yes" : "NO");
 #endif
     }
 

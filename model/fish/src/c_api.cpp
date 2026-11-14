@@ -15,6 +15,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -46,6 +48,16 @@ struct fish_ctx {
     // that ends on a committed token). Lets a generate whose prompt is exactly
     // the cache, e.g. right after fish_prefill, start without any forward.
     bool logits_valid = false;
+    // Recurrent-state checkpoints (hybrid Qwen 3.5 only): the state after
+    // ids[0..n) for a few recent n. A hybrid model cannot rewind, so a prompt
+    // that leaves the cache at position p would otherwise be prefilled from
+    // zero; with a checkpoint at n <= p only ids[n..] run. Taken
+    // automatically wherever a prefill extends the cache, so a caller that
+    // prefills partial user text (fish_prefill while the user is still
+    // speaking) can be corrected cheaply when the final text differs.
+    // ~20 MB each for Qwen3.5-0.8B/2B; FISH_CHECKPOINTS sets how many (3).
+    struct Checkpoint { std::vector<int32_t> ids; std::vector<float> state; };
+    std::deque<Checkpoint> checkpoints;
     // Speculative decoding: a small model with the same vocabulary.
     std::unique_ptr<LlamaModel> draft;
     std::vector<int32_t> draft_cache_ids;
@@ -199,6 +211,7 @@ static int load_locked(fish_ctx* ctx, const char* path, int n_ctx) {
     ctx->n_ctx_req = n_ctx;
     ctx->cache_ids.clear();
     ctx->logits_valid = false;
+    ctx->checkpoints.clear();
     // fish_cancel also reaches inside a prefill batch (between layers).
     ctx->model->set_abort_flag(&ctx->cancel);
     ctx->draft.reset();          // a draft belongs to one target vocabulary
@@ -413,6 +426,7 @@ void fish_reset(fish_ctx* ctx) {
     ctx->cache_ids.clear();
     ctx->draft_cache_ids.clear();
     ctx->logits_valid = false;
+    ctx->checkpoints.clear();
 }
 
 int fish_set_draft(fish_ctx* ctx, const char* path, int k) {
@@ -528,8 +542,31 @@ struct PrefillResult {
 // through the model's abort flag, between the layers of a batch; the cache
 // then holds exactly the batches that completed. Returns false on an engine
 // error (ctx->err set).
+// Remember the recurrent state after ids[0..pos) (hybrid models only; see
+// fish_ctx::checkpoints). The shortest checkpoint (usually the system prompt,
+// the most useful fallback) is never the one evicted.
+static void save_checkpoint(fish_ctx* ctx, const std::vector<int32_t>& ids, int pos) {
+    static const int max_cp = [] {
+        const char* e = std::getenv("FISH_CHECKPOINTS");
+        return e ? std::max(0, std::min(16, std::atoi(e))) : 3;
+    }();
+    auto& cps = ctx->checkpoints;
+    if (max_cp <= 0 || pos < 8 || pos >= static_cast<int>(ids.size())) return;
+    for (const auto& cp : cps) if (static_cast<int>(cp.ids.size()) == pos) return;
+    while (static_cast<int>(cps.size()) >= max_cp) {
+        auto shortest = cps.begin();
+        for (auto it = cps.begin(); it != cps.end(); ++it)
+            if (it->ids.size() < shortest->ids.size()) shortest = it;
+        cps.erase(cps.size() > 1 && shortest == cps.begin() ? cps.begin() + 1 : cps.begin());
+    }
+    fish_ctx::Checkpoint cp;
+    cp.ids.assign(ids.begin(), ids.begin() + pos);
+    ctx->model->save_recurrent(cp.state);
+    cps.push_back(std::move(cp));
+}
+
 static bool prefill_ids_locked(fish_ctx* ctx, std::vector<int32_t>& ids, int max_tokens,
-                               PrefillResult* out) {
+                               PrefillResult* out, int checkpoint_tail = 0) {
     LlamaModel& m = *ctx->model;
     const LlamaConfig& c = m.config();
     if (max_tokens <= 0) max_tokens = c.n_ctx;
@@ -577,6 +614,7 @@ static bool prefill_ids_locked(fish_ctx* ctx, std::vector<int32_t>& ids, int max
     const int n_ids = static_cast<int>(ids.size());
     int prefix = 0;
     bool full_hit = false;
+    const fish_ctx::Checkpoint* restore = nullptr;
     {
         const int lim = static_cast<int>(std::min(ids.size(), ctx->cache_ids.size()));
         while (prefix < lim && ids[static_cast<size_t>(prefix)] == ctx->cache_ids[static_cast<size_t>(prefix)])
@@ -596,8 +634,18 @@ static bool prefill_ids_locked(fish_ctx* ctx, std::vector<int32_t>& ids, int max
             // Too little overlap is not worth the bookkeeping; start clean.
             if (prefix < 8) prefix = 0;
             // Recurrent layers hold the state at kv_len, not at `prefix`; a
-            // rewind would run the rest of the prompt on a wrong (zeroed) state.
-            if (m.recurrent() && prefix != m.kv_len()) prefix = 0;
+            // rewind would run the rest of the prompt on a wrong (zeroed)
+            // state. A checkpoint at or below `prefix` can stand in.
+            if (m.recurrent() && prefix != m.kv_len()) {
+                for (const fish_ctx::Checkpoint& cp : ctx->checkpoints) {
+                    const int L = static_cast<int>(cp.ids.size());
+                    if (L >= 8 && L <= prefix &&
+                        (!restore || L > static_cast<int>(restore->ids.size())) &&
+                        std::equal(cp.ids.begin(), cp.ids.end(), ids.begin()))
+                        restore = &cp;
+                }
+                prefix = restore ? static_cast<int>(restore->ids.size()) : 0;
+            }
         }
     }
 
@@ -609,16 +657,31 @@ static bool prefill_ids_locked(fish_ctx* ctx, std::vector<int32_t>& ids, int max
         if (prefix > 0) {
             pos = prefix;
             ctx->cache_ids.resize(static_cast<size_t>(prefix));
-            m.set_kv_len(prefix);
+            m.set_kv_len(prefix);   // a rewind zeroes the recurrent state ...
+            if (restore) m.restore_recurrent(restore->state);   // ... the checkpoint puts it back
         } else {
             m.reset_kv();
             ctx->cache_ids.clear();
         }
         ctx->logits_valid = false;
+        if (m.recurrent()) {
+            // KV and state below `pos` stay; a checkpoint further on is about
+            // to be overwritten. Then remember the state we extend from.
+            auto& cps = ctx->checkpoints;
+            for (auto it = cps.begin(); it != cps.end();)
+                it = static_cast<int>(it->ids.size()) > pos ? cps.erase(it) : it + 1;
+            save_checkpoint(ctx, ids, pos);
+        }
+        // fish_prefill of partial text: its last few tokens are the least
+        // likely to survive into the final prompt (a word still being
+        // spoken), so a hybrid model also gets a checkpoint just before them.
+        const int split = (m.recurrent() && checkpoint_tail > 0 && n_ids - checkpoint_tail > pos)
+                              ? n_ids - checkpoint_tail : -1;
         bool ran = false;
         while (pos < n_ids) {
             if (ctx->cancel) break;
-            const int n = std::min(batch, n_ids - pos);
+            if (pos == split) save_checkpoint(ctx, ids, pos);
+            const int n = std::min(batch, (pos < split ? split : n_ids) - pos);
             if (!m.forward(ids.data() + pos, n, pos)) {
                 if (m.aborted()) break;   // cancelled inside the batch; model as before it
                 ctx->err = "prefill failed";
@@ -875,7 +938,7 @@ int fish_prefill(fish_ctx* ctx, const char* prompt, int add_bos) {
     // prefill, call fish_cancel while it runs.
     ctx->cancel = false;
     PrefillResult pr;
-    if (!prefill_ids_locked(ctx, ids, kPrefillReserve, &pr)) return -1;
+    if (!prefill_ids_locked(ctx, ids, kPrefillReserve, &pr, /*checkpoint_tail=*/4)) return -1;
     ctx->stats.prefill_seconds = pr.seconds;
     ctx->stats.decode_seconds = 0;
     ctx->stats.prompt_tokens = static_cast<int>(ids.size());
