@@ -1703,14 +1703,21 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
             // Qwen3.5 full attention: wq is fused per-head [q(256) | gate(256)]
             // x n_head. The gate is applied to the attention output right
             // before o_proj; park it in up_ rows (the FFN re-ensures them).
-            matmul_tensor(L.wq, xb_.data(), &xq_, n_tok, E, 2 * Q, gate_.data());
+            {
+                // q|gate, k and v read the same input: one pool job.
+                const TensorInfo* qkv_t[3] = {L.wq, L.wk, L.wv};
+                const int qkv_n[3] = {2 * Q, KV, KV};
+                float* qkv_y[3] = {gate_.data(), k_.data(), v_.data()};
+                matmul_tensors(qkv_t, 3, xb_.data(), &xq_, n_tok, E, qkv_n, qkv_y);
+            }
+            static const bool gate_halves = std::getenv("FISH_QWEN35_GATE_HALVES") != nullptr;
             for (int t = 0; t < n_tok; ++t) {
                 // matmul_tensor packs output rows at 2*Q, not at gate_'s
                 // 2*n_ff row capacity (reading at 2*n_ff broke prefill t>0)
                 const float* r = gate_.data() + static_cast<size_t>(t) * 2 * Q;
                 float* qr = row_ptr(q_, t, Q);
                 float* gr = row_ptr(up_, t, cfg_.n_ff);
-                if (std::getenv("FISH_QWEN35_GATE_HALVES")) {
+                if (gate_halves) {
                     std::memcpy(qr, r, sizeof(float) * Q);
                     for (int i = 0; i < Q; ++i) gr[i] = r[Q + i];
                 } else {
@@ -1721,8 +1728,6 @@ bool LlamaModel::forward(const int32_t* tokens, int n_tok, int pos0, bool all_lo
                         }
                 }
             }
-            matmul_tensor(L.wk, xb_.data(), &xq_, n_tok, E, KV, k_.data());
-            matmul_tensor(L.wv, xb_.data(), &xq_, n_tok, E, KV, v_.data());
             add_bias(k_.data(), n_tok, KV, L.bias_k);
             add_bias(v_.data(), n_tok, KV, L.bias_v);
         } else {
