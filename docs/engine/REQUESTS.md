@@ -10,7 +10,8 @@ predate this file stay in `docs/engine/GPU.md` ("Requests to the engine owner").
 
 Done: `fish_set_threads(ctx, n)` (ABI 4) sets how many pool threads take part
 in the following jobs (1..pool size; the pool is still created once from
-`FISH_THREADS`, workers above the limit wake and return without work).
+`FISH_THREADS`, workers above the limit park; since 2026-11-14 on their own
+condition variable, so they no longer wake for every job).
 `fish_stats.n_threads` and `fish_specs_json().threads` report the active
 count, `pool_threads` the pool size. Takes the context lock, so it never
 changes a running generation.

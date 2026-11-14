@@ -21,7 +21,7 @@ This document describes the code that exists. For what is planned, see
 | `src/quant_x86.cpp` | AVX2+FMA+F16C kernels installed at startup after a CPUID check. Each function carries its own `target` attribute so the TU compiles for baseline x86-64. |
 | `src/quant_arm.cpp`, `src/quant_arm_kernels.inc` | NEON kernels for arm64, same slots as AVX2: `neon-dotprod` (SDOT) when the CPU has DotProd (all Apple M-series), else plain `neon`. Checked by `test/test_kernels.cpp` (model-free, runs in macOS CI) and on x86 via `fish_test_kernels_emu` (scalar NEON model, `test/neon_emu/`). |
 | `src/ops.cpp`, `include/fish/ops.h` | RMSNorm, SiLU/GELU, RoPE (precomputed cos/sin table, normal & NeoX pairing, linear/YaRN/longrope/Llama-3 factors), `matmul_batch` (threaded, int8 fast path), `attention_batch` (threaded over token×head, softcap, sliding window). |
-| `src/threadpool.cpp` | Persistent pool, one thread per physical core by default (`FISH_THREADS` overrides), chunked work distribution. |
+| `src/threadpool.cpp` | Persistent pool, one thread per physical core by default, fast cores only on big.LITTLE Linux/Android (`FISH_THREADS` overrides), chunked work distribution, spin-then-sleep hand-off (`FISH_SPIN_US`, default 2000). |
 | `src/tokenizer.cpp` | Byte-level BPE (llama-bpe / qwen2 / gpt2 pre-tokenizer flavours) and SentencePiece (scores, byte fallback); special-token handling; chat templates applied structurally. |
 | `src/sampler.cpp` | Repetition penalty, temperature, top-k, top-p. |
 | `src/model.cpp`, `include/fish/model.h` | The transformer: load (metadata by architecture prefix, tensor binding, RoPE table, KV cache), `forward()` for a batch of tokens, dense and MoE FFN, layer prefetch thread. |

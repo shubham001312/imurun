@@ -1,5 +1,82 @@
 # Engine changelog
 
+## 2026-11-14 — Phone speed: thread pool hand-off, Qwen3.5-0.8B, prefill API
+
+Branch `orange/phone-speed`, for the Orange Android app (`Project Orange/Orange/android`).
+
+**Before.** On the x86_64 Android emulator Qwen3-0.6B decoded at ~20 tok/s on
+one thread and got *slower* with every thread added (13 at 2, 9.6-11 at 4,
+7-8 at 6). Cause: every pool job woke the workers through a mutex + condition
+variable and waited for them the same way; a decoded token is ~230 jobs, and
+each futex round trip costs hundreds of microseconds inside the VM (on a phone,
+waking a core from idle costs the same kind of time). Qwen3.5-0.8B loaded but
+every prefill failed: the DeltaNet mixer only accepted the 2B's shape.
+
+**Changes.**
+- `threadpool.cpp`: spin-then-sleep hand-off (workers spin on an atomic job
+  counter for `FISH_SPIN_US`, default 2000 us, yielding after 50 us, then park;
+  the caller spins for completion and only takes the mutex when a worker
+  sleeps). Workers above `fish_set_threads`' limit park on their own condition
+  variable. Default thread count on Linux/Android with mixed cores: fast cores
+  only (`cpu_capacity` >= 40% of the top, else `cpuinfo_max_freq` >= 70%); on
+  ARM the core count no longer comes from `/proc/cpuinfo` (no core ids there,
+  so the old default was 1 thread on every phone). New `fish_test_threadpool`.
+- `ops.cpp`: matrices that share an input (q|k|v, gate|up, the DeltaNet input
+  projections, qwen35 q|gate+k+v) run as one pool job on the CPU.
+- `quant_x86.cpp`: AVX2/FMA/F16C detected with CPUID + XGETBV instead of
+  `__builtin_cpu_supports` (the NDK clang rejects "f16c").
+- `model.cpp`: qwen35 DeltaNet geometry from metadata (q/k heads x state,
+  v heads = `ssm.time_step_rank`, `ssm.inner_size` as the z / ssm_out width,
+  any conv kernel up to 8): Qwen3.5-0.8B (n_embd 1024, inner 2048) runs.
+- C ABI 5: `fish_prefill(ctx, prompt, add_bos)`; a generate whose prompt is
+  exactly the cache samples at once from the kept logits (also on hybrid
+  models); `fish_cancel` is honoured between the layers of a prefill batch
+  (hybrid state restored from a per-batch snapshot); recurrent-state
+  checkpoints let a hybrid model fall back to an earlier prefix instead of
+  re-prefilling from zero (`FISH_CHECKPOINTS`, default 3, ~20 MB each).
+- `fish_bench` (C-ABI benchmark, cross-compiles for Android): speed, greedy
+  ids, `--prefill`, `--cancel-ms`, `--partial`.
+
+**Result.** Qwen3-0.6B Q4_K_M decode tok/s, 128-token prompt, 64 tokens,
+greedy. Emulator: `Orange_Pixel`, x86_64, 6 vCPU, with the Orange app running
+beside it (75-110% CPU of 600%), so treat +-15% as noise:
+
+| threads | emulator before | emulator after | PC before | PC after |
+|---|---|---|---|---|
+| 1 | 17.8-20.7 | 23.2-25.3 | 16.7 | 18.8-21.7 |
+| 2 | 13.1-15.2 | 26.8-35.4 | 25.3 | 36.2 |
+| 4 | 9.6-11.1 | 37.1-42.1 | 35.9 | 42.1-46.0 |
+| 6 | 6.7-7.9 | 20.7-26.8 | 37.3 | 47.9-48.0 |
+
+(PC: Ryzen 7 7435HS, CPU only, also busy with other work.) At 6 threads the
+emulator competes with the app for its 6 vCPUs; 4 is the best setting there.
+Qwen3.5-0.8B on the emulator: 28.6-29.0 tok/s decode at 2-4 threads, prefill
+165 tok/s at 4. Greedy output of Qwen3.5-2B is bit-identical before/after
+(48 tokens, PC). Qwen3.5-0.8B vs the original bf16 model in `transformers`
+(CPU, teacher-forced over FISH's greedy tokens): FISH's token is the
+reference top-1 at 26/32 and 28/32 positions and top-3 at 31/32 and 32/32
+(Q4_K_M vs bf16).
+
+Time to first token with `fish_prefill` (PC, 6 threads, `fish_bench
+--partial`, system prompt cached first): 0.8B 0.159 s; with the partial user
+text prefilled while "speaking" 0.085 s; partial text revised by the final
+transcript 0.116 s (checkpoint fallback). 2B: 0.414 / 0.201 / 0.309 s.
+Cancel inside a 256-token prefill batch: 17-155 ms instead of seconds.
+
+**Tests.** `fish_test_kernels`, `fish_test_kernels_emu`, `fish_test_m1`,
+`fish_test_m2`, `fish_test_threadpool` pass (PC); `test_fish.py` passes on
+Llama-3.2-1B and Qwen3.5-2B except "1B fits entirely in RAM", which fails the
+same way with the old `fish.dll` (free RAM on this PC). Vulkan desktop build
+compiles. arm64-v8a cross-compiles with the NDK (SDOT emitted, runtime HWCAP
+check); the app's JNI layer builds against this tree for x86_64 and arm64,
+with and without its x86 shim.
+
+**Not yet.** No real phone: NEON / dotprod kernels and the fast-core default
+never ran on ARM hardware. No i8mm (SMMLA) path: it would help prefill (2x2
+int8 tiles), not decode. Qwen 3.5 files with more v heads than q/k heads (the
+9B shape) were not available, so that mapping is untested. Prefill is still
+one (row, token) dot at a time; a multi-token kernel is the next prefill win.
+
 ## 2026-11-09 — NEON kernels for arm64 (Apple Silicon)
 
 **Before.** arm64 builds had no SIMD path: `quant_x86.cpp` (AVX2) was the only
