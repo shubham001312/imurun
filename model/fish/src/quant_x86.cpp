@@ -28,6 +28,7 @@
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
 
+#include <cpuid.h>
 #include <immintrin.h>
 #include <cstring>
 
@@ -571,9 +572,23 @@ FISH_AVX2 static void quantize_acts_k_avx2(const float* x, uint64_t n, Q8ActK* o
 
 } // namespace
 
+// Straight CPUID instead of __builtin_cpu_supports: the Android NDK's clang
+// rejects the "f16c" feature string at compile time, and the kernel
+// installer is a static initialiser that may run before the compiler
+// runtime has filled in its CPU model. Needs AVX2 + FMA + F16C and the OS
+// saving the YMM state (OSXSAVE, XCR0 bits 1 and 2).
 bool fish_x86_avx2() {
-    return __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") &&
-           __builtin_cpu_supports("f16c");
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (!__get_cpuid(0, &a, &b, &c, &d) || a < 7) return false;
+    __get_cpuid(1, &a, &b, &c, &d);
+    const bool fma = (c >> 12) & 1, osxsave = (c >> 27) & 1;
+    const bool avx = (c >> 28) & 1, f16c = (c >> 29) & 1;
+    if (!(fma && osxsave && avx && f16c)) return false;
+    unsigned xlo = 0, xhi = 0;
+    __asm__ __volatile__("xgetbv" : "=a"(xlo), "=d"(xhi) : "c"(0));
+    if ((xlo & 0x6) != 0x6) return false;
+    __get_cpuid_count(7, 0, &a, &b, &c, &d);
+    return (b >> 5) & 1;   // AVX2
 }
 
 void fish_install_x86(QuantKernels& k,
